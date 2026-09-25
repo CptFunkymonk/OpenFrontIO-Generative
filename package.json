@@ -22,6 +22,7 @@
     "test:matchmaking:cancel": "node tests/matchmaking/e2e-cancel.mjs",
     "perf": "npx tsx tests/perf/run-all.ts",
     "perf:game": "npx tsx tests/perf/fullgame/FullGamePerf.ts",
+    "arena": "tsx src/agent/arena/Arena.ts",
     "replay:game": "npx tsx tests/replay/ReplayGame.ts",
     "perf:client": "npx tsx tests/perf/client/ClientUpdatePerf.ts",
     "perf:client-mem": "npx tsx tests/perf/client/ClientMemoryPerf.ts",

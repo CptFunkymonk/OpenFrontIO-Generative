@@ -34,11 +34,39 @@ export async function launch({ viewport, rafIntervalMs, args } = {}) {
     env.FONTCONFIG_FILE = path.join(CACHE, "fonts.conf");
   }
   const browser = await chromium.launch({
-    args: ["--no-sandbox", "--disable-gpu", ...(args ?? [])],
+    args: [
+      "--no-sandbox",
+      "--disable-gpu",
+      // Chrome 141+ no longer falls back to SwiftShader silently.
+      "--enable-unsafe-swiftshader",
+      ...(args ?? []),
+    ],
     env,
   });
   const context = await browser.newContext({
     viewport: viewport ?? { width: 1400, height: 1000 },
+  });
+  // The client refuses software WebGL (src/client/render/gl/initGL.ts gates
+  // on failIfMajorPerformanceCaveat and the renderer string), and headless
+  // Chromium only has SwiftShader. Present SwiftShader as a GPU, in this
+  // test browser only.
+  await context.addInitScript(() => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === "webgl2" && attrs?.failIfMajorPerformanceCaveat) {
+        attrs = { ...attrs, failIfMajorPerformanceCaveat: false };
+      }
+      return getContext.call(this, type, attrs);
+    };
+    const getParameter = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function (pname) {
+      const value = getParameter.call(this, pname);
+      const UNMASKED_RENDERER_WEBGL = 0x9246;
+      return pname === UNMASKED_RENDERER_WEBGL &&
+        /swiftshader|llvmpipe|software/i.test(String(value))
+        ? "Headless test GPU"
+        : value;
+    };
   });
   if (rafIntervalMs) {
     await context.addInitScript((interval) => {

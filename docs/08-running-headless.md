@@ -5,18 +5,25 @@ Every command in this chapter was **executed and verified** on this checkout
 
 ## 8.1 Install — the gotcha you will hit first
 
-`package.json` requires `node >=24.15.0 <25` and `.npmrc` sets
-`engine-strict=true`, so `npm ci` fails with `EBADENGINE` on node 22.
+`package.json` requires `node >=24.15.0 <25` and `npm >=12.1.0 <13`, and
+`.npmrc` sets `engine-strict=true`, so `npm ci` fails with `EBADENGINE` on the
+cloud image's default node 22. CI and the Dockerfile use Node 24 with
+`npm install --global npm@12.1.0`.
+
+In Claude Code on the web, `.claude/hooks/session-start.sh` provisions exactly
+that (Node 24.21.0 into `/opt/node24`, npm 12.1.0, `npm run inst`, and the
+Playwright that matches the pre-installed Chromium) and puts Node 24 on the
+session's PATH. It is idempotent: a cached container starts in ~0.2 s, a fresh
+one in ~16 s.
 
 ```bash
-npm ci --ignore-scripts --engine-strict=false
-# VERIFIED: 675 packages, 16 s, node v22.22.2
+CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh   # by hand, if needed
 ```
 
-Everything below then works on node 22 (warnings only). Do **not** use
-`npm install` — repo policy; `npm run inst` is the blessed alias.
+Do **not** use `npm install` — repo policy; `npm run inst` is the blessed alias.
 
-> The engines field disagrees with reality: node 22 runs the full suite green.
+> Fallback without the hook: `npm ci --ignore-scripts --engine-strict=false`
+> on node 22 also runs the full suite green (verified before the hook existed).
 
 ## 8.2 Test suite — VERIFIED
 
@@ -234,12 +241,14 @@ lobby"` is expected — the closed-source API worker is not in this repo.
 ## 8.9 Browser-driven headless
 
 The repo ships a Playwright harness at **`.claude/skills/run-openfront/`**
-(`SKILL.md`, `setup.sh`, `driver.mjs`, `game.mjs`):
+(`SKILL.md`, `setup.sh`, `driver.mjs`, `game.mjs`, `autopilot.mjs`). In the
+cloud environment Chromium is pre-installed and the session hook installs the
+matching Playwright, so `setup.sh` is only needed on other hosts:
 
 ```bash
-bash .claude/skills/run-openfront/setup.sh
 (npm run dev > /tmp/dev.log 2>&1 &)             # vite on :9000, NOT 5173
 node .claude/skills/run-openfront/game.mjs
+node .claude/skills/run-openfront/autopilot.mjs baseline Iceland 90   # an agent plays, see 10-agent-interface.md
 ```
 
 Exported helpers: `startSoloGame`, `gameState`, `findSpawnTile`, `spawn`,
@@ -247,6 +256,12 @@ Exported helpers: `startSoloGame`, `gameState`, `findSpawnTile`, `spawn`,
 `clickWorld`, `panTo`, `setAttackRatio`, `openRadialMenu`.
 
 Critical notes from that skill:
+- **The client refuses software WebGL** (`src/client/render/gl/initGL.ts`
+  requests `failIfMajorPerformanceCaveat` and rejects SwiftShader/llvmpipe
+  renderer strings), and headless Chromium only has SwiftShader.
+  `driver.mjs`'s `launch()` masks both in the test browser and passes
+  `--enable-unsafe-swiftshader`; without it the game never starts
+  (`GLUnavailableError: WebGL2 unavailable: software`).
 - **`launch({ rafIntervalMs: 3000 }) is mandatory in-game.** SwiftShader needs
   seconds per frame; unthrottled rAF starves the main thread and the singleplayer
   turn loop drops to ~0.3 ticks/s instead of 10.

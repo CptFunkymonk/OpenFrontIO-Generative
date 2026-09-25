@@ -23,6 +23,7 @@ most importantly, **there is no population or worker system here**, and
 | [`07-action-api.md`](07-action-api.md) | Every intent schema, tick ordering, observation stream, netcode, win conditions |
 | [`08-running-headless.md`](08-running-headless.md) | Verified recipes for driving the sim without a browser |
 | [`09-playbook.md`](09-playbook.md) | **[DERIVED]** Spawn to victory, decision loop, exploits |
+| [`10-agent-interface.md`](10-agent-interface.md) | How an agent plugs in: the agent API, the headless arena, the browser autopilot, lookahead |
 | [`99-quirks-and-traps.md`](99-quirks-and-traps.md) | Dead code, wrong comments, fork divergences, traps |
 
 ## Conventions
