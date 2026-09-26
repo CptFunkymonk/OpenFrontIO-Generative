@@ -9,15 +9,20 @@ not Vite's default 5173), then drive it with headless Chromium via
 `.claude/skills/run-openfront/driver.mjs`. All paths are relative to the
 repo root.
 
-## Prerequisites (one-time per machine, no sudo)
+## Prerequisites
 
-The host (Ubuntu 26.04, headless) has no browser, and Playwright doesn't
-support 26.04 yet. `setup.sh` works around both: it installs Playwright
-(`--no-save`), downloads the ubuntu24.04 chromium-headless-shell via
-`PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`, extracts the missing system libraries
-from `.deb` packages into `~/.cache/openfront-run/` (no root needed), and
-builds a local fontconfig (the host has no `/etc/fonts`; Skia FATALs
-without one).
+**Claude Code on the web (Ubuntu 24.04):** nothing to do. Chromium is
+pre-installed (`PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`, revision 1194)
+and `.claude/hooks/session-start.sh` installs the matching Playwright 1.56.1
+(`--no-save`) along with Node 24 and the dependencies.
+
+**Other hosts (e.g. headless Ubuntu 26.04 with no browser, no sudo):**
+`setup.sh` installs Playwright (`--no-save`), downloads the ubuntu24.04
+chromium-headless-shell via `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`, extracts
+the missing system libraries from `.deb` packages into
+`~/.cache/openfront-run/` (no root needed), and builds a local fontconfig
+(Skia FATALs without one). It exits immediately where Chromium already
+launches.
 
 ```bash
 bash .claude/skills/run-openfront/setup.sh
@@ -70,8 +75,13 @@ await browser.close();
 
 `game.mjs` drives an actual singleplayer game end-to-end: start, spawn,
 attack/expand, open the radial menu, and read **ground-truth sim state**.
-WebGL works headless via SwiftShader (no extra flags needed), and the
-screenshots show the real rendered map.
+WebGL runs headless on SwiftShader and the screenshots show the real
+rendered map. The client refuses software WebGL
+(`src/client/render/gl/initGL.ts`), so `launch()` passes
+`--enable-unsafe-swiftshader` and, in the test browser only, drops
+`failIfMajorPerformanceCaveat` and masks the SwiftShader renderer string.
+Without that the game never starts: `GLUnavailableError: WebGL2
+unavailable: software` in the console.
 
 Smoke flow (≈2 min: starts a 50-bot game, spawns, expands, opens the
 radial menu, asserts territory growth):
@@ -159,6 +169,20 @@ await browser.close();
   canvas means SwiftShader broke (check `webgl2` context creation and
   `LD_LIBRARY_PATH`/fontconfig from setup.sh).
 
+## Watch an AI agent play (autopilot)
+
+`autopilot.mjs` opens the client with `?agent=<name>`, starts a
+singleplayer game against Impossible nations, and never clicks: the agent
+(`src/agent/`, running in its own Web Worker) spawns and plays. It prints
+the agent's `[agent]` console lines and the player's state every 10 s, and
+writes screenshots plus a JSON trace. Exits non-zero if the agent did not
+spawn. See `docs/10-agent-interface.md`.
+
+```bash
+node .claude/skills/run-openfront/autopilot.mjs baseline Iceland 90
+# /tmp/openfront-run/autopilot-{0..N}.png, /tmp/openfront-run/autopilot-trace.json
+```
+
 ## Run (human path)
 
 `npm run dev`, open http://localhost:9000 in a browser. Useless headless.
@@ -185,7 +209,9 @@ npx vitest tests/MapConsistency.test.ts --run # single file
   `ldd .../chrome-headless-shell | grep "not found"`.
 - **The single-player button is labeled "SOLO!"**, and the DOM has more
   than one (responsive layouts) — use `button:visible` with
-  `hasText: /solo/i`.
+  `hasText: /solo/i`. The modal's Start button is
+  `o-button[translationKey="game_settings.start"]` (it was
+  `single_modal.start`; `startSoloGame` uses the new key).
 - **Lit + Vite HMR**: custom elements can't be re-registered, so an
   already-open tab keeps old component code after an edit. Hard-reload
   (or re-`goto`) before judging behavior.

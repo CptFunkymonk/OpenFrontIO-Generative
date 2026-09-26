@@ -1,5 +1,6 @@
 import { ClientEnv, NoServerError } from "src/client/ClientEnv";
 import { ZbContext } from "../../zbin";
+import type { AgentIntent } from "../agent/Agent";
 import {
   CloseCode,
   CloseReason,
@@ -225,6 +226,12 @@ export class SendSpectateEvent implements GameEvent {
   constructor(public readonly spectator: boolean) {}
 }
 
+// An intent chosen by the autopilot agent (see AgentAutopilot). Already a
+// complete, schema-validated gameplay intent, sent exactly like a click's.
+export class SendAgentIntentEvent implements GameEvent {
+  constructor(public readonly intent: AgentIntent) {}
+}
+
 export class Transport {
   // Retry budget for a dropped game socket. The first retry is immediate (a
   // blip should not cost a second), then exponential from the base to the
@@ -338,6 +345,8 @@ export class Transport {
     this.subscribe(SendDeleteUnitIntentEvent, (e) =>
       this.onSendDeleteUnitIntent(e),
     );
+
+    this.subscribe(SendAgentIntentEvent, (e) => this.sendIntent(e.intent));
 
     this.subscribe(SendKickPlayerIntentEvent, (e) =>
       this.onSendKickPlayerIntent(e),

@@ -15,7 +15,11 @@ npm run lint             # Oxlint + ESLint
 npm run lint:fix         # Oxlint + ESLint with auto-fix
 npm run format           # Prettier
 npm run build-prod       # Production build
+npm run arena            # AI agent vs Impossible nations on random maps, headless
 ```
+
+Cloud sessions get Node 24 + npm 12 (required by `engines`) from
+`.claude/hooks/session-start.sh`; the image's default Node 22 fails `npm ci`.
 
 **Run a single test file:**
 
@@ -71,6 +75,30 @@ The game server only serves `index.html` and the WebSocket. All other assets (JS
 ## UI Text / i18n
 
 All user-visible text must go through `translateText()` and have a corresponding entry added to `resources/lang/en.json`. Translations are managed via Crowdin. DO NOT modify any other translation files.
+
+## AI Agent (`src/agent/`)
+
+This fork exists to build an AI that beats the built-in Nation AI on any map.
+Guide: `docs/10-agent-interface.md`; game mechanics: `docs/00-overview.md`
+onward (chapter 09 is strategy).
+
+- An agent implements `Agent` (`src/agent/Agent.ts`): it reads `ctx.game`, the
+  full simulation state, and acts only through `ctx.send(intent)`, rate
+  limited like a real client. **Never call a mutating method on `ctx.game`**;
+  verify with `--isolate`.
+- One agent runs unchanged in the headless arena (Node) and in the browser as
+  an autopilot in its own Web Worker (`?agent=<name>`). Never put agent logic
+  on the page's main thread.
+- Register agents in `src/agent/agents/index.ts`; keep `src/agent/` free of
+  DOM and Node APIs, except `src/agent/arena/` (Node only).
+
+```bash
+npm run arena -- --games 16                     # vs Impossible nations, random maps
+npm run arena -- --agent a --agent b --games 32 # paired A/B on identical games
+npm run arena -- --isolate --games 2            # proves an agent never mutates the game
+npm run arena -- --images --image-every 5       # territory PNGs to inspect
+npx vitest tests/agent --run
+```
 
 ## Testing Patterns
 

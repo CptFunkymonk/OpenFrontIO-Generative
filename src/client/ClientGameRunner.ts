@@ -11,6 +11,7 @@ import {
   LobbyInfoEvent,
   PlayerCosmeticRefs,
   ServerMessage,
+  Turn,
 } from "../core/Schemas";
 import { findClosestBy, replacer } from "../core/Util";
 import {
@@ -34,6 +35,7 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import { WorkerClient } from "../core/worker/WorkerClient";
+import { AgentAutopilot } from "./AgentAutopilot";
 import { isDesktopShell } from "./DesktopShell";
 import { GameMetrics } from "./GameMetrics";
 import { showInGameAlert } from "./InGameModal";
@@ -700,6 +702,12 @@ async function createClientGame(
   const atlasDataLoad = preloadAtlasData();
   const worker = new WorkerClient(lobbyConfig.gameStartInfo, clientID);
   await worker.initialize();
+  const autopilot = AgentAutopilot.maybeStart(
+    lobbyConfig.gameStartInfo,
+    clientID,
+    eventBus,
+    lobbyConfig.gameRecord !== undefined || lobbyConfig.spectator === true,
+  );
   await atlasDataLoad;
   const gameView = new GameView(
     worker,
@@ -901,8 +909,10 @@ async function createClientGame(
       graphicsListenerAbort,
       disposeRenderer,
       metrics,
+      autopilot,
     );
   } catch (err) {
+    autopilot?.stop();
     soundManager.dispose();
     throw err;
   }
@@ -937,6 +947,7 @@ export class ClientGameRunner {
     private graphicsListenerAbort: AbortController | null = null,
     private disposeRenderer: (() => void) | null = null,
     private metrics: GameMetrics | null = null,
+    private autopilot: AgentAutopilot | null = null,
   ) {
     this.lastMessageTime = Date.now();
   }
@@ -1014,6 +1025,7 @@ export class ClientGameRunner {
       this.transport.turnComplete();
       gu.updates[GameUpdateType.Hash].forEach((hu: HashUpdate) => {
         this.eventBus.emit(new SendHashEvent(hu.tick, hu.hash));
+        this.autopilot?.sendHash(hu.tick, hu.hash);
       });
       this.gameView.update(gu);
       this.webglBuilder?.update(this.gameView);
@@ -1079,13 +1091,13 @@ export class ClientGameRunner {
             continue;
           }
           while (turn.turnNumber - 1 > this.turnsSeen) {
-            this.worker.sendTurn({
+            this.sendTurn({
               turnNumber: this.turnsSeen,
               intents: [],
             });
             this.turnsSeen++;
           }
-          this.worker.sendTurn(turn);
+          this.sendTurn(turn);
           this.turnsSeen++;
         }
       }
@@ -1153,7 +1165,7 @@ export class ClientGameRunner {
             `got wrong turn have turns ${this.turnsSeen}, received turn ${message.turn.turnNumber}`,
           );
         } else {
-          this.worker.sendTurn(
+          this.sendTurn(
             // Filter out pause intents in replays
             this.gameView.config().isReplay()
               ? {
@@ -1174,7 +1186,14 @@ export class ClientGameRunner {
     this.transport.rejoinGame(0);
   }
 
+  /** Hands a turn to the game worker and, if one is running, the autopilot. */
+  private sendTurn(turn: Turn) {
+    this.worker.sendTurn(turn);
+    this.autopilot?.sendTurn(turn);
+  }
+
   public stop() {
+    this.autopilot?.stop();
     this.soundManager.dispose();
     this.graphicsListenerAbort?.abort();
     // Detach the input handler's window/canvas listeners and its EventBus

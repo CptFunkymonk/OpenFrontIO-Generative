@@ -5,6 +5,14 @@
 # .deb packages.
 set -euo pipefail
 
+# Hosts where Chromium already launches need none of this. In Claude Code on
+# the web it is pre-installed (PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers) and
+# .claude/hooks/session-start.sh installs the matching Playwright.
+if node -e "require('playwright').chromium.launch({ args: ['--no-sandbox'] }).then((b) => b.close())" > /dev/null 2>&1; then
+    echo "playwright chromium already launches; nothing to set up"
+    exit 0
+fi
+
 CACHE="${OPENFRONT_RUN_CACHE:-$HOME/.cache/openfront-run}"
 mkdir -p "$CACHE/debs" "$CACHE/fonts" "$CACHE/fc-cache"
 
