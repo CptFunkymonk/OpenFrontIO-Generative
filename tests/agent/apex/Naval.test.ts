@@ -1,13 +1,22 @@
 import type { AgentIntent, SendResult } from "../../../src/agent/Agent";
-import { tribeSizing } from "../../../src/agent/agents/apex/controllers/ExpansionController";
+import {
+  ExpansionController,
+  tribeSizing,
+} from "../../../src/agent/agents/apex/controllers/ExpansionController";
 import {
   beachheadFront,
   blocked,
   BOAT_TARGETS,
   boatTrigger,
+  busyTargets,
+  freePocket,
+  hostileWarships,
   landmassFood,
   NavalController,
+  navalMemory,
+  nearWarship,
   PROBE_TTL,
+  tribeEaten,
 } from "../../../src/agent/agents/apex/controllers/NavalController";
 import { homeFloors } from "../../../src/agent/agents/apex/HomeTarget";
 import {
@@ -28,8 +37,10 @@ import {
   OwnerGrid,
   ownerGrid,
   RaceGrid,
+  voyageAt,
+  voyageField,
 } from "../../../src/agent/lib/RaceField";
-import { createPurse, Scheduler } from "../../../src/agent/lib/Scheduler";
+import { createPurse, Prio, Scheduler } from "../../../src/agent/lib/Scheduler";
 import { scanWorld, WorldModel } from "../../../src/agent/lib/WorldModel";
 import { Config } from "../../../src/core/configuration/Config";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
@@ -240,7 +251,7 @@ function rig(game: Game, over: Record<string, unknown> = {}): Rig {
 function view(r: Rig): View {
   const { game, me, o, s, models, nm } = r;
   const tick = game.ticks();
-  r.ledger.observe(me, tick);
+  r.ledger.observe(me, tick, game);
   r.wm = scanWorld(game, me, r.wm);
   if (r.owners === null || tick - r.owners.stamp >= 100) {
     const stride = Math.max(
@@ -277,6 +288,7 @@ function view(r: Rig): View {
 /** One agent tick (a decision every thinkEvery ticks), then one game tick. */
 function tick(r: Rig): void {
   const v = view(r);
+  r.ctrl.onTick(v, r.s);
   if (v.tick - r.s.timers.lastThink >= r.o.thinkEvery) {
     r.s.timers.lastThink = v.tick;
     r.probes.push(0);
@@ -354,6 +366,53 @@ describe("NavalController", () => {
     expect(sent).toHaveLength(1);
   });
 
+  test("warships: no boat while a hostile warship guards the route; an ally's does not count, and the option turns the guard off", async () => {
+    for (const mode of ["hostile", "allied", "off"] as const) {
+      const game = await setup(
+        "ocean_and_land",
+        GAME_CONFIG,
+        [new PlayerInfo("agent", PlayerType.Human, ME, MY_ID)],
+        undefined,
+        Config,
+      );
+      const r = rig(game, mode === "off" ? { boatAvoidWarships: false } : {});
+      fill(game, r.me, 0, 8, 0, 16);
+      r.me.setSpawnTile(game.ref(3, 8));
+      r.me.setTroops(60_000);
+      const navy = game.addPlayer(
+        new PlayerInfo("navy", PlayerType.Nation, null, "NATION01"),
+      );
+      navy.conquer(game.ref(0, 0));
+      // Mid-channel, between our shore (x 7) and the island (x 14-15). No
+      // WarshipExecution runs, so it never moves or shoots.
+      const sea = game.ref(11, 8);
+      expect(game.isWater(sea)).toBe(true);
+      navy.buildUnit(UnitType.Warship, sea, { patrolTile: sea });
+      if (mode === "allied") navy.createAllianceRequest(r.me)!.accept();
+      expect(hostileWarships(game, r.me)).toEqual(
+        mode === "allied" ? [] : [11, 8],
+      );
+      const start = game.ticks();
+      while (game.ticks() < start + 100) tick(r);
+      if (mode === "hostile") {
+        expect(boats(r)).toHaveLength(0);
+        expect(r.s.log.some((l) => l.includes("guarded by 1 warships"))).toBe(
+          true,
+        );
+      } else {
+        expect(boats(r).length).toBeGreaterThanOrEqual(1);
+      }
+    }
+    // The route test: distance from the segment, not from its ends.
+    const game = synthGame(400, 10, (x) => x < 2);
+    const a = game.ref(0, 0);
+    const b = game.ref(399, 0);
+    const range = game.config().warshipTargettingRange();
+    expect(nearWarship(game, [200, 9], a, b, range)).toBe(true);
+    expect(nearWarship(game, [200, 9], a, a, range)).toBe(false);
+    expect(nearWarship(game, [], a, b, range)).toBe(false);
+  });
+
   test("at most boatProbes canBuild probes per decision; a failed cell is not probed again for PROBE_TTL ticks", () => {
     // 96×32: us on x 0-15, ocean A x 16-23, a nation's strip x 24-31, then
     // ocean B (not connected to A) with 7 free islands we cannot reach.
@@ -371,8 +430,15 @@ describe("NavalController", () => {
       32,
       (x, y) => x < 16 || (x >= 24 && x < 32) || isl(x, y),
     );
+    // The voyage field (o.boatVoyageScore) sees ocean B out of reach and
+    // offers no target, so the probe cap is tested without it.
     for (const probesPer of [2, 1]) {
-      const r = rig(game, probesPer === 2 ? {} : { boatProbes: probesPer });
+      const r = rig(
+        game,
+        probesPer === 2
+          ? { boatVoyageScore: false }
+          : { boatVoyageScore: false, boatProbes: probesPer },
+      );
       if (r.me.numTilesOwned() === 0) {
         fill(game, r.me, 0, 16, 0, 32);
         r.me.setSpawnTile(game.ref(8, 16));
@@ -411,6 +477,13 @@ describe("NavalController", () => {
         expect(ticks[i] - ticks[i - 1]).toBeGreaterThanOrEqual(r.o.boatEvery);
       }
     }
+    // With the voyage field no probe is spent on the unreachable ocean.
+    const r = rig(game);
+    r.me.setTroops(100_000);
+    const start = game.ticks();
+    while (game.ticks() < start + 300) tick(r);
+    expect(r.probed).toHaveLength(0);
+    expect(boats(r)).toHaveLength(0);
   });
 
   test("never more than boatMaxNumber at sea, one per island; water priority keeps them going", () => {
@@ -615,5 +688,362 @@ describe("NavalController", () => {
     expect(
       boats(run({ waterMapLand: 0.9, boatMinTroops: 90_000 }).r),
     ).toHaveLength(0);
+  });
+
+  test("a tribe that a nation eats gets no boat (the landing would be the nation's by launch or during the voyage)", () => {
+    // 96×32: us x 0-15; an island of a weak tribe (x 40-51) that a rich
+    // nation (x 52-59) touches.
+    const game = synthGame(
+      96,
+      32,
+      (x, y) => x < 16 || (x >= 40 && x < 60 && y >= 10 && y < 22),
+    );
+    const me = game.player(MY_ID);
+    fill(game, me, 0, 16, 0, 32);
+    me.setSpawnTile(game.ref(8, 16));
+    const tribe = game.addPlayer(
+      new PlayerInfo("tribe", PlayerType.Bot, null, "TRIBE001"),
+    );
+    fill(game, tribe, 40, 52, 10, 22);
+    tribe.setTroops(2_000);
+    const nation = game.addPlayer(
+      new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+    );
+    fill(game, nation, 52, 60, 10, 22);
+    nation.setTroops(400_000);
+    const run = (over: Record<string, unknown>) => {
+      me.setTroops(100_000);
+      const r = rig(game, over);
+      const start = game.ticks();
+      while (game.ticks() < start + 30) tick(r);
+      return r;
+    };
+    const eaten = run({});
+    expect(boats(eaten)).toHaveLength(0);
+    expect(navalMemory(eaten.s).stats.eaten).toBeGreaterThan(0);
+    const v = view(eaten);
+    const land = game.ref(40, 15);
+    expect(tribeEaten(v, tribe, land)).toMatch(/can eat it/);
+    // A poor nation next to it: only the radius rule, at the far shore.
+    nation.setTroops(100);
+    expect(tribeEaten(v, tribe, land)).toBeNull();
+    expect(tribeEaten(v, tribe, game.ref(51, 10))).toMatch(/near the landing/);
+    nation.setTroops(400_000);
+    // Off: the boat goes to the tribe.
+    const off = run({ boatAvoidEatenTribes: false });
+    expect(
+      boats(off).filter((b) => {
+        const x = game.x(b.intent.dst);
+        return x >= 40 && x < 52;
+      }),
+    ).toHaveLength(1);
+  });
+
+  test("a boat whose landing a nation takes during the voyage is turned back (boatCancelOnFlip)", () => {
+    for (const on of [true, false]) {
+      // 96×32: us x 0-15; a tribe island x 70-81; a nation's islet x 90-95.
+      const game = synthGame(
+        96,
+        32,
+        (x, y) => x < 16 || (x >= 70 && x < 82 && y >= 10 && y < 22) || x >= 90,
+      );
+      const r = rig(game, on ? {} : { boatCancelOnFlip: false });
+      fill(game, r.me, 0, 16, 0, 32);
+      r.me.setSpawnTile(game.ref(8, 16));
+      r.me.setTroops(100_000);
+      const tribe = game.addPlayer(
+        new PlayerInfo("tribe", PlayerType.Bot, null, "TRIBE001"),
+      );
+      fill(game, tribe, 70, 82, 10, 22);
+      tribe.setTroops(2_000);
+      const nation = game.addPlayer(
+        new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+      );
+      fill(game, nation, 90, 96, 0, 32);
+      const start = game.ticks();
+      while (
+        game.ticks() < start + 40 &&
+        r.me.unitCount(UnitType.TransportShip) === 0
+      ) {
+        tick(r);
+      }
+      const ship = r.me.units(UnitType.TransportShip)[0];
+      expect(ship).toBeDefined();
+      const dst = ship.targetTile()!;
+      expect(game.ownerID(dst)).toBe(tribe.smallID());
+      expect(game.manhattanDist(ship.tile(), dst)).toBeGreaterThanOrEqual(20);
+      // The nation takes the landing tile (the test's hand).
+      nation.conquer(dst);
+      for (let i = 0; i < 5; i++) tick(r);
+      const cancels = r.sent.filter((x) => x.intent.type === "cancel_boat");
+      if (on) {
+        expect(cancels).toHaveLength(1);
+        expect(cancels[0].intent).toEqual({
+          type: "cancel_boat",
+          unitID: ship.id(),
+        });
+        expect(ship.transportShipState().isRetreating).toBe(true);
+        expect(r.s.log.some((l) => l.includes("boat cancel"))).toBe(true);
+      } else {
+        expect(cancels).toHaveLength(0);
+        expect(ship.transportShipState().isRetreating).toBe(false);
+      }
+    }
+  });
+
+  test("busy targets: tribes that border us, this decision's land launch, and a landed free-land boat's landmass", () => {
+    // 96×32: us x 0-15 (on the ocean at y 16-31), a tribe x 16-23, y 0-15
+    // bordering us, a free island at x 60.
+    const game = synthGame(
+      96,
+      32,
+      (x, y) => x < 16 || (x < 24 && y < 16) || islands([[60, 14]])(x, y),
+    );
+    const r = rig(game);
+    fill(game, r.me, 0, 16, 0, 32);
+    r.me.setSpawnTile(game.ref(8, 16));
+    r.me.setTroops(100_000);
+    const tribe = game.addPlayer(
+      new PlayerInfo("tribe", PlayerType.Bot, null, "TRIBE001"),
+    );
+    fill(game, tribe, 16, 24, 0, 16);
+    const sid = tribe.smallID();
+    const v = view(r);
+    expect(v.wm.tribes.map((t) => t.smallID)).toEqual([sid]);
+    // Default: the land allocator's (not on water priority).
+    expect(busyTargets(v, r.race, "blocked").tribes.has(sid)).toBe(true);
+    expect(busyTargets(v, r.race, "water").tribes.has(sid)).toBe(false);
+    // With boatBorderTribes, only a land launch this decision makes it busy.
+    const r2 = rig(game, { boatBorderTribes: true });
+    const v2 = view(r2);
+    expect(busyTargets(v2, r2.race, "stall").tribes.has(sid)).toBe(false);
+    expect(
+      v2.scheduler.offer({
+        intent: { type: "attack", targetID: tribe.id(), troops: 1000 },
+        prio: Prio.Tribe,
+        cls: "tribe",
+        key: `attack:${sid}`,
+      }),
+    ).toBe(true);
+    expect(busyTargets(v2, r2.race, "stall").tribes.has(sid)).toBe(true);
+    expect(blocked(v2)).toBe(false);
+
+    // A free-land boat to the island: its landmass stays busy while it
+    // sails and boatLandmassHold ticks after it landed.
+    const island = r.race.comp[cellOf(r.race, game, game.ref(61, 15))];
+    tribe.setTroops(1_000_000); // too strong to launch at: blocked
+    const r3 = rig(game);
+    let landed = -1;
+    const start = game.ticks();
+    while (game.ticks() < start + 300) {
+      tick(r3);
+      const gone = r3.ledger.allShips().find((x) => x.goneAt !== null);
+      if (gone !== undefined) {
+        landed = gone.goneAt!;
+        break;
+      }
+    }
+    expect(landed).toBeGreaterThan(0);
+    expect(boats(r3)).toHaveLength(1);
+    const now = view(r3);
+    expect(busyTargets(now, r3.race, "blocked").comps.has(island)).toBe(true);
+    while (game.ticks() <= landed + r3.o.boatLandmassHold) {
+      game.executeNextTick();
+    }
+    const later = view(r3);
+    expect(busyTargets(later, r3.race, "blocked").comps.has(island)).toBe(
+      false,
+    );
+  });
+
+  test("voyages: the field follows the sea route; a target past boatMaxVoyage gets no boat", () => {
+    // 400×20: us x 0-9, an island at x 380-383 (a 370-tile voyage).
+    const game = synthGame(
+      400,
+      20,
+      (x, y) => x < 10 || islands([[380, 8]])(x, y),
+    );
+    const run = (over: Record<string, unknown>) => {
+      const r = rig(game, over);
+      if (r.me.numTilesOwned() === 0) {
+        fill(game, r.me, 0, 10, 0, 20);
+        r.me.setSpawnTile(game.ref(5, 10));
+      }
+      r.me.setTroops(100_000);
+      const v = view(r);
+      const f = voyageField(game, r.race, v.wm.shoreSample);
+      const d = voyageAt(f, r.race, cellOf(r.race, game, game.ref(380, 9)));
+      r.ctrl.decide(v, r.s);
+      r.scheduler.flush(
+        (intent) => {
+          r.sent.push({ tick: v.tick, intent });
+          return "ok";
+        },
+        r.ledger,
+        v.tick,
+      );
+      return { r, d };
+    };
+    const far = run({});
+    // About the 370 tiles of open sea (a cell is 3 tiles here).
+    expect(far.d).toBeGreaterThanOrEqual(360);
+    expect(far.d).toBeLessThanOrEqual(380);
+    expect(boats(far.r)).toHaveLength(1);
+    expect(boats(run({ boatMaxVoyage: 300 }).r)).toHaveLength(0);
+    expect(
+      boats(run({ boatVoyageScore: false, boatMaxVoyage: 300 }).r),
+    ).toHaveLength(1);
+  });
+
+  test("route precheck: a warship on the route from our nearest shore skips the target with no canBuild probe", () => {
+    // 400×20: us x 0-9, an island at x 380; a warship mid-way on the route
+    // (190 tiles from the landing, out of reach of the landing check).
+    for (const precheck of [true, false]) {
+      const game = synthGame(
+        400,
+        20,
+        (x, y) =>
+          x < 10 ||
+          islands([
+            [380, 8],
+            [396, 0],
+          ])(x, y),
+      );
+      const r = rig(game, { boatRoutePrecheck: precheck });
+      fill(game, r.me, 0, 10, 0, 20);
+      r.me.setSpawnTile(game.ref(5, 10));
+      r.me.setTroops(100_000);
+      const navy = game.addPlayer(
+        new PlayerInfo("navy", PlayerType.Nation, null, "NATION01"),
+      );
+      navy.conquer(game.ref(398, 1));
+      const sea = game.ref(190, 10);
+      navy.buildUnit(UnitType.Warship, sea, { patrolTile: sea });
+      const start = game.ticks();
+      while (game.ticks() < start + 60) tick(r);
+      expect(boats(r)).toHaveLength(0);
+      if (precheck) {
+        expect(r.probed).toHaveLength(0);
+        expect(navalMemory(r.s).stats.prechecks).toBeGreaterThan(0);
+      } else {
+        expect(r.probed.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("free-land sizing: the pocket at the landing, and on our own landmass only tnSat·S_sat", () => {
+    // 96×32: land y 4-31 with ocean above; us x 0-15, a nation x 16-47
+    // (F = 0), free land x 48-95 behind it on our landmass.
+    const game = synthGame(96, 32, (_x, y) => y >= 4);
+    const troopsWith = (over: Record<string, unknown>) => {
+      const r = rig(game, over);
+      if (r.me.numTilesOwned() === 0) {
+        fill(game, r.me, 0, 16, 4, 32);
+        r.me.setSpawnTile(game.ref(8, 16));
+        const n = game.addPlayer(
+          new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+        );
+        fill(game, n, 16, 48, 4, 32);
+      }
+      r.me.setTroops(100_000);
+      const v = view(r);
+      expect(v.wm.freeFrontier).toBe(0);
+      r.ctrl.decide(v, r.s);
+      r.scheduler.flush(
+        (intent) => {
+          r.sent.push({ tick: v.tick, intent });
+          return "ok";
+        },
+        r.ledger,
+        v.tick,
+      );
+      const b = boats(r);
+      expect(b).toHaveLength(1);
+      expect(game.x(b[0].intent.dst)).toBeGreaterThanOrEqual(48);
+      return { troops: b[0].intent.troops, r };
+    };
+    const plains = { plains: 1, highland: 0, mountain: 0 };
+    const pocket = troopsWith({});
+    const sat = pocket.r.o.tnSat * pocket.r.models.tnSaturation(plains);
+    expect(pocket.troops).toBe(Math.floor(sat));
+    const whole = troopsWith({ boatPocket: false });
+    expect(whole.troops).toBeGreaterThan(1.5 * sat);
+    // freePocket counts the connected free land, up to its limit.
+    const t = game.ref(60, 10);
+    expect(freePocket(game, t, 100)).toBe(100);
+    expect(freePocket(game, t, 1e6)).toBe(48 * 28);
+    expect(freePocket(game, game.ref(5, 10), 100)).toBe(0);
+  });
+
+  test("boat headroom: a tribe landing whose refund would come home over the cap waits, outside stall", () => {
+    const game = synthGame(
+      96,
+      32,
+      (x, y) => x < 16 || (x >= 28 && x < 40 && y >= 10 && y < 22),
+    );
+    const me = game.player(MY_ID);
+    fill(game, me, 0, 16, 0, 32);
+    me.setSpawnTile(game.ref(8, 16));
+    const weak = game.addPlayer(
+      new PlayerInfo("weak", PlayerType.Bot, null, "TRIBE001"),
+    );
+    fill(game, weak, 28, 40, 10, 22);
+    weak.setTroops(2_000);
+    const run = (over: Record<string, unknown>) => {
+      const r = rig(game, over);
+      // Home far over the cap: every refund would be cut.
+      me.setTroops(3 * r.models.cap(me));
+      const v = view(r);
+      r.ctrl.decide(v, r.s);
+      r.scheduler.flush(
+        (intent) => {
+          r.sent.push({ tick: v.tick, intent });
+          return "ok";
+        },
+        r.ledger,
+        v.tick,
+      );
+      return r;
+    };
+    const held = run({});
+    expect(boats(held)).toHaveLength(0);
+    expect(navalMemory(held.s).stats.headroom).toBeGreaterThan(0);
+    expect(boats(run({ boatHeadroom: false }))).toHaveLength(1);
+  });
+
+  test("blocked() agrees with the allocator: a tribe whose counter-attack the launch must also cancel does not fit", () => {
+    // 96×32: us x 0-15, a tribe on x 16-39 (F = 0), a free island at x 70.
+    const game = synthGame(
+      96,
+      32,
+      (x, y) => x < 40 || islands([[70, 14]])(x, y),
+    );
+    const me = game.player(MY_ID);
+    fill(game, me, 0, 16, 0, 32);
+    me.setSpawnTile(game.ref(8, 16));
+    me.setTroops(100_000);
+    const tribe = game.addPlayer(
+      new PlayerInfo("tribe", PlayerType.Bot, null, "TRIBE001"),
+    );
+    fill(game, tribe, 16, 40, 0, 32);
+    tribe.setTroops(3_000);
+    const r = rig(game);
+    const v = view(r);
+    expect(blocked(v)).toBe(false);
+    // Its attack on us, as the scan would list it: the launch must carry
+    // it on top (it cancels 1:1 at init) and no longer fits.
+    const avail = v.purse.available("tribe");
+    v.wm.incoming.push({
+      id: "counter",
+      attackerSmallID: tribe.smallID(),
+      attackerType: PlayerType.Bot,
+      troops: avail,
+      boat: false,
+      firstSeen: v.tick,
+    });
+    expect(blocked(v)).toBe(true);
+    // The allocator, on the same View, launches nothing at it either.
+    new ExpansionController().decide(v, r.s);
+    expect(v.scheduler.hasKey(`attack:${tribe.smallID()}`)).toBe(false);
   });
 });

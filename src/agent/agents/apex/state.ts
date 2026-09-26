@@ -1,7 +1,8 @@
 import { PlayerID } from "../../../core/game/Game";
 import { TileRef } from "../../../core/game/GameMap";
 import { LedgerData } from "../../lib/Ledger";
-import { AiParams, RelationData } from "../../lib/NationModel";
+import { RelationData } from "../../lib/NationModel";
+import type { View } from "./policy";
 
 // Everything apex remembers between ticks (spec §2.10). Plain data,
 // structuredClone-able, IDs only (PlayerID, smallID, TileRef): everything is
@@ -27,8 +28,8 @@ export interface ApexState {
   ledger: LedgerData;
   /** Tracker events and marks. */
   relations: RelationData;
-  /** Cache. */
-  params: Record<PlayerID, AiParams>;
+  // Spec §2.10's `params` cache is left out: NationModel keeps its own
+  // (nothing ever read or wrote this one).
   web: {
     allySet: PlayerID[];
     food: PlayerID[];
@@ -37,11 +38,15 @@ export interface ApexState {
     lastPlan: number;
   };
   stall: { since: number | null };
+  /** Not in spec §2.10 (o.nukeReflex): enemy bombs in flight will delete
+   *  `lost` finished city levels, and home is above the cap they leave
+   *  (`capAfter`); set each decision. The allocator spends as in stall
+   *  mode while it is set (inStall). */
+  nuke: { lost: number; capAfter: number; at: number } | null;
   timers: {
     lastThink: number;
     lastCity: number;
     lastBoat: number;
-    lastPlan: number;
   };
   /** Boat probe cache: coarse cell -> tick. */
   probes: Record<string, number>;
@@ -54,7 +59,6 @@ export function createState(): ApexState {
     spawn: { planned: null, sentAt: null, endTick: null, mode: "none" },
     ledger: { plans: [], sentThisTick: [], tick: NEVER },
     relations: { values: {}, malusApplied: [] },
-    params: {},
     web: {
       allySet: [],
       food: [],
@@ -63,11 +67,11 @@ export function createState(): ApexState {
       lastPlan: NEVER,
     },
     stall: { since: null },
+    nuke: null,
     timers: {
       lastThink: NEVER,
       lastCity: NEVER,
       lastBoat: NEVER,
-      lastPlan: NEVER,
     },
     probes: {},
     log: [],
@@ -78,4 +82,22 @@ export function createState(): ApexState {
 export function stateLog(s: ApexState, line: string): void {
   s.log.push(line);
   if (s.log.length > LOG_LINES) s.log.splice(0, s.log.length - LOG_LINES);
+}
+
+/**
+ * A controller's log line: through View.log when the policy set it (state
+ * log and host log), else into the state log with its tick and to the live
+ * context's log.
+ */
+export function noteLine(
+  v: Pick<View, "log" | "tick" | "live">,
+  s: ApexState,
+  line: string,
+): void {
+  if (v.log !== undefined) {
+    v.log(line);
+    return;
+  }
+  stateLog(s, `[${v.tick}] ${line}`);
+  v.live?.log(line);
 }

@@ -6,7 +6,13 @@ import {
   seatClientID,
 } from "../../../src/agent/arena/ArenaGame";
 import { NodeMapLoader } from "../../../src/agent/arena/NodeMapLoader";
-import { Ledger, LedgerData, PENDING_TTL } from "../../../src/agent/lib/Ledger";
+import {
+  BOAT_RETREAT_MALUS,
+  GONE_TTL,
+  Ledger,
+  LedgerData,
+  PENDING_TTL,
+} from "../../../src/agent/lib/Ledger";
 import {
   Difficulty,
   Game,
@@ -54,6 +60,16 @@ function fakeMe(attacks: FakeAttack[], ships = 0): Player {
         retreating: () => a.retreating === true,
       })),
     unitCount: (t: UnitType) => (t === UnitType.TransportShip ? ships : 0),
+    units: (t: UnitType) =>
+      t !== UnitType.TransportShip
+        ? []
+        : Array.from({ length: ships }, (_, i) => ({
+            id: () => 1000 + i,
+            targetTile: () => 99,
+            troops: () => 8000,
+            transportShipState: () => ({ isRetreating: false }),
+          })),
+    smallID: () => 1,
   } as unknown as Player;
 }
 
@@ -273,6 +289,126 @@ describe("apex Ledger (§2.5): stand-in attacks", () => {
     expect(l.plan(TRIBE.small)).toBeDefined();
     l.observe(fakeMe([], 0), 81 + PENDING_TTL);
     expect(l.plan(TRIBE.small)).toBeUndefined();
+  });
+
+  test("boats with the game: a boat plan lives only while a ship of ours lands on its target", () => {
+    // Ships by landing tile; the stand-in game maps tile t to owner t.
+    const withShips = (ships: { dst: number; retreating?: boolean }[]) =>
+      ({
+        ...fakeMe([], ships.length),
+        units: (t: UnitType) =>
+          t !== UnitType.TransportShip
+            ? []
+            : ships.map((s, i) => ({
+                id: () => 500 + i,
+                troops: () => 8000,
+                targetTile: () => s.dst,
+                transportShipState: () => ({
+                  isRetreating: s.retreating === true,
+                }),
+              })),
+      }) as unknown as Player;
+    const game = {
+      ownerID: (t: number) => t,
+      manhattanDist: (a: number, b: number) => Math.abs(a - b),
+    } as unknown as Game;
+    const boat = (dst: number): AgentIntent => ({
+      type: "boat",
+      troops: 8000,
+      dst,
+    });
+    const l = new Ledger();
+    l.observe(withShips([]), 10, game);
+    l.recordSend(boat(OTHER.small), 10, "boat", { target: OTHER.small });
+    l.recordSend(boat(TRIBE.small), 10, "boat", { target: TRIBE.small });
+    for (let t = 11; t < 40; t++) {
+      // Only the ship to OTHER is still at sea (TRIBE's landing ended).
+      l.observe(withShips([{ dst: OTHER.small }]), t, game);
+      expect(l.plan(OTHER.small)?.kind).toBe("boat");
+      if (t > 10 + PENDING_TTL) expect(l.plan(TRIBE.small)).toBeUndefined();
+    }
+    // Its ship retreats: the plan ends.
+    l.observe(withShips([{ dst: OTHER.small, retreating: true }]), 40, game);
+    expect(l.plan(OTHER.small)).toBeUndefined();
+    // Without the game, any ship at sea keeps every boat plan (old rule).
+    l.recordSend(boat(TRIBE.small), 50, "boat", { target: TRIBE.small });
+    l.observe(withShips([{ dst: OTHER.small }]), 50 + PENDING_TTL + 1);
+    expect(l.plan(TRIBE.small)?.kind).toBe("boat");
+  });
+
+  test("ships: each keeps its send's target and refund; ships at sea count in expectedRefunds by who owns the landing now", () => {
+    // Stand-ins: ship `id` bound for tile `dst`; the game says who owns it.
+    let owner = TRIBE.small;
+    const ships: {
+      id: number;
+      dst: number;
+      troops: number;
+      retreating?: boolean;
+    }[] = [];
+    const me = {
+      ...fakeMe([]),
+      unitCount: (t: UnitType) =>
+        t === UnitType.TransportShip ? ships.length : 0,
+      units: () =>
+        ships.map((x) => ({
+          id: () => x.id,
+          targetTile: () => x.dst,
+          troops: () => x.troops,
+          transportShipState: () => ({ isRetreating: x.retreating === true }),
+        })),
+      smallID: () => 1,
+    } as unknown as Player;
+    const game = {
+      ownerID: (t: number) => (t === 99 ? owner : 0),
+      manhattanDist: (a: number, b: number) => Math.abs(a - b),
+    } as unknown as Game;
+    const l = new Ledger();
+    l.observe(me, 10, game);
+    // A tribe landing at tile 99 (refund 3,000) and a free-land boat at 7.
+    l.recordSend({ type: "boat", troops: 8000, dst: 99 }, 10, "boat", {
+      target: TRIBE.small,
+      expectedRefund: 3000,
+    });
+    l.recordSend({ type: "boat", troops: 9000, dst: 7 }, 10, null);
+    // The ships show the next tick, the free-land one landing a tile off.
+    ships.push(
+      { id: 41, dst: 99, troops: 8000 },
+      { id: 42, dst: 8, troops: 9000 },
+    );
+    l.observe(me, 11, game);
+    expect(l.ship(41)).toMatchObject({
+      target: TRIBE.small,
+      refund: 3000,
+      sentAt: 10,
+    });
+    expect(l.ship(42)).toMatchObject({ target: 0, dst: 8, refund: 0 });
+    // At sea: the tribe landing's refund (the plan's own counts nothing
+    // while no attack runs), the free-land boat nothing.
+    expect(l.expectedRefunds()).toBe(3000);
+    // A nation takes the landing: the landing will come home in full.
+    owner = 50;
+    l.observe(me, 12, game);
+    expect(l.ship(41)?.target).toBe(TRIBE.small);
+    expect(l.expectedRefunds()).toBe(8000);
+    // It becomes ours: home with the malus; retreating likewise.
+    owner = 1;
+    l.observe(me, 13, game);
+    expect(l.expectedRefunds()).toBe(8000 * (1 - BOAT_RETREAT_MALUS));
+    owner = TRIBE.small;
+    ships[0].retreating = true;
+    l.observe(me, 14, game);
+    expect(l.expectedRefunds()).toBe(8000 * (1 - BOAT_RETREAT_MALUS));
+    // Gone: no refund from the ship; the record stays GONE_TTL ticks.
+    ships.length = 0;
+    l.observe(me, 15, game);
+    expect(l.ship(41)?.goneAt).toBe(15);
+    expect(l.expectedRefunds()).toBe(0);
+    const copy = Ledger.fromData(l.toData());
+    expect(copy.allShips()).toEqual(l.allShips());
+    l.observe(me, 15 + GONE_TTL, game);
+    expect(l.ship(41)).toBeDefined();
+    l.observe(me, 16 + GONE_TTL, game);
+    expect(l.allShips()).toEqual([]);
   });
 
   test("sentThisTick: this tick's accepted intents in order; a new tick starts empty", () => {

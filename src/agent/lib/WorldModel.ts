@@ -15,12 +15,17 @@ import { TerrainMix } from "./Models";
 // pass as `Perception.scanBorder`, plus `outgoingAttacks()`,
 // `incomingAttacks()` and `unitCount`. O(border × 4), under 0.1 ms at 100k
 // tiles. `prev` carries `firstSeen` for incoming attacks. The scan never
-// calls `nearby()` on other players (only on `me`, and only when no free
-// land touches our border: `freeAcrossWater`).
+// calls `nearby()`.
 //
-// Read-only: only getters. `me.nearby()` and `me.unitCount()` write memos
-// keyed by map and unit versions, which are pure functions of the game state
-// (spec §2.1 allows the nearby() memo; unitCount's is the same kind).
+// Not in the scan, unlike spec §2.3: `cap`, `regrowth`, `tnStack`,
+// `incomingNationSum` and `freeAcrossWater`. Nothing read them, and
+// `freeAcrossWater` cost a `me.nearby()` recompute (O(our border)) every
+// decision once no free land touched us: 14% of apex's think time on
+// GiantWorldMap. Callers that need one compute it (`models.cap(me)`,
+// `me.nearby().some((p) => !p.isPlayer())`).
+//
+// Read-only: only getters. `me.unitCount()` writes a memo keyed by the unit
+// version, a pure function of the game state (the kind spec §2.1 allows).
 
 export interface NeighborInfo {
   smallID: number;
@@ -69,19 +74,12 @@ export interface WorldModel {
   tick: number;
   /** me.troops(). */
   home: number;
-  /** config.maxTroops(me). */
-  cap: number;
-  /** config.troopIncreaseRate(me). */
-  regrowth: number;
   tiles: number;
   gold: bigint;
   /** Non-fallout unowned land adjacency (pairs, as `contact`). */
   freeFrontier: number;
   /** Terrain of the unowned tiles in those pairs. */
   freeMix: TerrainMix;
-  /** me.nearby() has TerraNullius and freeFrontier == 0: the only free land
-   *  in reach is across a river (PlayerImpl.shoreReachableNeighbors). */
-  freeAcrossWater: boolean;
   /** Every player whose land touches our border, by smallID, ascending. */
   neighbors: Map<number, NeighborInfo>;
   /** Type Bot, attackable, !friendly; ascending smallID. */
@@ -89,11 +87,7 @@ export interface WorldModel {
   /** Type Nation or Human (friendly ones included); ascending smallID. */
   nations: NeighborInfo[];
   outgoing: OurAttack[];
-  /** Sum of land TN attacks (no sourceTile, not retreating). */
-  tnStack: number;
   incoming: IncomingAttack[];
-  /** Troops of incoming attacks by Nation or Human attackers. */
-  incomingNationSum: number;
   /** me.unitCount(TransportShip). */
   boatsInFlight: number;
   /** ≤ SHORE_SAMPLE ocean-shore border tiles, spread evenly over all of
@@ -133,7 +127,6 @@ export function scanWorld(
   me: Player,
   prev: WorldModel | null,
 ): WorldModel {
-  const config = game.config();
   const mySmallID = me.smallID();
   const contacts = new Map<number, Contact>();
   const freeMix = emptyMix();
@@ -205,20 +198,19 @@ export function scanWorld(
   }
 
   const outgoing: OurAttack[] = [];
-  let tnStack = 0;
   for (const a of me.outgoingAttacks()) {
     const target = a.target();
-    const boat = a.sourceTile() !== null;
-    const retreating = a.retreating();
-    const troops = a.troops();
-    const targetSmallID = target.isPlayer() ? target.smallID() : 0;
-    outgoing.push({ id: a.id(), targetSmallID, troops, boat, retreating });
-    if (targetSmallID === 0 && !boat && !retreating) tnStack += troops;
+    outgoing.push({
+      id: a.id(),
+      targetSmallID: target.isPlayer() ? target.smallID() : 0,
+      troops: a.troops(),
+      boat: a.sourceTile() !== null,
+      retreating: a.retreating(),
+    });
   }
 
   const tick = game.ticks();
   const incoming: IncomingAttack[] = [];
-  let incomingNationSum = 0;
   for (const a of me.incomingAttacks()) {
     const attacker = a.attacker();
     const id = a.id();
@@ -241,30 +233,20 @@ export function scanWorld(
       boat: a.sourceTile() !== null,
       firstSeen,
     });
-    if (isNationType(attackerType)) incomingNationSum += troops;
   }
-
-  const tiles = me.numTilesOwned();
-  const freeAcrossWater =
-    freeFrontier === 0 && tiles > 0 && me.nearby().some((p) => !p.isPlayer());
 
   return {
     tick,
     home: me.troops(),
-    cap: config.maxTroops(me),
-    regrowth: config.troopIncreaseRate(me),
-    tiles,
+    tiles: me.numTilesOwned(),
     gold: me.gold(),
     freeFrontier,
     freeMix,
-    freeAcrossWater,
     neighbors,
     tribes,
     nations,
     outgoing,
-    tnStack,
     incoming,
-    incomingNationSum,
     boatsInFlight: me.unitCount(UnitType.TransportShip),
     shoreSample: spread(shoreScratch, SHORE_SAMPLE),
     borderSize,

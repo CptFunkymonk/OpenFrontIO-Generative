@@ -39,6 +39,7 @@ import {
   PlayerInfo,
   PlayerType,
   Relation,
+  UnitType,
 } from "../../../src/core/game/Game";
 import { createGame } from "../../../src/core/game/GameImpl";
 import { GameMapImpl } from "../../../src/core/game/GameMap";
@@ -65,6 +66,8 @@ const GAME_CONFIG: GameConfig = {
 };
 
 const LAND = 0x80 | 5;
+const OCEAN = 0x20;
+const SHORELINE = 0x40;
 
 interface World {
   game: Game;
@@ -113,6 +116,93 @@ function world(gameID: string): World {
   nation.setTroops(40_000);
   // Nation first, then the players' executions (decay, income), as in a
   // game.
+  game.addExecution(new NationExecution(gameID, nationObj));
+  game.addExecution(new PlayerExecution(us), new PlayerExecution(nation));
+  const nm = new NationModel(game, us, gameID, createModels(game));
+  return {
+    game,
+    config,
+    us,
+    nation,
+    executor: new Executor(game, gameID, undefined),
+    nm,
+    checked: 0,
+    mismatches: [],
+    seen: new Set(),
+  };
+}
+
+/** Terrain bytes of a w×h map, shorelines marked (the pins' rule). */
+function seaTerrain(
+  w: number,
+  h: number,
+  isLand: (x: number, y: number) => boolean,
+): { t: Uint8Array; land: number } {
+  const t = new Uint8Array(w * h);
+  let land = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const l = isLand(x, y);
+      t[y * w + x] = l ? LAND : OCEAN;
+      if (l) land++;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const l = (t[y * w + x] & 0x80) !== 0;
+      for (const [nx, ny] of [
+        [x - 1, y],
+        [x + 1, y],
+        [x, y - 1],
+        [x, y + 1],
+      ]) {
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        if (((t[ny * w + nx] & 0x80) !== 0) !== l) {
+          t[y * w + x] |= SHORELINE;
+          break;
+        }
+      }
+    }
+  }
+  return { t, land };
+}
+
+/** 140×30: the nation's coast x 0-14 with a port, ocean, ours x 125-139. */
+function seaWorld(gameID: string): World {
+  const width = 140;
+  const height = 30;
+  const isLand = (x: number) => x < 15 || x >= 125;
+  const main = seaTerrain(width, height, isLand);
+  const mini = seaTerrain(
+    width / 2,
+    height / 2,
+    (x) => isLand(2 * x) && isLand(2 * x + 1),
+  );
+  const config = new Config(GAME_CONFIG, null, false);
+  const nationObj = new Nation(
+    new Cell(0, 0),
+    new PlayerInfo("nation", PlayerType.Nation, null, NATION_ID),
+  );
+  const game = createGame(
+    [new PlayerInfo("agent", PlayerType.Human, AGENT_CLIENT, AGENT_ID)],
+    [nationObj],
+    new GameMapImpl(width, height, main.t, main.land),
+    new GameMapImpl(width / 2, height / 2, mini.t, mini.land),
+    config,
+  );
+  game.endSpawnPhase();
+  const us = game.player(AGENT_ID);
+  const nation = game.player(NATION_ID);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (x < 15) nation.conquer(game.ref(x, y));
+      else if (x >= 125) us.conquer(game.ref(x, y));
+    }
+  }
+  us.setTroops(60_000);
+  nation.setTroops(40_000);
+  nation.addGold(50_000_000n);
+  nation.buildUnit(UnitType.Port, game.ref(14, 25), {});
   game.addExecution(new NationExecution(gameID, nationObj));
   game.addExecution(new PlayerExecution(us), new PlayerExecution(nation));
   const nm = new NationModel(game, us, gameID, createModels(game));
@@ -214,6 +304,121 @@ describe("RelationTracker", () => {
     const copy = relationTracker(structuredClone(d));
     expect(copy.value("N", 400)).toBe(r.value("N", 400));
     expect(copy.toData()).toEqual(d);
+  });
+
+  test("a reconciled estimate stays in the real band past the next decision", () => {
+    // Clamped right to the edge nearer 0, the estimate left the band at the
+    // next tick (−0.05 decays straight to 0), so every refresh logged the
+    // same mismatch (arena quick@4: 27-50 per game).
+    const bands = [
+      { real: Relation.Hostile, from: 0 },
+      { real: Relation.Distrustful, from: 0 },
+      { real: Relation.Friendly, from: 0 },
+      { real: Relation.Neutral, from: -30 },
+      { real: Relation.Neutral, from: 80 },
+    ];
+    for (const { real, from } of bands) {
+      const r = relationTracker();
+      if (from !== 0) r.onEvent("N", 10, from, "neighbourBreak");
+      r.reconcile("N", real, 10);
+      // A nation decides every 30-49 ticks.
+      for (let t = 10; t < 60; t++) expect(r.band("N", t)).toBe(real);
+      r.reconcile("N", real, 59);
+      expect(r.toData().mismatches).toBe(1);
+    }
+  });
+
+  test("a reconcile marks the estimate clamped until the next event; toData keeps the mark", () => {
+    const r = relationTracker();
+    expect(r.clamped("N")).toBe(false);
+    r.reconcile("N", Relation.Distrustful, 10);
+    expect(r.clamped("N")).toBe(true);
+    const copy = relationTracker(structuredClone(r.toData()));
+    expect(copy.clamped("N")).toBe(true);
+    // A matching band leaves the mark; an event clears it.
+    r.reconcile("N", Relation.Distrustful, 20);
+    expect(r.clamped("N")).toBe(true);
+    r.onEvent("N", 30, -20, "embargoMalus");
+    expect(r.clamped("N")).toBe(false);
+    expect(r.toData().values.N.clamped).toBeUndefined();
+  });
+
+  test("a forecast past a clamp: an untracked drop below Neutral does not decay to Neutral by the answering decision", () => {
+    // The nation's relation to us drops by more than anything the tracker
+    // sees (an untracked −23; warship retaliations were the case in arena
+    // quick@4). A refresh clamps the estimate to −2.6 (the Distrustful edge
+    // less the margin); 40 ticks later it is −0.6, still Distrustful, so no
+    // reconcile fires, and decay alone would reach 0 (Neutral) by a
+    // decision 49 ticks on: p = 1 for a nation that refuses.
+    const w = world("rel-clamp");
+    tick(w, 100);
+    w.us.setTroops(20_000); // no threat branch: H < T
+    (
+      w.nation as unknown as { updateRelation(p: Player, d: number): void }
+    ).updateRelation(w.us, -23);
+    w.nm.refresh(NATION_ID, "full");
+    const t0 = w.game.ticks();
+    expect(w.nm.relations.clamped(NATION_ID)).toBe(true);
+    for (let i = 0; i < 40; i++) {
+      w.game.executeNextTick();
+      w.nm.observe(w.game.ticks());
+    }
+    const now = w.game.ticks();
+    expect(now - t0).toBe(40);
+    expect(w.nation.relation(w.us)).toBe(Relation.Distrustful);
+    expect(w.nm.relations.band(NATION_ID, now)).toBe(Relation.Distrustful);
+    // The tracker alone would call it Neutral at a decision 49 ticks out.
+    expect(w.nm.relations.band(NATION_ID, now + 49)).toBe(Relation.Neutral);
+    for (const lead of [10, 30, 49]) {
+      const f = w.nm.acceptsAlliance(NATION_ID, {
+        kind: "request",
+        createdAt: now,
+        atTick: now + lead,
+        embargoStoppedBy: null,
+      });
+      expect(f.p, `lead ${lead}`).toBe(0);
+      expect(f.branch).toBe("hostile");
+      expect(f.deterministic).toBe(false);
+    }
+    // A tracked estimate (no clamp) still decays: the same value from an
+    // event forecasts Neutral once decayed.
+    const r = relationTracker();
+    r.onEvent(NATION_ID, now, -0.6, "embargoMalus");
+    expect(r.clamped(NATION_ID)).toBe(false);
+    expect(r.band(NATION_ID, now + 49)).toBe(Relation.Neutral);
+  });
+
+  test("warship retaliation: a nation owning our boat's landing builds a warship at it and drops 15; the tracker follows within two ticks", () => {
+    let retaliations = 0;
+    for (const gameID of ["ws-a", "ws-b", "ws-c", "ws-d"]) {
+      const w = seaWorld(gameID);
+      for (let i = 0; i < 100; i++) {
+        w.game.executeNextTick();
+        w.nm.observe(w.game.ticks());
+      }
+      send(w, { type: "boat", troops: 5_000, dst: w.game.ref(14, 5) });
+      let prev = relationValue(w.nation, w.us);
+      let lastDrop = -Infinity;
+      for (let i = 0; i < 60; i++) {
+        w.game.executeNextTick();
+        const t = w.game.ticks();
+        w.nm.observe(t);
+        const real = relationValue(w.nation, w.us);
+        if (real < prev - 14) {
+          retaliations++;
+          lastDrop = t;
+        }
+        prev = real;
+        // The warship shows two turns after the nation's tick.
+        if (t - lastDrop <= 2) continue;
+        expect(w.nm.relations.value(NATION_ID, t), `${gameID} t${t}`).toBe(
+          real,
+        );
+      }
+      expect(w.us.units(UnitType.TransportShip).length).toBeLessThanOrEqual(1);
+    }
+    // 80% at Impossible per boat.
+    expect(retaliations).toBeGreaterThan(0);
   });
 
   test("scripted events in a live world: the estimate equals the game's value at every tick", () => {

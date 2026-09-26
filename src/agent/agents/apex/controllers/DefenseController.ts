@@ -1,24 +1,497 @@
+import {
+  Attack,
+  Player,
+  PlayerID,
+  PlayerType,
+  TerrainType,
+} from "../../../../core/game/Game";
+import { allySlots } from "../../../lib/RaceField";
+import { Prio, Proposal } from "../../../lib/Scheduler";
 import type { Controller, View } from "../policy";
-import type { ApexState } from "../state";
+import { ApexState, NEVER } from "../state";
+import { BORDER_JITTER } from "./ExpansionController";
+
+// Reflexes, every tick, highest priority (spec §3.3). Enabled by `o.defense`.
+//
+//   §3.3.1 absorb          the default: an incoming nation attack is left to
+//                          run; it costs about a/p_def tiles (logged)
+//   §3.3.2 recall          ally the attacker: `embargo stop` plus
+//                          `allianceRequest`, timed so the stop acts before
+//                          the answering decision (o.recall, o.recallMinP)
+//   §3.3.3 free TN cancel  cancel our free-land attack when incoming nation
+//                          troops exceed home − H_vw (o.cancelTnOnThreat)
+//   §3.3.4 hygiene         stop every temporary embargo against a nation at
+//                          once, unless it is a strike target (o.embargoStop)
+//   §3.3.5 never           counter-attacks, breakAlliance, or spending home
+//                          below H_vw: this controller offers none of them,
+//                          but for the counter below (off by default)
+//   counter (not in the    o.counter: after absorbing a fresh land attack of
+//   spec)                  an unallied nation estimated to take counterShare
+//                          of our tiles or more, while home idles at
+//                          counterNearCap of the cap, send it an attack of
+//                          counterMargin of that attack's troops (at most
+//                          home − H). Smaller than its attack, it is deleted
+//                          at init after cancelling as many of its troops,
+//                          and skips the −100 relation hit [PIN AttackMerge]
+//
+// The N3 pin (tests/agent/mechanics/AllianceRecallEmbargo.test.ts) is TRUE,
+// so the recall is on by default. Timing, from §2.1 and the pin:
+// - A nation's attack, created at its decision d0, makes us embargo it at
+//   the attack's init (end of turn d0). We see it at ctx tick d0 + 1.
+// - At each decision the nation applies −20 for our embargo before it
+//   answers requests. A stop sent at ctx tick s acts in turn s + 1 after the
+//   nation's tick, so it counts at decisions d >= s + 2. A request sent at s
+//   is answered at the first decision d > s.
+// - So stop and request go together at tReq = T, unless the nation decides
+//   in turn T + 1: then at T + 1 (the next tick re-evaluates). Every new
+//   attack by it re-creates the embargo; the stop is re-sent while a request
+//   is pending and t <= d − 2 (re-sends and hygiene share one rule: stop
+//   whatever embargo is there and not already being stopped).
+// - A nation that has asked us itself is accepted at once by our request
+//   (AllianceRequestExecution.ts:45-63, +100): no forecast needed.
+//
+// The recall is stateless: while an unallied nation attacks us and a
+// request to it is possible (canSendAllianceRequest: none pending, cooldown
+// over), it is sent when the forecast allows. What must be remembered (stops
+// in flight, the TN cancel, recalls to report) is in ApexState.defense,
+// declared below.
+
+/** Ticks a stop sent at s is in flight: its EmbargoExecution ticks in turn
+ *  s + 1, so the embargo is gone at ctx tick s + 2 (EmbargoExecution.ts:
+ *  31-36). An embargo seen later is a new one. */
+const STOP_IN_FLIGHT = 2;
+/** §3.3.3: at most one free TN cancel per this many ticks. */
+const TN_CANCEL_EVERY = 50;
+
+/** Our memory (spec §2.10: controllers keep none of their own). Declared
+ *  here rather than in state.ts, which another engineer owns; it is created
+ *  on first use and is plain data, so structuredClone and forRollout carry
+ *  it. */
+export interface DefenseMemory {
+  /** Tick of our last embargo stop against each nation. */
+  stops: Record<PlayerID, number>;
+  /** The last free TN cancel: its tick and the attack ids it cancelled. */
+  tnCancel: { at: number; ids: string[] };
+  /** Nation (and human) attacks on us, id -> tick first seen. */
+  seen: Record<string, number>;
+  /** Recalls awaiting their answering decision. */
+  recalls: Record<PlayerID, { at: number; d: number; p: number }>;
+  stats: DefenseStats;
+}
+
+/** Counts for logs and tests; never read by decisions. */
+export interface DefenseStats {
+  /** New nation attacks on us (a merge counts again, as in the arena's
+   *  Recorder). */
+  incoming: number;
+  recalls: number;
+  accepted: number;
+  refused: number;
+  stops: number;
+  tnCancels: number;
+}
+
+declare module "../state" {
+  interface ApexState {
+    /** DefenseController memory (DefenseController.ts). */
+    defense?: DefenseMemory;
+  }
+}
+
+export function defenseMemory(s: ApexState): DefenseMemory {
+  s.defense ??= {
+    stops: {},
+    tnCancel: { at: NEVER, ids: [] },
+    seen: {},
+    recalls: {},
+    stats: {
+      incoming: 0,
+      recalls: 0,
+      accepted: 0,
+      refused: 0,
+      stops: 0,
+      tnCancels: 0,
+    },
+  };
+  return s.defense;
+}
+
+/** Whether a stop against `id` is in flight (the embargo we see is the one
+ *  it ends). */
+export function stopInFlight(
+  s: ApexState,
+  id: PlayerID,
+  tick: number,
+): boolean {
+  const at = s.defense?.stops[id] ?? NEVER;
+  return tick - at < STOP_IN_FLIGHT;
+}
 
 /**
- * Reflexes, every tick, highest priority (spec §3.3). Enabled by
- * `o.defense`. Default: absorb; never cancel by reflex (C12).
+ * Offers `embargo stop` against N (cls "defense", key `embargo:<id>`).
+ * True if a stop is sent this tick or already in flight; false if the
+ * Scheduler refused it.
  */
+export function offerEmbargoStop(
+  v: View,
+  s: ApexState,
+  N: Player,
+  prio: Prio,
+): boolean {
+  const id = N.id();
+  if (stopInFlight(s, id, v.tick)) return true;
+  const ok = v.scheduler.offer({
+    intent: { type: "embargo", targetID: id, action: "stop" },
+    prio,
+    cls: "defense",
+    key: `embargo:${id}`,
+  });
+  if (!ok) return false;
+  const mem = defenseMemory(s);
+  mem.stops[id] = v.tick;
+  mem.stats.stops++;
+  return true;
+}
+
+/** A strike target keeps its embargo (§3.3.4): a strike plan on it. */
+function strikeTarget(v: View, N: Player): boolean {
+  return v.ledger.plan(N.smallID())?.kind === "strike";
+}
+
+interface Attacker {
+  player: Player;
+  troops: number;
+  /** A new attack of its appeared this tick (for the absorb log). */
+  fresh: boolean;
+  /** Our tiles its fresh attacks take by the absorb estimate (§3.3.1). */
+  estimate: number;
+  /** Troops of its first land attack on us, in our incoming list's order
+   *  (the one a counter meets first at init, AttackExecution.ts:157-170),
+   *  retreating ones included; 0 for boats only. */
+  first: number;
+}
+
 export class DefenseController implements Controller {
   readonly name = "defense";
 
   onTick(v: View, s: ApexState): void {
-    // TODO(spec §3.3, §4 step 3):
-    // - §3.3.2 recall by alliance (o.recall, o.recallMinP): embargo stop
-    //   (o.embargoStop) + allianceRequest at tReq, both Prio.Recall; re-offer
-    //   the stop every tick in (tReq, d − 2] while me.hasEmbargoAgainst(N).
-    // - §3.3.3 free TN cancel (o.cancelTnOnThreat), at most one per 50 ticks.
-    // - §3.3.4 embargo hygiene (o.embargoStop): stop within 20 ticks of a
-    //   nation attack, unless N is a strike target.
-    // - §3.3.5 never counter-attack, break alliances, or let home fall below
-    //   H_vw except through snacks.
-    // M3: the soft floor (§5.1.2, o.softFloor) belongs in HomeTarget; the
-    // defense search (§5.1.7, o.defenseSearch) forks via v.lookahead.
+    const mem = defenseMemory(s);
+    this.settleRecalls(v, mem);
+    const { attackers, incoming } = this.scanIncoming(v, mem);
+    // §3.3.3 first: Emergency, and its key must precede the allocator's.
+    this.tnCancel(v, mem, incoming);
+    if (attackers.length > 0) this.recalls(v, s, mem, attackers);
+    this.stops(v, s);
+  }
+
+  // ── Incoming attacks (§3.3.1) ──────────────────────────────────────────
+
+  /** Live incoming nation and human attacks (the scan may be two ticks
+   *  old); logs each new one with the absorb estimate. */
+  private scanIncoming(
+    v: View,
+    mem: DefenseMemory,
+  ): { attackers: Attacker[]; incoming: number } {
+    const { me, tick: t } = v;
+    const by = new Map<number, Attacker>();
+    const seen: Record<string, number> = {};
+    let incoming = 0;
+    const firstOf = new Map<number, number>();
+    for (const a of me.incomingAttacks()) {
+      const p = a.attacker();
+      const ty = p.type();
+      if (ty !== PlayerType.Nation && ty !== PlayerType.Human) continue;
+      const sid = p.smallID();
+      if (!firstOf.has(sid)) firstOf.set(sid, a.troops());
+      const first = mem.seen[a.id()] ?? t;
+      seen[a.id()] = first;
+      const fresh = first === t;
+      const estimate = fresh ? this.logIncoming(v, a, p) : 0;
+      if (fresh) mem.stats.incoming++;
+      if (a.retreating()) continue;
+      incoming += a.troops();
+      const x = by.get(sid);
+      if (x === undefined) {
+        by.set(sid, {
+          player: p,
+          troops: a.troops(),
+          fresh,
+          estimate,
+          first: firstOf.get(sid)!,
+        });
+      } else {
+        x.troops += a.troops();
+        x.fresh ||= fresh;
+        x.estimate += estimate;
+      }
+    }
+    mem.seen = seen;
+    const attackers = [...by.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, x]) => x);
+    return { attackers, incoming };
+  }
+
+  /** §3.3.1: an attack of a troops takes about a/p_def of our tiles, p_def
+   *  its loss per tile against our density. Logged; returned for the
+   *  counter's gate (it has been 3-100× pessimistic, arena showcase). */
+  private logIncoming(v: View, a: Attack, N: Player): number {
+    const { me, models } = v;
+    const troops = a.troops();
+    const r = models.hit(
+      { type: N.type(), tiles: N.numTilesOwned() },
+      {
+        type: PlayerType.Human,
+        tiles: me.numTilesOwned(),
+        troops: me.troops(),
+        isTraitor: me.isTraitor(),
+      },
+      Math.max(1, troops),
+      TerrainType.Plains,
+      Math.max(1, a.borderSize()) + BORDER_JITTER,
+    );
+    const tiles = troops / Math.max(1e-9, r.attackerTroopLoss);
+    v.log?.(
+      `${v.tick} def in ${N.name()} ${Math.round(troops)} ` +
+        `${a.sourceTile() !== null ? "boat" : "land"} ~${Math.round(tiles)} tiles ` +
+        `home=${Math.round(me.troops())} tiles=${me.numTilesOwned()}`,
+    );
+    return tiles;
+  }
+
+  // ── §3.3.2 Recall by alliance ──────────────────────────────────────────
+
+  private recalls(
+    v: View,
+    s: ApexState,
+    mem: DefenseMemory,
+    attackers: Attacker[],
+  ): void {
+    const { o, me, tick: t } = v;
+    if (!o.recall && !o.counter) return;
+    const slots = allySlots(v.game, me, o.allySlotsReserve);
+    let held = me.alliances().length;
+    for (const x of attackers) {
+      const { player: N, fresh } = x;
+      if (N.type() !== PlayerType.Nation || !N.isAlive()) continue;
+      const why = o.recall
+        ? this.recall(v, s, mem, N, held, slots.max)
+        : me.isAlliedWith(N)
+          ? "allied"
+          : "recall off";
+      if (why === null) held++;
+      else if (fresh) {
+        v.log?.(`${t} def absorb ${N.name()}: ${why}`);
+        if (why !== "allied") this.counter(v, x);
+      }
+    }
+  }
+
+  /**
+   * o.counter (not in the spec, §3.3.5 rules counter-attacks out of M2):
+   * a fresh land attack of nation N we absorb, estimated to take at least
+   * counterShare of our tiles, while home is at counterNearCap of the cap
+   * or more: attack N with X = min(counterMargin·a, home − H) troops, a its
+   * first land attack on us. X < a, so our attack cancels X of its troops
+   * and is deleted at init, before the −100 relation hit (the embargo and
+   * its request rejection at init still happen) [PIN AttackMerge]. Ungated
+   * by the cap, it halved Bering's land in a scratch A/B; gated, it moved
+   * Mena from 13th to 8th.
+   */
+  private counter(v: View, x: Attacker): void {
+    const { o, me, tick: t } = v;
+    if (!o.counter || x.first <= 0) return;
+    if (x.estimate < o.counterShare * me.numTilesOwned()) return;
+    const cap = v.purse.floors.cap;
+    if (me.troops() < o.counterNearCap * cap) return;
+    const X = Math.floor(
+      Math.min(o.counterMargin * x.first, v.purse.home - v.purse.floors.H),
+    );
+    if (X < 1 || X >= x.first) return;
+    const N = x.player;
+    const ok = v.scheduler.offer({
+      intent: { type: "attack", targetID: N.id(), troops: X },
+      prio: Prio.Recall,
+      cls: "defense",
+      key: `attack:${N.smallID()}`,
+      spend: { kind: "defense", troops: X },
+      meta: { target: N.smallID() },
+    });
+    if (!ok) return;
+    v.log?.(
+      `${t} def counter ${N.name()} ${X} (its attack ${Math.round(x.first)}, ` +
+        `~${Math.round(x.estimate)} tiles)`,
+    );
+  }
+
+  /** One recall attempt on N; null if sent, else why not (for the log). */
+  private recall(
+    v: View,
+    s: ApexState,
+    mem: DefenseMemory,
+    N: Player,
+    held: number,
+    max: number,
+  ): string | null {
+    const { o, me, nm, tick: t } = v;
+    if (me.isAlliedWith(N)) return "allied";
+    if (held >= max) return `slots ${held}/${max}`;
+    if (!me.canSendAllianceRequest(N)) {
+      return me.outgoingAllianceRequests().some((r) => r.recipient() === N)
+        ? "request pending"
+        : "request cooldown";
+    }
+    const id = N.id();
+    const asked = me
+      .incomingAllianceRequests()
+      .some((r) => r.requestor() === N);
+    if (asked) {
+      // Its own request is pending: ours accepts it at once.
+      if (!this.request(v, s, N)) return "refused by the scheduler";
+      v.log?.(`${t} def recall ${N.name()} by counter-accept`);
+      return null;
+    }
+    // tReq = T unless it decides in turn T + 1 (then wait a tick).
+    const d = nm.nextDecision(id, t + 1);
+    if (d < t + 2) return "it decides next turn";
+    const stop = o.embargoStop && me.hasEmbargoAgainst(N);
+    const stoppedBy = stop
+      ? stopInFlight(s, id, t)
+        ? mem.stops[id]
+        : t
+      : null;
+    const f = nm.acceptsAlliance(id, {
+      kind: "request",
+      createdAt: t,
+      atTick: d,
+      embargoStoppedBy: stoppedBy,
+    });
+    if (f.p < o.recallMinP) return `p=${f.p.toFixed(2)} ${f.branch}`;
+    if (stop && !offerEmbargoStop(v, s, N, Prio.Recall)) {
+      return "refused by the scheduler";
+    }
+    if (!this.request(v, s, N)) return "refused by the scheduler";
+    mem.recalls[id] = { at: t, d, p: f.p };
+    mem.stats.recalls++;
+    v.log?.(
+      `${t} def recall ${N.name()} p=${f.p.toFixed(2)} ${f.branch} ` +
+        `d=${d}${stop ? " +stop" : ""}`,
+    );
+    return null;
+  }
+
+  /** allianceRequest to N at Prio.Recall. cls "defense": the recall never
+   *  waits on the diplomacy class cap. */
+  private request(v: View, s: ApexState, N: Player): boolean {
+    const p: Proposal = {
+      intent: { type: "allianceRequest", recipient: N.id() },
+      prio: Prio.Recall,
+      cls: "defense",
+      key: `ally:${N.id()}`,
+    };
+    if (!v.scheduler.offer(p)) return false;
+    s.web.requested[N.id()] = v.tick;
+    return true;
+  }
+
+  /** Logs each recall once its decision has answered it. */
+  private settleRecalls(v: View, mem: DefenseMemory): void {
+    for (const [id, r] of Object.entries(mem.recalls)) {
+      if (v.tick <= r.d) continue;
+      delete mem.recalls[id];
+      if (!v.game.hasPlayer(id)) continue;
+      const N = v.game.player(id);
+      const ok = v.me.isAlliedWith(N);
+      if (ok) mem.stats.accepted++;
+      else mem.stats.refused++;
+      v.log?.(
+        `${v.tick} def recall ${N.name()} ${ok ? "accepted" : "refused"} ` +
+          `(sent ${r.at}, p=${r.p.toFixed(2)})`,
+      );
+    }
+  }
+
+  // ── Embargo stops: §3.3.2 re-sends and §3.3.4 hygiene ─────────────────
+
+  /**
+   * Every temporary embargo of ours against a nation is stopped as soon as
+   * it is seen, unless the nation is a strike target. At Prio.Recall while
+   * a request of ours to it is pending and the stop still acts before its
+   * answering decision (t <= d − 2), else at Prio.Diplomacy. A permanent
+   * embargo is one we started on purpose, and is kept.
+   */
+  private stops(v: View, s: ApexState): void {
+    const { o, me, nm, tick: t } = v;
+    if (!o.embargoStop) return;
+    const embargoes = me.getEmbargoes();
+    if (embargoes.length === 0) return;
+    const pending = new Map<Player, number>();
+    for (const r of me.outgoingAllianceRequests()) {
+      pending.set(r.recipient(), r.createdAt());
+    }
+    embargoes.sort((a, b) => a.target.smallID() - b.target.smallID());
+    for (const e of embargoes) {
+      const N = e.target;
+      if (!e.isTemporary || N.type() !== PlayerType.Nation) continue;
+      if (!N.isAlive() || strikeTarget(v, N)) continue;
+      const created = pending.get(N);
+      const urgent =
+        created !== undefined && t <= nm.nextDecision(N.id(), created + 1) - 2;
+      offerEmbargoStop(v, s, N, urgent ? Prio.Recall : Prio.Diplomacy);
+    }
+  }
+
+  // ── §3.3.3 Free TN cancel ──────────────────────────────────────────────
+
+  /**
+   * When incoming nation troops exceed home − H_vw, cancel our free-land
+   * attack: it retreats in 20 ticks with no malus (RetreatExecution.ts,
+   * AttackExecution.ts:266-270). The cancel takes the allocator's TN key
+   * (`attack:0`) in its tick and, re-sent, in the next: a TN send in either
+   * would inherit the retreating attack and undo the cancel [PIN
+   * AttackMerge]; from the tick after, the allocator sees it retreating.
+   */
+  private tnCancel(v: View, mem: DefenseMemory, incoming: number): void {
+    const { o, me, tick: t } = v;
+    if (!o.cancelTnOnThreat) return;
+    const last = mem.tnCancel;
+    if (t === last.at + 1) {
+      // The guard tick: our RetreatExecution orders the retreat this turn.
+      for (const id of last.ids) {
+        const a = me.outgoingAttacks().find((x) => x.id() === id);
+        if (a === undefined) continue;
+        v.scheduler.offer(this.cancel(id));
+      }
+      return;
+    }
+    if (incoming <= 0 || t - last.at < TN_CANCEL_EVERY) return;
+    const home = me.troops();
+    const vw = v.purse.floors.vw;
+    if (incoming <= home - vw) return;
+    const ids: string[] = [];
+    let troops = 0;
+    for (const a of me.outgoingAttacks()) {
+      if (a.target().isPlayer() || a.sourceTile() !== null) continue;
+      if (a.retreating() || a.retreated()) continue;
+      if (!v.scheduler.offer(this.cancel(a.id()))) break;
+      ids.push(a.id());
+      troops += a.troops();
+    }
+    if (ids.length === 0) return;
+    mem.tnCancel = { at: t, ids };
+    mem.stats.tnCancels++;
+    v.log?.(
+      `${t} def cancel tn ${Math.round(troops)} (incoming ${Math.round(incoming)} ` +
+        `> home ${Math.round(home)} - vw ${Math.round(vw)})`,
+    );
+  }
+
+  private cancel(attackID: string): Proposal {
+    return {
+      intent: { type: "cancel_attack", attackID },
+      prio: Prio.Emergency,
+      cls: "defense",
+      key: "attack:0",
+    };
   }
 }

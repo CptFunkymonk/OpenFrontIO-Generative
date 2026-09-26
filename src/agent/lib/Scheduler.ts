@@ -141,12 +141,31 @@ export interface SchedulerOptions {
 }
 
 /** Why the last refused offer was refused (for tests and logs). */
-export type Refusal = "key" | "budget" | "classCap" | "purse" | "notBegun";
+export type Refusal =
+  | "key"
+  | "budget"
+  | "classCap"
+  | "purse"
+  | "notBegun"
+  | "dupGuard";
+
+/**
+ * A land attack that inits exactly 20 ticks after a cancel_attack on the same
+ * target absorbs the already-retreated stack while its refund is still paid,
+ * so the troops exist twice (a simulation bug pinned by
+ * tests/agent/mechanics/AttackMerge.test.ts, docs/13-mechanics.md §2.3). We
+ * never exploit it: after any cancel we send, no attack goes out in this
+ * window of ticks, which also covers a tick or two of latency jitter in the
+ * browser. cancel_boat followed by a land click is covered too.
+ */
+export const DUP_GUARD_TICKS: readonly [number, number] = [17, 23];
 
 export interface SchedulerStats {
   offered: number;
   accepted: number;
   refused: Record<Refusal, number>;
+  /** Class-cap refusals by class (logs only). */
+  classCapped: Partial<Record<IntentClass, number>>;
   sent: number;
   rateLimited: number;
   invalid: number;
@@ -161,7 +180,15 @@ export class Scheduler {
   readonly stats: SchedulerStats = {
     offered: 0,
     accepted: 0,
-    refused: { key: 0, budget: 0, classCap: 0, purse: 0, notBegun: 0 },
+    refused: {
+      key: 0,
+      budget: 0,
+      classCap: 0,
+      purse: 0,
+      notBegun: 0,
+      dupGuard: 0,
+    },
+    classCapped: {},
     sent: 0,
     rateLimited: 0,
     invalid: 0,
@@ -179,6 +206,9 @@ export class Scheduler {
   /** Ticks of sends in the last minute, by class (oldest first). */
   private readonly window = new Map<IntentClass, number[]>();
   private log: string[] = [];
+  private tick = 0;
+  /** Tick of our last cancel_attack or cancel_boat send (DUP_GUARD_TICKS). */
+  private lastCancel = -Infinity;
 
   /**
    * `msPerTick`: pass `game.config().msPerTick()`; class caps count sends in
@@ -196,6 +226,7 @@ export class Scheduler {
   /** Start of tick: copies ctx.budget(). Drops whatever an earlier tick
    *  accepted and did not flush. */
   begin(tick: number, remaining: IntentBudgetRemaining, purse: Purse): void {
+    this.tick = tick;
     this.perSecond = remaining.perSecond;
     this.perMinute = remaining.perMinute;
     this.purse = purse;
@@ -219,6 +250,10 @@ export class Scheduler {
     if (refusal !== null) {
       this.lastRefusal = refusal;
       this.stats.refused[refusal]++;
+      if (refusal === "classCap") {
+        const c = this.stats.classCapped;
+        c[p.cls] = (c[p.cls] ?? 0) + 1;
+      }
       return false;
     }
     this.accepted.push(p);
@@ -254,6 +289,49 @@ export class Scheduler {
     return Math.max(0, cap - used);
   }
 
+  /** Whether a proposal with this key was accepted this tick (not in spec
+   *  §2.6: lets a later controller see an earlier one's target, e.g. a boat
+   *  skips a tribe the allocator launched at by land this decision). */
+  hasKey(key: string): boolean {
+    return this.keys.has(key);
+  }
+
+  /** Tick of the newest send of `cls` in the last minute, or null (not in
+   *  spec §2.6). */
+  lastSent(cls: IntentClass): number | null {
+    const ticks = this.window.get(cls);
+    return ticks === undefined || ticks.length === 0
+      ? null
+      : ticks[ticks.length - 1];
+  }
+
+  /**
+   * Whether one more send of `cls` now, then one every `interval` ticks,
+   * keeps the class within its cap at every tick of the coming minute, the
+   * sends in the window aging out as they do (not in spec §2.6). Checked
+   * now and at the last tick each send in the window still counts, where
+   * the count peaks. True if the class is uncapped.
+   */
+  paceOk(cls: IntentClass, tick: number, interval: number): boolean {
+    const cap = this.o.classCapsPerMinute[cls];
+    if (cap === undefined) return true;
+    const W = this.ticksPerMinute;
+    const old = this.window.get(cls) ?? [];
+    const now = (this.acceptedByClass.get(cls) ?? 0) + 1;
+    const step = Math.max(1, interval);
+    const at = (tau: number) => {
+      let n = now + Math.floor((tau - tick) / step);
+      for (const ts of old) if (ts > tau - W) n++;
+      return n;
+    };
+    if (at(tick) > cap) return false;
+    for (const ts of old) {
+      const tau = ts + W - 1;
+      if (tau >= tick && at(tau) > cap) return false;
+    }
+    return at(tick + W - 1) <= cap;
+  }
+
   /** Sends the accepted proposals in priority order via ctx.send and
    *  records them in the Ledger. A "rate_limited" result (should never
    *  happen) is logged and ends the flush. */
@@ -270,6 +348,12 @@ export class Scheduler {
       const r = send(p.intent);
       if (r === "ok") {
         this.stats.sent++;
+        if (
+          p.intent.type === "cancel_attack" ||
+          p.intent.type === "cancel_boat"
+        ) {
+          this.lastCancel = tick;
+        }
         ledger.recordSend(p.intent, tick, p.plan ?? null, p.meta);
         let ticks = this.window.get(p.cls);
         if (ticks === undefined) {
@@ -305,6 +389,12 @@ export class Scheduler {
   private check(p: Proposal): Refusal | null {
     if (this.purse === null) return "notBegun";
     if (p.key !== undefined && this.keys.has(p.key)) return "key";
+    if (p.intent.type === "attack") {
+      const since = this.tick - this.lastCancel;
+      if (since >= DUP_GUARD_TICKS[0] && since <= DUP_GUARD_TICKS[1]) {
+        return "dupGuard";
+      }
+    }
     if (this.intentsLeft(p.prio) < 1) return "budget";
     if (this.classLeft(p.cls) < 1) return "classCap";
     if (p.spend !== undefined && !this.purse.take(p.spend.kind, p.spend.troops))

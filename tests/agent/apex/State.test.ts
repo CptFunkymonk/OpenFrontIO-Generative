@@ -20,9 +20,14 @@ describe("apex state", () => {
     expect(b.timers.lastThink).not.toBe(5);
   });
 
-  test("a new state thinks, plans and builds at its first chance", () => {
+  test("a new state thinks, plans, builds and sends boats at its first chance", () => {
     const s = createState();
-    for (const t of [s.timers.lastThink, s.timers.lastPlan, s.timers.lastCity])
+    for (const t of [
+      s.timers.lastThink,
+      s.web.lastPlan,
+      s.timers.lastCity,
+      s.timers.lastBoat,
+    ])
       expect(0 - t).toBeGreaterThan(1e6);
   });
 

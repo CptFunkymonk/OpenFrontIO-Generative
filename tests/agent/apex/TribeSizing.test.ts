@@ -1,5 +1,6 @@
 import {
   KILL_FREE,
+  tnPlan,
   topUpSizing,
   tribeSizing,
   TribeTarget,
@@ -281,5 +282,60 @@ describe("apex tribe sizing (§3.6.4)", () => {
     }
     expect(restored).toBe(run.topUps);
     expect(f.me.outgoingAttacks()).toHaveLength(0);
+  });
+
+  test("a strike plan's top-up is sized against a Nation defender, not a Bot (the 0.7 bot loss factor)", () => {
+    const models = plainModels();
+    const o = APEX_DEFAULTS;
+    const mix = { plains: 40, highland: 0, mountain: 0 };
+    const base = {
+      tiles: 2000,
+      troops: 40_000,
+      isTraitor: false,
+      contact: 40,
+      contactMix: mix,
+    };
+    const A = 0.5 * ((o.tribeMargin * base.troops) / o.tribeRatio);
+    const nation = topUpSizing(
+      models,
+      30_000,
+      { ...base, type: PlayerType.Nation },
+      A,
+      o.tribeRatio,
+      o,
+    );
+    const bot = topUpSizing(models, 30_000, base, A, o.tribeRatio, o);
+    const want = models.hitMix(
+      30_000,
+      {
+        type: PlayerType.Nation,
+        tiles: 2000,
+        troops: 40_000,
+        isTraitor: false,
+      },
+      nation.need,
+      mix,
+      40 + 2,
+    );
+    expect(nation.p).toBeCloseTo(want.loss, 9);
+    // attackLogic: mag ×0.7 against a Bot defender only (Config.ts:913-920).
+    expect(bot.p / nation.p).toBeCloseTo(0.7, 6);
+    expect(nation.need).toBe(bot.need);
+    expect(nation.add).toBeGreaterThanOrEqual(bot.add);
+  });
+
+  test("tnPlan: the early trigger (A < 0.5·S_sat) only when `early` (o.tnPace); the tnHorizon cadence always", () => {
+    const models = plainModels();
+    const o = APEX_DEFAULTS;
+    const mix = { plains: 100, highland: 0, mountain: 0 };
+    const sat = models.tnSaturation(mix);
+    const at = (tick: number, early: boolean) =>
+      tnPlan(models, 100, mix, 0.2 * sat, 100, tick, 1e6, o, early);
+    expect(at(112, true).due).toBe(true);
+    expect(at(112, true).send).toBeGreaterThan(0);
+    expect(at(112, false).due).toBe(false);
+    expect(at(112, false).send).toBe(0);
+    expect(at(100 + o.tnHorizon, false).due).toBe(true);
+    expect(at(100 + o.tnHorizon, false).send).toBeGreaterThan(0);
   });
 });

@@ -131,6 +131,13 @@ function defaultParams(d: Difficulty): AiParams {
 
 // ── §2.4.2 State and refresh ─────────────────────────────────────────────
 
+/**
+ * Spec §2.4.2 lists more fields (attack sums, silos and SAMs, structure
+ * levels, the nearby maxima, the last send, troops 20 ticks ago). No
+ * decision read them, and each refresh paid for them (a loop over N.units(),
+ * a troop sample per nation every 10 ticks), so they are left out until a
+ * reader exists (strike windows W3 and W5, §5.2.2).
+ */
 export interface NationState {
   id: PlayerID;
   smallID: number;
@@ -141,19 +148,7 @@ export interface NationState {
   M: number;
   tiles: number;
   gold: bigint;
-  outgoingSum: number;
-  incomingSum: number;
-  underAttack: boolean;
   alliances: number;
-  alliedWithUs: boolean;
-  silos: number;
-  sams: number;
-  structureLevels: number;
-  /** SmallIDs from N.nearby(), non-bot players. */
-  nearbyNonBot: number[];
-  /** Max troops over nearby non-friendly non-bot players, us included. */
-  nearbyMax: number;
-  nearbyMaxExUs: number;
   /** N.nearby().some(n => !n.isPlayer()). */
   bordersFreeLand: boolean;
   /** N.sharesBorderWith(me). */
@@ -163,11 +158,6 @@ export interface NationState {
   /** Nearby tribes with 2·D ≤ T − reserve·M and sendCap ≥ 1
    *  (calculateBotAttackTroops :1149-1166). */
   affordableTribes: number;
-  /** From new outgoing attack IDs. */
-  lastSendTick: number;
-  lastSendTroops: number;
-  /** For the vulture window. */
-  troops20ago: number;
   refreshedAt: number;
   full: boolean;
 }
@@ -218,6 +208,10 @@ export interface RelationTracker {
   /** Compares with the real band each full refresh. On mismatch, clamps the
    *  estimate into the band and logs. */
   reconcile(n: PlayerID, real: Relation, t: number): void;
+  /** Not in spec §2.4.4: whether N's estimate comes from a reconcile clamp
+   *  (the value is only known to lie in the band) rather than from tracked
+   *  events. An event clears it. */
+  clamped(n: PlayerID): boolean;
   /** Plain data for ApexState (cloneable). */
   toData(): RelationData;
 }
@@ -234,10 +228,12 @@ export type RelationCause =
   | "break"
   | "neighbourBreak"
   | "emoji"
-  | "donation";
+  | "donation"
+  | "warship";
 
 export interface RelationData {
-  values: Record<PlayerID, { v: number; at: number }>;
+  /** `clamped` (absent = false): see RelationTracker.clamped. */
+  values: Record<PlayerID, { v: number; at: number; clamped?: boolean }>;
   malusApplied: PlayerID[];
   /** Not in spec §2.10: the nations we embargoed at the last observe. */
   embargoed?: PlayerID[];
@@ -265,6 +261,7 @@ const PRE_DECAY: ReadonlySet<RelationCause> = new Set<RelationCause>([
   "embargoMalus",
   "embargoRestore",
   "assist",
+  "warship",
 ]);
 
 function relationBand(v: number): Relation {
@@ -288,28 +285,51 @@ function clampRelation(v: number): number {
   return Math.min(Math.max(v, RELATION_MIN), RELATION_MAX);
 }
 
-/** The value closest to v inside band r. */
+/** Ticks a reconciled estimate stays inside the real band under decay
+ *  alone: longer than a nation's decision interval (30-49 ticks), so the
+ *  band holds at its next decision. */
+const RECONCILE_HOLD_TICKS = 50;
+/** Distance kept from the band edge that decay moves a value towards (plus
+ *  decay's snap to 0 below 2·RELATION_DECAY). */
+const RECONCILE_MARGIN = (RECONCILE_HOLD_TICKS + 2) * RELATION_DECAY;
+
+/**
+ * The value closest to v inside band r, at least RECONCILE_MARGIN inside
+ * the edge nearer 0 (the one decay drifts towards). Right at that edge the
+ * estimate would leave the band at the next tick: −0.05 decays straight to
+ * 0 (|v| < 0.1 snaps to 0), 50 to 49.95, so the reconcile never converged
+ * and every refresh logged the same mismatch. The real value is somewhere
+ * inside the band and decays at the same rate; a later reconcile corrects
+ * the estimate again if the real value leaves first.
+ */
 function intoBand(v: number, r: Relation): number {
   switch (r) {
     case Relation.Hostile:
-      return Math.min(v, HOSTILE_BELOW - RELATION_DECAY);
+      return Math.min(v, HOSTILE_BELOW - RECONCILE_MARGIN);
     case Relation.Distrustful:
       return Math.min(
         Math.max(v, HOSTILE_BELOW),
-        DISTRUSTFUL_BELOW - RELATION_DECAY,
+        DISTRUSTFUL_BELOW - RECONCILE_MARGIN,
       );
     case Relation.Neutral:
+      // 0 is Neutral and decay stops there; 50 is approached from above.
       return Math.min(
         Math.max(v, DISTRUSTFUL_BELOW),
         NEUTRAL_BELOW - RELATION_DECAY,
       );
     case Relation.Friendly:
-      return Math.max(v, NEUTRAL_BELOW);
+      return Math.max(v, NEUTRAL_BELOW + RECONCILE_MARGIN);
   }
 }
 
+interface TrackedValue {
+  v: number;
+  at: number;
+  clamped?: boolean;
+}
+
 class Tracker implements RelationTracker {
-  private readonly values = new Map<PlayerID, { v: number; at: number }>();
+  private readonly values = new Map<PlayerID, TrackedValue>();
   private readonly malus = new Set<PlayerID>();
   private readonly embargo = new Set<PlayerID>();
   private mismatchCount = 0;
@@ -317,7 +337,10 @@ class Tracker implements RelationTracker {
   constructor(d?: RelationData) {
     if (d === undefined) return;
     for (const [id, e] of Object.entries(d.values)) {
-      this.values.set(id, { v: e.v, at: e.at });
+      this.values.set(
+        id,
+        e.clamped === true ? { v: e.v, at: e.at, clamped: true } : { ...e },
+      );
     }
     for (const id of d.malusApplied) this.malus.add(id);
     for (const id of d.embargoed ?? []) this.embargo.add(id);
@@ -386,7 +409,11 @@ class Tracker implements RelationTracker {
     const v = this.value(n, t);
     if (relationBand(v) === real) return;
     this.mismatchCount++;
-    this.values.set(n, { v: intoBand(v, real), at: t });
+    this.values.set(n, { v: intoBand(v, real), at: t, clamped: true });
+  }
+
+  clamped(n: PlayerID): boolean {
+    return this.values.get(n)?.clamped === true;
   }
 
   /** Reconcile mismatches so far. */
@@ -395,8 +422,13 @@ class Tracker implements RelationTracker {
   }
 
   toData(): RelationData {
-    const values: Record<PlayerID, { v: number; at: number }> = {};
-    for (const [id, e] of this.values) values[id] = { v: e.v, at: e.at };
+    const values: RelationData["values"] = {};
+    for (const [id, e] of this.values) {
+      values[id] =
+        e.clamped === true
+          ? { v: e.v, at: e.at, clamped: true }
+          : { v: e.v, at: e.at };
+    }
     return {
       values,
       malusApplied: [...this.malus],
@@ -456,6 +488,20 @@ const RETAIN: Partial<Record<Difficulty, number>> = {
 };
 /** isAttackTooWeak (AiAttackBehavior.ts:961-973): < 20% of the target. */
 const TOO_WEAK_SHARE = 0.2;
+
+/**
+ * Our deterrence line against a nation's land attack, as a divisor: it may
+ * send at most T − retain·H (troopSendCap) and never less than 0.2·H
+ * (isAttackTooWeak), so with T troops it can land-attack us only while
+ * T ≥ (retain + 0.2)·H, and we are safe while H > T / sendCapSafe(d)
+ * (1.1 at Impossible, 0.95 at Hard) [PIN NationSendCap]. Infinity at Easy
+ * and Medium, where neither rule applies (troopSendCap returns Infinity and
+ * isAttackTooWeak is off): no home is safe there.
+ */
+export function sendCapSafe(d: Difficulty): number {
+  const retain = RETAIN[d];
+  return retain === undefined ? Infinity : retain + TOO_WEAK_SHARE;
+}
 /** troopSendCapForExpansion (AiAttackBehavior.ts:1035-1039). */
 const EXPANSION_FLOOR_SHARE = 0.05;
 /** calculateBotAttackTroops (AiAttackBehavior.ts:1149-1166). */
@@ -500,6 +546,18 @@ const NEIGHBOUR_BREAK_RELATION = -40;
 const NUKE_RELATION = -100;
 /** assistAllies (AiAttackBehavior.ts:561). */
 const ASSIST_RELATION = -20;
+/** maybeRetaliateWithWarship (NationWarshipBehavior.ts:264-297): a warship
+ *  built at a transport of ours bound for its land costs −15 with us (−7.5
+ *  for a captured trade ship; we build none). */
+const WARSHIP_RELATION = -15;
+/** trackIncomingTransportsAndRetaliate (NationWarshipBehavior.ts:219-226):
+ *  a transport closer than this (Manhattan) to its landing is let be. */
+const WARSHIP_TRACK_MIN = 20;
+/** Ticks a nation stays watched after our last transport to its land left:
+ *  its retaliation warship appears two turns after its decision to build
+ *  (ConstructionExecution, then WarshipExecution.init), by when our boat
+ *  may have turned back or landed. */
+const WARSHIP_WATCH_TICKS = 5;
 
 /** getAllianceDecision's per-difficulty numbers (NationAllianceBehavior.ts
  *  :119-400). Probabilities are the share of nextInt(0, 100) draws that
@@ -579,9 +637,6 @@ const ALLIANCE_RULES: Record<Difficulty, AllianceRules> = {
 };
 const DEFAULT_MARGIN = 0.1;
 
-/** Ticks between the troop samples behind troops20ago. */
-const SAMPLE_EVERY = 10;
-const VULTURE_TICKS = 20;
 /** Ticks between refreshes of the nation list and the non-bot count. */
 const PLAYER_LIST_EVERY = 10;
 
@@ -600,8 +655,6 @@ interface Tracked {
   boatIDs: Set<number>;
   /** Last processed decision turn (embargo malus). */
   lastDecision: number;
-  /** Troops samples every SAMPLE_EVERY ticks, newest last. */
-  samples: { tick: number; T: number }[];
   /** Decision turns seen (land sends and boat launches), for inference. */
   seenDecisions: number[];
   /** Troops at the previous observe (inference only). */
@@ -643,6 +696,12 @@ export class NationModel {
   private ourNukeIDs = new Set<number>();
   /** Set by observeNukes: a nuke of ours launched since the last observe. */
   private nukeLaunched = false;
+  /** observeWarships: nations a transport of ours is (or was, within
+   *  WARSHIP_WATCH_TICKS) bound for, with their warship ids. */
+  private warshipWatch = new Map<
+    PlayerID,
+    { ids: Set<number>; until: number }
+  >();
   private allyExpiry = new Map<PlayerID, number>();
   /** Alliances that ended before expiry since the last observe. */
   private broken: PlayerID[] = [];
@@ -704,7 +763,7 @@ export class NationModel {
         );
       }
       if (!infer) {
-        const targets = this.scanSends(N, tr, d);
+        const targets = this.scanSends(N, tr);
         this.observeAssist(N, targets, d);
       }
     }
@@ -714,18 +773,12 @@ export class NationModel {
     this.observeAlliances(tick, first);
     this.observeTargets(tick, first);
     this.observeNukes(tick, first);
+    this.observeWarships(tick);
     this.observeBetrayals(tick);
 
-    // Our embargo state as the next decisions will see it, and samples.
+    // Our embargo state as the next decisions will see it.
     for (const N of this.nationList) {
       this.relations.noteEmbargo(N.id(), me.hasEmbargoAgainst(N));
-    }
-    if (tick % SAMPLE_EVERY === 0) {
-      for (const N of this.nationList) {
-        const s = this.track(N).samples;
-        s.push({ tick, T: N.troops() });
-        if (s.length > 4) s.shift();
-      }
     }
     this.lastObserve = tick;
   }
@@ -742,25 +795,19 @@ export class NationModel {
     this.nonBotAlive = nonBot;
   }
 
-  /** New outgoing land attacks of N created in its decision turn d; returns
-   *  their targets. */
-  private scanSends(N: Player, tr: Tracked, d: number): Player[] {
+  /** The targets of N's new outgoing land attacks (created in its decision
+   *  turn). */
+  private scanSends(N: Player, tr: Tracked): Player[] {
     const ids = new Set<string>();
     const targets: Player[] = [];
-    let sent = 0;
     for (const a of N.outgoingAttacks()) {
       ids.add(a.id());
       if (!tr.attackIDs.has(a.id()) && a.sourceTile() === null) {
-        sent += a.troops();
         const t = a.target();
         if (t.isPlayer()) targets.push(t);
       }
     }
     tr.attackIDs = ids;
-    if (sent > 0) {
-      tr.st.lastSendTick = d;
-      tr.st.lastSendTroops = sent;
-    }
     return targets;
   }
 
@@ -890,6 +937,60 @@ export class NationModel {
     this.ourNukeIDs = ids;
   }
 
+  /**
+   * Warship retaliation (not in spec §2.4.4): a nation that owns the landing
+   * tile of a transport of ours (not retreating, WARSHIP_TRACK_MIN or more
+   * tiles out, not allied with us) builds a warship at it 80% of the time at
+   * Impossible and drops its relation to us by 15, in its own tick
+   * (NationWarshipBehavior.ts:188-297). The draw and the no-warship-near
+   * test are not visible, the warship is: every new warship of a nation
+   * while it is watched counts as one retaliation (a warship it builds for
+   * itself then counts too, the pessimistic side). A reconcile corrects a
+   * miss.
+   */
+  private observeWarships(tick: number): void {
+    const me = this.me;
+    const watch = this.warshipWatch;
+    if (me.unitCount(UnitType.TransportShip) > 0) {
+      for (const u of me.units(UnitType.TransportShip)) {
+        const dst = u.targetTile();
+        if (dst === undefined || u.transportShipState().isRetreating) continue;
+        const N = this.game.owner(dst);
+        if (!N.isPlayer() || N === me || N.type() !== PlayerType.Nation) {
+          continue;
+        }
+        if (me.isAlliedWith(N)) continue;
+        if (this.game.manhattanDist(u.tile(), dst) < WARSHIP_TRACK_MIN) {
+          continue;
+        }
+        const w = watch.get(N.id());
+        if (w === undefined) {
+          const ids = new Set<number>();
+          for (const x of N.units(UnitType.Warship)) ids.add(x.id());
+          watch.set(N.id(), { ids, until: tick + WARSHIP_WATCH_TICKS });
+        } else {
+          w.until = tick + WARSHIP_WATCH_TICKS;
+        }
+      }
+    }
+    if (watch.size === 0) return;
+    for (const [id, w] of watch) {
+      const N = this.nation(id);
+      if (N === null || !N.isAlive() || tick > w.until) {
+        watch.delete(id);
+        continue;
+      }
+      for (const x of N.units(UnitType.Warship)) {
+        if (w.ids.has(x.id())) continue;
+        w.ids.add(x.id());
+        // Built in its tick two turns ago (see WARSHIP_WATCH_TICKS).
+        this.relations.onEvent(id, tick - 1, WARSHIP_RELATION, "warship");
+        this.log.push(`t${tick}: ${id} built a warship at our transport`);
+        this.trimLog();
+      }
+    }
+  }
+
   /** Our break of an alliance (BreakAllianceExecution.ts:33-59): −100 from
    *  the betrayed, −40 from every player in our nearby() (the betrayed
    *  too, if it borders us). A break by a nuke of ours (NukeExecution.ts:
@@ -917,6 +1018,11 @@ export class NationModel {
   }
 
   // ── Parameters ─────────────────────────────────────────────────────────
+
+  /** sendCapSafe at this game's difficulty. */
+  sendCapSafe(): number {
+    return sendCapSafe(this.difficulty);
+  }
 
   params(n: PlayerID): AiParams {
     const cached = this.paramsCache.get(n);
@@ -976,7 +1082,6 @@ export class NationModel {
       tr.boatIDs = boats;
       // The forced opening send is not on a decision (N1 pin).
       if ((landSend || launch) && d >= this.firstDecisionTurn()) {
-        if (landSend) tr.st.lastSendTick = d;
         tr.seenDecisions.push(d);
         if (tr.seenDecisions.length > 12) tr.seenDecisions.shift();
         if (tnSend && tr.prevM > 0) {
@@ -1046,24 +1151,11 @@ export class NationModel {
           M: 0,
           tiles: 0,
           gold: 0n,
-          outgoingSum: 0,
-          incomingSum: 0,
-          underAttack: false,
           alliances: 0,
-          alliedWithUs: false,
-          silos: 0,
-          sams: 0,
-          structureLevels: 0,
-          nearbyNonBot: [],
-          nearbyMax: 0,
-          nearbyMaxExUs: 0,
           bordersFreeLand: false,
           sharesBorderWithUs: false,
           tribeBudget: 0,
           affordableTribes: 0,
-          lastSendTick: Number.NEGATIVE_INFINITY,
-          lastSendTroops: 0,
-          troops20ago: N.troops(),
           refreshedAt: Number.NEGATIVE_INFINITY,
           full: false,
         },
@@ -1072,7 +1164,6 @@ export class NationModel {
         attackIDs: new Set(N.outgoingAttacks().map((a) => a.id())),
         boatIDs: new Set(),
         lastDecision: Number.NEGATIVE_INFINITY,
-        samples: [],
         seenDecisions: [],
         prevT: N.troops(),
         prevM: 0,
@@ -1102,31 +1193,12 @@ export class NationModel {
     st.M = this.models.cap(N);
     st.tiles = N.numTilesOwned();
     st.gold = N.gold();
-    let out = 0;
-    for (const a of N.outgoingAttacks()) out += a.troops();
-    st.outgoingSum = out;
-    const incoming = N.incomingAttacks();
-    let inc = 0;
-    for (const a of incoming) inc += a.troops();
-    st.incomingSum = inc;
-    st.underAttack = incoming.length > 0;
     st.alliances = N.alliances().length;
-    st.alliedWithUs = N.isAlliedWith(this.me);
-    st.silos = N.unitCount(UnitType.MissileSilo);
-    st.sams = N.unitCount(UnitType.SAMLauncher);
-    let levels = 0;
     let cities = 0;
-    for (const u of N.units()) {
-      const ty = u.type();
-      if (!Structures.has(ty)) continue;
-      if (ty !== UnitType.DefensePost && ty !== UnitType.MissileSilo) {
-        levels += u.level();
-      }
-      if (ty === UnitType.City && !u.isUnderConstruction()) cities += u.level();
+    for (const u of N.units(UnitType.City)) {
+      if (!u.isUnderConstruction()) cities += u.level();
     }
-    st.structureLevels = levels;
     tr.cityLevels = cities;
-    st.troops20ago = this.troopsAgo(tr, t);
     st.refreshedAt = t;
     if (level === "full" || !st.full) this.fullRefresh(N, tr);
     return st;
@@ -1137,29 +1209,17 @@ export class NationModel {
     const me = this.me;
     const nearby = N.nearby();
     const ids: number[] = [];
-    const nonBot: number[] = [];
     let tn = false;
     let usNearby = false;
-    let maxAll = 0;
-    let maxExUs = 0;
     for (const x of nearby) {
       if (!x.isPlayer()) {
         tn = true;
         continue;
       }
       ids.push(x.smallID());
-      if (x.type() === PlayerType.Bot) continue;
-      nonBot.push(x.smallID());
       if (x === me) usNearby = true;
-      if (N.isFriendly(x)) continue;
-      const tx = x.troops();
-      maxAll = Math.max(maxAll, tx);
-      if (x !== me) maxExUs = Math.max(maxExUs, tx);
     }
     tr.nearby = ids;
-    st.nearbyNonBot = nonBot;
-    st.nearbyMax = maxAll;
-    st.nearbyMaxExUs = maxExUs;
     st.bordersFreeLand = tn;
     // sharesBorderWith is symmetric (4-neighbours both ways) and implies
     // nearby(); scan the smaller border.
@@ -1188,14 +1248,6 @@ export class NationModel {
     );
     this.trimLog();
     this.relations.reconcile(N.id(), real, t);
-  }
-
-  private troopsAgo(tr: Tracked, t: number): number {
-    let v = tr.st.T;
-    for (const s of tr.samples) {
-      if (s.tick <= t - VULTURE_TICKS) v = s.T;
-    }
-    return v;
   }
 
   get(n: PlayerID): NationState | undefined {
@@ -1785,12 +1837,31 @@ export class NationModel {
     }
     // 6 relation below Neutral, with the embargo malus of that decision.
     this.reconcile(N);
+    const now = this.game.ticks();
+    // An estimate from a reconcile clamp is only the band edge nearest 0
+    // (less RECONCILE_MARGIN): the real value may lie anywhere in the band.
+    // While that band is below Neutral, decay alone must not carry the
+    // estimate across 0 by atTick (it did, 49 ticks past a clamp, and the
+    // forecast said p = 1 for nations at −21 and −3.6 that refused, arena
+    // quick@4): the value stays where it is now, unless a tracked event
+    // (the embargo restore) lifts it.
+    const clampedBelow =
+      this.relations.clamped(n) && N.relation(me) < Relation.Neutral;
+    const base = clampedBelow
+      ? Math.min(
+          this.relations.value(n, now),
+          this.relations.value(n, q.atTick),
+        )
+      : this.relations.value(n, q.atTick);
     const v =
-      this.relations.value(n, q.atTick) +
+      base +
       this.relations.embargoMalus(n).atDecision(q.atTick, q.embargoStoppedBy);
     const band = relationBand(clampRelation(v));
+    // Past here the answer rests on a guessed value when clampedBelow.
+    const known = (f: AllianceForecast): AllianceForecast =>
+      clampedBelow ? { ...f, deterministic: false } : f;
     if (band < Relation.Neutral) {
-      return this.confused(done(0, "hostile"), rules);
+      return known(this.confused(done(0, "hostile"), rules));
     }
     let acc = 0;
     // 7 Friendly.
@@ -1798,14 +1869,16 @@ export class NationModel {
       acc += mult * rules.friendlyAccept;
       mult *= 1 - rules.friendlyAccept;
       first ??= "friendly";
-      if (mult === 0) return this.confused(done(acc, first), rules);
+      if (mult === 0) return known(this.confused(done(acc, first), rules));
     }
     // 8 checkAlreadyEnoughAlliances.
     const pass = this.enoughPass(N, tr, rules);
     if (pass === 0) {
-      return this.confused(
-        done(acc, acc > 0 && first !== null ? first : "enough"),
-        rules,
+      return known(
+        this.confused(
+          done(acc, acc > 0 && first !== null ? first : "enough"),
+          rules,
+        ),
       );
     }
     if (pass < 1) first ??= "enough";
@@ -1826,7 +1899,7 @@ export class NationModel {
     );
     acc += mult * sim;
     first ??= sim > 0 ? "similar" : "no";
-    return this.confused(done(acc, first), rules);
+    return known(this.confused(done(acc, first), rules));
   }
 
   /** isConfused (Easy/Medium/Hard): 1 in n decisions answer by a coin. */

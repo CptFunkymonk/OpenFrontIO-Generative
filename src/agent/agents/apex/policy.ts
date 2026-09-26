@@ -20,7 +20,11 @@ import { createPurse, HomeFloors, Purse, Scheduler } from "../../lib/Scheduler";
 import { scanWorld, WorldModel } from "../../lib/WorldModel";
 import { DefenseController } from "./controllers/DefenseController";
 import { DiplomacyController } from "./controllers/DiplomacyController";
-import { EconomyController } from "./controllers/EconomyController";
+import {
+  EconomyController,
+  finishedCityLevels,
+  inboundNukeLevels,
+} from "./controllers/EconomyController";
 import { EndgameController } from "./controllers/EndgameController";
 import { ExpansionController } from "./controllers/ExpansionController";
 import { NavalController } from "./controllers/NavalController";
@@ -113,6 +117,19 @@ const DECIDE_ORDER: readonly ControllerName[] = [
   "defense",
 ];
 
+/** Ticks between two full refreshes of one nation by the round-robin (the
+ *  cadence without o.refreshBeforeDecision; a floor with it). */
+export const REFRESH_MIN_TICKS = 10;
+/** With o.refreshBeforeDecision a nation is refreshed once in the last
+ *  REFRESH_LEAD ticks before each of its decisions. */
+export const REFRESH_LEAD = 10;
+/** Border tiles the round-robin's full refreshes may walk per tick (about
+ *  1 ms, see refreshNations). */
+export const REFRESH_BORDER_BUDGET = 5_000;
+
+/** NationModel log lines copied to the host log at the end of a game. */
+const NM_NOTES = 5;
+
 /** Ticks between two status lines in the host log. */
 const STATUS_EVERY = 300;
 
@@ -130,6 +147,44 @@ const OWNER_GRID_SAMPLES = 40_000;
 export function homeAvailable(me: Player, floors: HomeFloors): number {
   const home = me.troops();
   return floors.cap > 0 ? Math.min(home, Math.ceil(floors.cap)) : home;
+}
+
+/**
+ * The round-robin's rule for one nation (refreshNations): never refreshed,
+ * or REFRESH_MIN_TICKS since its last refresh and, given its next decision
+ * `next` (o.refreshBeforeDecision), inside the REFRESH_LEAD ticks up to it
+ * (next − REFRESH_LEAD, next] and not yet refreshed there.
+ */
+export function refreshDue(
+  last: number | undefined,
+  tick: number,
+  next: number | null,
+): boolean {
+  if (last === undefined) return true;
+  if (tick - last < REFRESH_MIN_TICKS) return false;
+  if (next === null) return true;
+  return next - tick < REFRESH_LEAD && last <= next - REFRESH_LEAD;
+}
+
+/**
+ * o.nukeReflex: enemy bombs in flight will delete `lost` finished city
+ * levels (inboundNukeLevels), and our home is above the cap left after
+ * them, or null.
+ */
+export function nukeThreat(
+  game: Game,
+  me: Player,
+  models: Models,
+  tick: number,
+): ApexState["nuke"] {
+  const lost = inboundNukeLevels(game, me);
+  if (lost <= 0) return null;
+  const capAfter = models.capAt(
+    PlayerType.Human,
+    me.numTilesOwned(),
+    Math.max(0, finishedCityLevels(me) - lost),
+  );
+  return me.troops() > capAfter ? { lost, capAfter, at: tick } : null;
 }
 
 /** Whether an enabled feature forks outside rollouts, so the live policy
@@ -176,6 +231,8 @@ interface Runtime {
   refreshList: PlayerID[];
   /** Where the round-robin continues in refreshList. */
   refreshCursor: number;
+  /** Tick of each nation's last full refresh by the round-robin. */
+  refreshedAt: Map<PlayerID, number>;
 }
 
 export class ApexPolicy {
@@ -195,7 +252,15 @@ export class ApexPolicy {
    *  so the copy keeps the live decision cadence (no extra decision at its
    *  first step) and the same scan, floors and refresh order. */
   private carry: Partial<
-    Pick<Runtime, "wm" | "floors" | "owners" | "refreshList" | "refreshCursor">
+    Pick<
+      Runtime,
+      | "wm"
+      | "floors"
+      | "owners"
+      | "refreshList"
+      | "refreshCursor"
+      | "refreshedAt"
+    >
   > | null = null;
 
   constructor(
@@ -260,6 +325,7 @@ export class ApexPolicy {
         owners: rt.owners,
         refreshList: rt.refreshList,
         refreshCursor: rt.refreshCursor,
+        refreshedAt: rt.refreshedAt,
       });
     }
     return { step: (v) => copy.step(v) };
@@ -313,7 +379,7 @@ export class ApexPolicy {
     if (!env.me.isAlive()) return;
 
     // Step 2 (scheduler.begin below).
-    rt.ledger.observe(env.me, t);
+    rt.ledger.observe(env.me, t, env.game);
     rt.nm.observe(t);
 
     // Step 4's scanWorld, HomeTarget and Purse, moved ahead of step 3:
@@ -332,6 +398,16 @@ export class ApexPolicy {
         { tick: t, o, me: env.me, models: rt.models, nm: rt.nm },
         s,
       );
+      const nuke = o.nukeReflex
+        ? nukeThreat(env.game, env.me, rt.models, t)
+        : null;
+      if (nuke !== null && s.nuke === null) {
+        env.log?.(
+          `${t} nuke inbound: ${nuke.lost} city levels, cap after ` +
+            `${Math.round(nuke.capAfter)} < home ${Math.round(env.me.troops())}`,
+        );
+      }
+      s.nuke = nuke;
     }
     const purse = createPurse(homeAvailable(env.me, rt.floors), rt.floors);
     rt.scheduler.begin(t, env.budget(), purse);
@@ -349,8 +425,8 @@ export class ApexPolicy {
         this.status(v, rt);
       }
     }
-    // Step 5: full nation refreshes, round-robin (fewer on decision ticks,
-    // see refreshNations).
+    // Step 5: full nation refreshes, round-robin, under a think-time budget
+    // (refreshNations).
     this.refreshNations(rt, t, decision);
     // Step 6.
     rt.scheduler.flush(env.send, rt.ledger, t);
@@ -382,10 +458,12 @@ export class ApexPolicy {
     const line =
       `apex ${outcome.result} at ${ctx.tick}: offered ${st.offered}, ` +
       `accepted ${st.accepted}, sent ${st.sent}, rate-limited ${st.rateLimited}, ` +
-      `invalid ${st.invalid}; refused ${JSON.stringify(st.refused)}; ` +
-      `relation mismatches ${rt.nm.log.length}`;
+      `invalid ${st.invalid}; refused ${JSON.stringify(st.refused)} ` +
+      `(class caps ${JSON.stringify(st.classCapped)}); ` +
+      `NationModel notes ${rt.nm.log.length} (last ${NM_NOTES} follow)`;
     stateLog(this.s, line);
     ctx.log(line);
+    for (const note of rt.nm.log.slice(-NM_NOTES)) ctx.log(`nm ${note}`);
   }
 
   private runtime(env: Env): Runtime {
@@ -415,6 +493,7 @@ export class ApexPolicy {
       floors: NO_FLOORS,
       refreshList: [],
       refreshCursor: 0,
+      refreshedAt: new Map(),
       ...this.carry,
     };
     this.carry = null;
@@ -487,29 +566,57 @@ export class ApexPolicy {
   }
 
   /**
-   * §3.0 step 5: nationRefreshPerTick full refreshes per tick, round-robin.
-   * Think-time budget: a decision tick already carries the scan and the
-   * allocator, so it does half of them (rounded down) and the ticks between
-   * decisions make up the rest, keeping thinkEvery·nationRefreshPerTick per
-   * decision cycle (thinkEvery ≥ 2).
+   * §3.0 step 5: at most nationRefreshPerTick full refreshes per tick,
+   * round-robin over refreshList, under a think-time budget. A full refresh
+   * costs one N.nearby(), linear in N's border (0.18-0.20 µs per border
+   * tile: about 1 ms for a 5,000-tile border at minute 3, 3-5 ms for the
+   * 15-25k-tile borders of GiantWorldMap's late game), so:
+   * - with o.refreshBeforeDecision, a nation is refreshed once per decision
+   *   interval (30-49 ticks), in the REFRESH_LEAD ticks before its next
+   *   decision: the state that decision is forecast from. Without it, or
+   *   before its parameters are known (rate 1), every REFRESH_MIN_TICKS.
+   *   Its live troops are read at every use anyway;
+   * - a tick spends at most REFRESH_BORDER_BUDGET border tiles on them,
+   *   half of it on a decision tick (which carries the scan and the
+   *   allocator). A nation whose border alone is over the budget is
+   *   refreshed alone, and only on a tick without a decision.
+   * The budget is in border tiles, not wall time, so decisions stay
+   * deterministic. A nation the budget stops is first on the next tick.
+   * (Spec §3.0's "≤ 1 ms" holds to about minute 8 on GiantWorldMap; past
+   * it, the refresh of one large nation alone costs more, on a tick with
+   * little else.)
    */
   private refreshNations(rt: Runtime, tick: number, decision: boolean): void {
     const list = rt.refreshList;
-    if (list.length === 0) return;
-    const per = this.o.nationRefreshPerTick;
-    const te = Math.max(1, this.o.thinkEvery);
-    let k = per;
-    if (te >= 2) {
-      const onDecision = Math.floor(per / 2);
-      k = decision ? onDecision : Math.ceil((per * te - onDecision) / (te - 1));
+    const n = list.length;
+    if (n === 0) return;
+    const budget = decision ? REFRESH_BORDER_BUDGET / 2 : REFRESH_BORDER_BUDGET;
+    // With a decision every tick there is no other tick to run it on.
+    const alone = !decision || this.o.thinkEvery <= 1;
+    let done = 0;
+    let used = 0;
+    let i = 0;
+    const start = rt.refreshCursor % n;
+    for (; i < n && done < this.o.nationRefreshPerTick; i++) {
+      const id = list[(start + i) % n];
+      if (!this.refreshDue(rt, id, tick)) continue;
+      const border = rt.game.player(id).borderTiles().size;
+      if (used + border > budget && (done > 0 || !alone)) break;
+      rt.nm.refresh(id, "full");
+      rt.refreshedAt.set(id, tick);
+      used += border;
+      done++;
     }
-    k = Math.min(k, list.length);
-    if (k <= 0) return;
-    const start = rt.refreshCursor % list.length;
-    for (let i = 0; i < k; i++) {
-      rt.nm.refresh(list[(start + i) % list.length], "full");
-    }
-    rt.refreshCursor = (start + k) % list.length;
+    rt.refreshCursor = (start + i) % n;
+  }
+
+  /** Whether the round-robin refreshes nation `id` at `tick`. */
+  private refreshDue(rt: Runtime, id: PlayerID, tick: number): boolean {
+    return refreshDue(
+      rt.refreshedAt.get(id),
+      tick,
+      this.o.refreshBeforeDecision ? rt.nm.nextDecision(id, tick) : null,
+    );
   }
 
   /** The Scheduler's rate-limit and invalid notes into the logs. */

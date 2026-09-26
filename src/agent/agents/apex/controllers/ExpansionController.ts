@@ -29,6 +29,12 @@ import type { ApexState } from "../state";
 // Pokes run second, not fifth as in §3.6: a poke costs pokeTroops and takes
 // the whole tribe, a launch on the same tribe would lock its clamp stack.
 //
+// Every send to a tribe that is attacking us carries that attack's troops
+// on top of its own stack: the new attack cancels it 1:1 at init and dies
+// there if it is the smaller (AttackExecution.ts:157-170) [PIN AttackMerge].
+// Without this, snacks on counter-attacking tribes were cancelled at launch
+// and launches started below their clamp (Europe, arena apex-k1).
+//
 // Pure given (View, ApexState): no ctx.random, no clock. The only memory
 // outside ApexState is `nearTribes`, a by-product of the last decision's
 // border scans that the policy adds to its NationModel refresh list.
@@ -66,8 +72,13 @@ const SNACK_LEAD_TICKS = 2;
  *  (used to read the saturated pace back from attackLogic). */
 const SATURATED = 4;
 
-/** What the sizing formulas read about a tribe. */
+/** What the sizing formulas read about a tribe (or, for a strike plan's
+ *  top-ups, a nation). */
 export interface TribeTarget {
+  /** Default Bot. attackLogic cuts the defender's losses to 0.7 only
+   *  against a Bot (BOT_DEFENDER_LOSS_MULT, Config.ts:913-920), so a
+   *  nation typed as a Bot would cost 30% too little. */
+  type?: PlayerType;
   tiles: number;
   troops: number;
   isTraitor: boolean;
@@ -120,7 +131,12 @@ export function tribeSizing(
   const A0 = D / ratio;
   const r = models.hitMix(
     ourTiles,
-    { type: PlayerType.Bot, tiles: n, troops: D, isTraitor: b.isTraitor },
+    {
+      type: b.type ?? PlayerType.Bot,
+      tiles: n,
+      troops: D,
+      isTraitor: b.isTraitor,
+    },
     A0,
     b.contactMix,
     b.contact + BORDER_JITTER,
@@ -157,7 +173,12 @@ export function topUpSizing(
   const k = Math.max(0, n - KILL_FREE);
   const r = models.hitMix(
     ourTiles,
-    { type: PlayerType.Bot, tiles: n, troops: D, isTraitor: b.isTraitor },
+    {
+      type: b.type ?? PlayerType.Bot,
+      tiles: n,
+      troops: D,
+      isTraitor: b.isTraitor,
+    },
     need,
     b.contactMix,
     b.contact + BORDER_JITTER,
@@ -222,6 +243,8 @@ export interface TnPlan {
  *   due = no plan ∨ tick − lastSend ≥ tnHorizon ∨ A_TN < 0.5·S_sat,
  *   if F > 0 ∧ due ∧ A_TN < 0.6·want: send = min(want − A_TN, available),
  *   sent only if ≥ min(tnMinChunk·want, S_sat).
+ * `early` false drops the A_TN < 0.5·S_sat clause (o.tnPace, when the tn
+ * class cap could not carry the sends it adds).
  */
 export function tnPlan(
   models: Models,
@@ -232,6 +255,7 @@ export function tnPlan(
   tick: number,
   available: number,
   o: Pick<ApexOptions, "tnSat" | "tnHorizon" | "tnMinChunk">,
+  early = true,
 ): TnPlan {
   const sat = models.tnSaturation(mix);
   const price = models.tnPrice(mix);
@@ -241,7 +265,9 @@ export function tnPlan(
   const burn = price * pace * o.tnHorizon;
   const want = o.tnSat * sat + burn;
   const due =
-    lastSend === null || tick - lastSend >= o.tnHorizon || A < 0.5 * sat;
+    lastSend === null ||
+    tick - lastSend >= o.tnHorizon ||
+    (early && A < 0.5 * sat);
   let send = 0;
   if (F > 0 && due && A < 0.6 * want) {
     const s = Math.min(want - A, available);
@@ -252,10 +278,157 @@ export function tnPlan(
 
 /** Whether apex is in stall mode (§3.6.6): the stall condition has held for
  *  o.stallTicks. The ExpansionController updates s.stall.since each
- *  decision; controllers after it (Naval, Strike) read this. */
+ *  decision; controllers after it (Naval, Strike) read this. Also while an
+ *  enemy bomb in flight will cut the cap below home (o.nukeReflex, s.nuke,
+ *  set by the policy each decision): the troops above the cap left after
+ *  the blast are lost the tick after it lands [PIN TroopCapClamp], so they
+ *  are spent as at the cap. */
 export function inStall(s: ApexState, tick: number, o: ApexOptions): boolean {
+  if (o.nukeReflex && s.nuke !== null && s.nuke !== undefined) return true;
   return (
     o.stall && s.stall.since !== null && tick - s.stall.since >= o.stallTicks
+  );
+}
+
+// ── Launch eligibility, shared with NavalController.blocked ─────────────
+
+/** Tribe and snipe plans running (what maxTribeAttacks counts). */
+export function activeTribePlans(v: Pick<View, "ledger">): number {
+  let active = 0;
+  for (const plan of v.ledger.allPlans()) {
+    if (plan.kind === "tribe" || plan.kind === "snipe") active++;
+  }
+  return active;
+}
+
+/** Whether the Ledger holds a plan, a stack (live or pending) or a
+ *  retreating attack on the target. */
+export function ledgerBusy(v: Pick<View, "ledger">, sid: number): boolean {
+  const l = v.ledger;
+  return (
+    l.plan(sid) !== undefined || l.stackOn(sid) > 0 || l.retreatingOn(sid) > 0
+  );
+}
+
+/**
+ * Troops of the target's attacks on us. A new attack on it first cancels
+ * them 1:1 at init, and dies there if they are larger
+ * (AttackExecution.ts:157-170) [PIN AttackMerge], so every send to it
+ * carries them on top of its own stack.
+ */
+export function incomingFrom(v: Pick<View, "wm">, sid: number): number {
+  let sum = 0;
+  for (const a of v.wm.incoming) {
+    if (a.attackerSmallID === sid) sum += a.troops;
+  }
+  return sum;
+}
+
+/** Tiles per tick the tribe's own land attacks take now (an upper-ish
+ *  estimate: every attack at its saturated or current pace). */
+export function tribeGrowthPerTick(models: Models, p: Player): number {
+  let sum = 0;
+  for (const a of p.outgoingAttacks()) {
+    if (a.sourceTile() !== null || a.retreating()) continue;
+    const r = models.tn(
+      TerrainType.Plains,
+      a.troops(),
+      a.borderSize() + BORDER_JITTER,
+    );
+    sum += models.tilesPerTick(r);
+  }
+  return sum;
+}
+
+/** What the sizing formulas read about bordering tribe `b`. */
+export function tribeTarget(b: NeighborInfo, p: Player): TribeTarget {
+  return {
+    type: p.type(),
+    tiles: b.tiles,
+    troops: b.troops,
+    isTraitor: p.isTraitor(),
+    contact: b.contact,
+    contactMix: b.contactMix,
+  };
+}
+
+/**
+ * §3.6.1: the snack stack for bordering tribe `b` (player `p`), or null:
+ * over SNACK_TILES, growing past it before our first tile falls, or its
+ * stack (plus its attacks on us) over purse.available("snack").
+ */
+export function snackSend(
+  v: Pick<View, "models" | "wm" | "purse" | "o">,
+  b: NeighborInfo,
+  p: Player,
+): number | null {
+  if (b.tiles > SNACK_TILES) return null;
+  // Still under the line when our first tile falls?
+  if (
+    b.tiles + SNACK_LEAD_TICKS * tribeGrowthPerTick(v.models, p) >
+    SNACK_TILES
+  ) {
+    return null;
+  }
+  const troops =
+    snackStack(v.models, v.wm.tiles, tribeTarget(b, p), v.o) +
+    Math.ceil(incomingFrom(v, b.smallID));
+  return troops > v.purse.available("snack") ? null : troops;
+}
+
+/** A tribe launch that fits: its sizing and the troops of its attacks on
+ *  us, which the send carries on top. */
+export interface TribeLaunch {
+  sizing: TribeSizing;
+  cancel: number;
+}
+
+/**
+ * §3.6.4 eligibility of bordering tribe `b` at `ratio`: over SNACK_TILES,
+ * S_b plus its attacks on us within purse.available("tribe"), and a loss per
+ * tile within tribeMaxPrice·priceScale of the free-land price. Null
+ * otherwise. (Not busy, the launch count and cap headroom are the
+ * caller's.)
+ */
+export function tribeLaunch(
+  v: Pick<View, "models" | "wm" | "purse" | "o">,
+  b: NeighborInfo,
+  p: Player,
+  ratio: number,
+  priceScale: number,
+): TribeLaunch | null {
+  const { o, models } = v;
+  if (b.tiles <= SNACK_TILES) return null;
+  const sizing = tribeSizing(
+    models,
+    v.wm.tiles,
+    tribeTarget(b, p),
+    models.regrowth(p),
+    ratio,
+    o,
+  );
+  const cancel = incomingFrom(v, b.smallID);
+  if (sizing.S + cancel > v.purse.available("tribe")) return null;
+  const maxPrice = o.tribeMaxPrice * priceScale * models.tnPrice(b.contactMix);
+  if (sizing.p > maxPrice) return null;
+  return { sizing, cancel };
+}
+
+/**
+ * §3.6.7: whether a launch of S troops with expected refund `refund`
+ * leaves home plus every expected refund (the Ledger's, `extra` more)
+ * within cap·(1 + headroomSlack).
+ */
+export function headroomOk(
+  v: Pick<View, "purse" | "ledger" | "o">,
+  S: number,
+  refund: number,
+  extra = 0,
+): boolean {
+  const cap = v.purse.floors.cap;
+  return (
+    v.purse.home - S + v.ledger.expectedRefunds() + extra + refund <=
+    cap + v.o.headroomSlack * cap
   );
 }
 
@@ -300,6 +473,8 @@ interface Candidate {
   info: NeighborInfo;
   player: Player;
   sizing: TribeSizing;
+  /** Troops of its attacks on us, cancelled first by the launch. */
+  cancel: number;
   snipe: boolean;
   /** value·n/S·(snipe bonus), before contest and buffer. */
   base: number;
@@ -350,6 +525,10 @@ class AllocatorRun {
   all(): void {
     const { o, v, s } = this;
     const stallBefore = inStall(s, v.tick, o);
+    // The streak's age crossed stallTicks since the last decision.
+    if (stallBefore && !inStall(s, v.tick - o.thinkEvery, o)) {
+      this.log("stall on");
+    }
     if (o.snacks) this.snacks();
     if (o.pokes) this.pokes();
     if (o.topUps) this.topUps(stallBefore);
@@ -357,7 +536,7 @@ class AllocatorRun {
     if (o.tribes) this.tribes(o.tribeRatio, 1, !stallBefore && o.headroom);
     this.updateStall();
     const stall = inStall(s, v.tick, o);
-    if (stall !== stallBefore) this.log(stall ? "stall on" : "stall off");
+    if (stallBefore && !stall) this.log("stall off");
     if (stall && o.stallTribes && o.tribes) {
       // Rule 1: tribes at stallRatio; the price is ×stallRatio/tribeRatio
       // but the troops would otherwise sit idle at the cap. Headroom is off.
@@ -426,13 +605,7 @@ class AllocatorRun {
 
   /** Whether we already have an attack, a pending send or a plan on it. */
   private busy(sid: number): boolean {
-    const l = this.v.ledger;
-    return (
-      this.touched.has(sid) ||
-      l.plan(sid) !== undefined ||
-      l.stackOn(sid) > 0 ||
-      l.retreatingOn(sid) > 0
-    );
+    return this.touched.has(sid) || ledgerBusy(this.v, sid);
   }
 
   private tribePlayer(sid: number): Player | null {
@@ -440,14 +613,8 @@ class AllocatorRun {
     return p.isPlayer() && p.isAlive() ? p : null;
   }
 
-  private target(info: NeighborInfo, p: Player): TribeTarget {
-    return {
-      tiles: info.tiles,
-      troops: info.troops,
-      isTraitor: p.isTraitor(),
-      contact: info.contact,
-      contactMix: info.contactMix,
-    };
+  private incomingFrom(sid: number): number {
+    return incomingFrom(this.v, sid);
   }
 
   private scan(p: Player): TribeScan {
@@ -463,18 +630,14 @@ class AllocatorRun {
   // ── §3.6.1 Snacks ──────────────────────────────────────────────────────
 
   private snacks(): void {
-    const { v, o } = this;
+    const { v } = this;
     for (const b of v.wm.tribes) {
       if (this.stopAll || this.stopped.has("snack")) return;
       if (b.tiles > SNACK_TILES || this.busy(b.smallID)) continue;
       const p = this.tribePlayer(b.smallID);
       if (p === null) continue;
-      // Still under the line when our first tile falls?
-      if (b.tiles + SNACK_LEAD_TICKS * this.growthPerTick(p) > SNACK_TILES) {
-        continue;
-      }
-      const troops = snackStack(v.models, v.wm.tiles, this.target(b, p), o);
-      if (troops > v.purse.available("snack")) continue;
+      const troops = snackSend(v, b, p);
+      if (troops === null) continue;
       if (
         this.attack(b.smallID, b.id, troops, {
           prio: Prio.Snack,
@@ -490,23 +653,6 @@ class AllocatorRun {
     }
   }
 
-  /** Tiles per tick the tribe's own land attacks take now (an upper-ish
-   *  estimate: every attack at its saturated or current pace). */
-  private growthPerTick(p: Player): number {
-    const models = this.v.models;
-    let sum = 0;
-    for (const a of p.outgoingAttacks()) {
-      if (a.sourceTile() !== null || a.retreating()) continue;
-      const r = models.tn(
-        TerrainType.Plains,
-        a.troops(),
-        a.borderSize() + BORDER_JITTER,
-      );
-      sum += models.tilesPerTick(r);
-    }
-    return sum;
-  }
-
   // ── §3.6.5 Enclose-and-poke ────────────────────────────────────────────
 
   private pokes(): void {
@@ -520,7 +666,9 @@ class AllocatorRun {
       }
       const p = this.tribePlayer(b.smallID);
       if (p === null || !this.scan(p).enclosed) continue;
-      const troops = Math.max(1, Math.ceil(o.pokeTroops));
+      const troops =
+        Math.max(1, Math.ceil(o.pokeTroops)) +
+        Math.ceil(this.incomingFrom(b.smallID));
       if (troops > v.purse.available("snack")) continue;
       if (
         this.attack(b.smallID, b.id, troops, {
@@ -554,6 +702,7 @@ class AllocatorRun {
       if (p === null) continue;
       const info = v.wm.neighbors.get(sid);
       const b: TribeTarget = {
+        type: p.type(),
         tiles: p.numTilesOwned(),
         troops: p.troops(),
         isTraitor: p.isTraitor(),
@@ -564,8 +713,9 @@ class AllocatorRun {
       const t = topUpSizing(v.models, v.wm.tiles, b, A, ratio, o);
       if (t.add <= 0) continue;
       const spend: SpendKind = kind === "strike" ? "strike" : "tribe";
-      const troops = Math.ceil(Math.min(t.add, v.purse.available(spend)));
-      if (troops < MIN_TOPUP_SHARE * t.add || troops < 1) continue;
+      const add = t.add + this.incomingFrom(sid);
+      const troops = Math.ceil(Math.min(add, v.purse.available(spend)));
+      if (troops < MIN_TOPUP_SHARE * add || troops < 1) continue;
       const refund = Math.max(0, A + troops - t.p * t.k);
       if (
         this.attack(sid, p.id(), troops, {
@@ -602,15 +752,28 @@ class AllocatorRun {
     }
     const A = Math.max(0, v.ledger.stackOn(0) - boats);
     const plan = v.ledger.plan(0);
+    // o.tnPace: the early trigger only while the class cap can carry it and
+    // the tnHorizon cadence after it (a decision every thinkEvery ticks).
+    // The cadence counts from the last TN send even after its plan ended
+    // (an attack that burnt out is no reason to send at once).
+    const cadence = Math.ceil(o.tnHorizon / o.thinkEvery) * o.thinkEvery;
+    const early = !o.tnPace || v.scheduler.paceOk("tn", v.tick, cadence);
+    const last =
+      plan?.kind === "tn"
+        ? plan.lastSend
+        : o.tnPace
+          ? v.scheduler.lastSent("tn")
+          : null;
     const t = tnPlan(
       v.models,
       F,
       v.wm.freeMix,
       A,
-      plan?.kind === "tn" ? plan.lastSend : null,
+      last,
       v.tick,
       v.purse.available("tn"),
       o,
+      early,
     );
     if (t.send <= 0) return;
     if (
@@ -637,12 +800,8 @@ class AllocatorRun {
   private tribes(ratio: number, priceScale: number, headroom: boolean): void {
     const { v, o } = this;
     if (this.stopAll || this.stopped.has("tribe")) return;
-    const avail0 = v.purse.available("tribe");
-    if (avail0 <= 0) return;
-    let active = 0;
-    for (const plan of v.ledger.allPlans()) {
-      if (plan.kind === "tribe" || plan.kind === "snipe") active++;
-    }
+    if (v.purse.available("tribe") <= 0) return;
+    let active = activeTribePlans(v);
     if (active >= o.maxTribeAttacks) return;
 
     const list: Candidate[] = [];
@@ -650,23 +809,22 @@ class AllocatorRun {
       if (b.tiles <= SNACK_TILES || this.busy(b.smallID)) continue;
       const p = this.tribePlayer(b.smallID);
       if (p === null) continue;
-      const sz = tribeSizing(
-        v.models,
-        v.wm.tiles,
-        this.target(b, p),
-        v.models.regrowth(p),
-        ratio,
-        o,
-      );
-      if (sz.S > avail0) continue;
-      const maxPrice =
-        o.tribeMaxPrice * priceScale * v.models.tnPrice(b.contactMix);
-      if (sz.p > maxPrice) continue;
+      const launch = tribeLaunch(v, b, p, ratio, priceScale);
+      if (launch === null) continue;
+      const { sizing: sz, cancel } = launch;
       const value = 1 + (o.lambdaGold * Number(b.gold)) / Math.max(1, sz.cost);
       const snipe =
         o.snipes && b.incomingFromNations > 0 && b.tiles < o.snipeTiles;
       const base = ((value * b.tiles) / sz.S) * (snipe ? o.snipeBonus : 1);
-      list.push({ info: b, player: p, sizing: sz, snipe, base, score: base });
+      list.push({
+        info: b,
+        player: p,
+        sizing: sz,
+        cancel,
+        snipe,
+        base,
+        score: base,
+      });
     }
     if (list.length === 0) return;
     const byScore = (a: Candidate, b: Candidate) =>
@@ -679,20 +837,14 @@ class AllocatorRun {
       list.sort(byScore);
     }
 
-    const cap = v.purse.floors.cap;
-    let refunds = v.ledger.expectedRefunds() + this.newRefunds;
     for (const c of list) {
       if (this.stopAll || this.stopped.has("tribe")) return;
       if (this.launches >= o.maxTribeLaunches) return;
       if (active >= o.maxTribeAttacks) return;
-      const S = Math.ceil(c.sizing.S);
+      const S = Math.ceil(c.sizing.S + c.cancel);
       // Never a partial clamp: a tribe that does not fit is skipped.
       if (S > v.purse.available("tribe")) continue;
-      if (
-        headroom &&
-        v.purse.home - S + refunds + c.sizing.refund >
-          cap + o.headroomSlack * cap
-      ) {
+      if (headroom && !headroomOk(v, S, c.sizing.refund, this.newRefunds)) {
         continue;
       }
       const ok = this.attack(c.info.smallID, c.info.id, S, {
@@ -706,7 +858,6 @@ class AllocatorRun {
       if (!ok) continue;
       this.launches++;
       active++;
-      refunds += c.sizing.refund;
       this.newRefunds += c.sizing.refund;
       if (ratio === o.tribeRatio) this.worked = true;
       this.log(

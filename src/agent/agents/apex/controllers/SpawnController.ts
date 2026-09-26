@@ -25,7 +25,7 @@ import { Prio } from "../../../lib/Scheduler";
 import { planSpawn } from "../../../lib/SpawnPlanner";
 import type { ApexOptions, SpawnMode } from "../options";
 import type { Controller, View } from "../policy";
-import { type ApexState, stateLog } from "../state";
+import { type ApexState, noteLine } from "../state";
 
 // The spawn (spec §3.2). Modes, by o.spawnMode:
 // - "plan": SpawnPlanner.planSpawn's tile, as the baseline spawns (E4's
@@ -404,12 +404,7 @@ export class SpawnController implements Controller {
   }
 
   private note(v: View, s: ApexState, line: string): void {
-    if (v.log !== undefined) {
-      v.log(line);
-      return;
-    }
-    stateLog(s, `[${v.tick}] ${line}`);
-    v.live?.log(line);
+    noteLine(v, s, line);
   }
 }
 

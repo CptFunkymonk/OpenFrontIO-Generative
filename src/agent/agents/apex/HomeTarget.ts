@@ -23,11 +23,6 @@ export const NO_FLOORS: HomeFloors = Object.freeze({
   strike: 0,
 });
 
-// A nation with T troops can land-attack us only while it may send at least
-// 0.2·H (isAttackTooWeak) out of T − 0.9·H (troopSendCap): safe iff
-// H > T/1.1 [PIN NationSendCap].
-const SEND_CAP_SAFE = 1.1;
-
 /**
  * §3.1:
  *   H_econ = homeX·cap, H_vw = vwGuard·cap,
@@ -37,6 +32,8 @@ const SEND_CAP_SAFE = 1.1;
  *   floor(snack, defense) = H_vw, floor(tn) = max(H_vw, tnKeep·H),
  *   floor(tribe, boat) = H, floor(strike) = H (M4: max(H, H_det_all)).
  * A food term above detCap·cap removes that nation from s.web.food instead.
+ * 1.1 is nm.sendCapSafe() at Impossible (0.95 at Hard); at Easy and Medium
+ * no home deters a land attack (sendCapSafe is Infinity), so H_food is 0.
  */
 export function homeFloors(v: HomeTargetInputs, s: ApexState): HomeFloors {
   const { o, models, me, nm, tick } = v;
@@ -46,11 +43,12 @@ export function homeFloors(v: HomeTargetInputs, s: ApexState): HomeFloors {
   let food = 0;
   let kept: PlayerID[] | null = null;
   const list = s.web.food;
-  for (let i = 0; i < list.length; i++) {
+  const safe = nm.sendCapSafe();
+  for (let i = 0; Number.isFinite(safe) && i < list.length; i++) {
     const id = list[i];
     if (nm.get(id)?.sharesBorderWithUs === true) {
       const T = nm.troopsAt(id, nm.nextDecision(id, tick));
-      const term = ((T + 1) / SEND_CAP_SAFE) * o.foodMargin;
+      const term = ((T + 1) / safe) * o.foodMargin;
       if (term > o.detCap * cap) {
         kept ??= list.slice(0, i);
         continue;

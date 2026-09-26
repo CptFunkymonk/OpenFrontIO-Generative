@@ -137,11 +137,8 @@ function nationTroopsOn(p: Player, me: Player): number {
 
 /** Asserts that `wm` is what the recount and the game's getters say. */
 function checkScan(game: Game, p: Player, wm: WorldModel, r: Recount): void {
-  const config = game.config();
   expect(wm.tick).toBe(game.ticks());
   expect(wm.home).toBe(p.troops());
-  expect(wm.cap).toBe(config.maxTroops(p));
-  expect(wm.regrowth).toBe(config.troopIncreaseRate(p));
   expect(wm.tiles).toBe(p.numTilesOwned());
   expect(wm.gold).toBe(p.gold());
 
@@ -149,9 +146,17 @@ function checkScan(game: Game, p: Player, wm: WorldModel, r: Recount): void {
   expect(wm.borderSize).toBe(p.borderTiles().size);
   expect(wm.freeFrontier).toBe(r.free);
   expect(wm.freeMix).toEqual(r.freeMix);
-  expect(wm.freeAcrossWater).toBe(
-    wm.freeFrontier === 0 && p.nearby().some((n) => !n.isPlayer()),
-  );
+  // Fields spec §2.3 has and the scan leaves out (nothing read them;
+  // freeAcrossWater cost a me.nearby() every decision).
+  for (const k of [
+    "cap",
+    "regrowth",
+    "tnStack",
+    "incomingNationSum",
+    "freeAcrossWater",
+  ]) {
+    expect(k in wm).toBe(false);
+  }
 
   const ids = [...r.contacts.keys()].sort((a, b) => a - b);
   expect([...wm.neighbors.keys()]).toEqual(ids);
@@ -206,14 +211,6 @@ function checkScan(game: Game, p: Player, wm: WorldModel, r: Recount): void {
       retreating: a.retreating(),
     })),
   );
-  expect(wm.tnStack).toBe(
-    out
-      .filter(
-        (a) =>
-          !a.target().isPlayer() && a.sourceTile() === null && !a.retreating(),
-      )
-      .reduce((s, a) => s + a.troops(), 0),
-  );
   const inc = p.incomingAttacks();
   expect(wm.incoming.map((a) => a.id)).toEqual(inc.map((a) => a.id()));
   for (let i = 0; i < inc.length; i++) {
@@ -224,11 +221,6 @@ function checkScan(game: Game, p: Player, wm: WorldModel, r: Recount): void {
       boat: inc[i].sourceTile() !== null,
     });
   }
-  expect(wm.incomingNationSum).toBe(
-    inc
-      .filter((a) => a.attacker().type() !== PlayerType.Bot)
-      .reduce((s, a) => s + a.troops(), 0),
-  );
   expect(wm.boatsInFlight).toBe(p.units(UnitType.TransportShip).length);
 }
 
@@ -357,7 +349,9 @@ describe("apex WorldModel (§2.3)", () => {
     const mine = scanWorld(game, me, null);
     expect(mine.tiles).toBeGreaterThan(1000);
     expect(mine.neighbors.size).toBeGreaterThan(0);
-  });
+    // It plays the game on to minute 1.5 first: near the 5 s default
+    // when the suite runs in parallel.
+  }, 60_000);
 
   test("the scan is deterministic, and `prev` carries firstSeen for incoming attacks that are still running", () => {
     const victim = game
@@ -383,13 +377,32 @@ describe("apex WorldModel (§2.3)", () => {
     expect(next.incoming.some((a) => a.id === "gone")).toBe(false);
   });
 
+  test("the scan never calls nearby() (a recompute over the whole border)", () => {
+    let calls = 0;
+    const players = game.allPlayers().filter((p) => p.isAlive());
+    const saved = players.map((p) => p.nearby);
+    for (const p of players) {
+      const f = p.nearby.bind(p);
+      p.nearby = () => {
+        calls++;
+        return f();
+      };
+    }
+    try {
+      for (const p of players) scanWorld(game, p, null);
+    } finally {
+      players.forEach((p, i) => (p.nearby = saved[i]));
+    }
+    expect(players.length).toBeGreaterThan(1);
+    expect(calls).toBe(0);
+  });
+
   test("a player that has not spawned scans to zeros", () => {
     expect(unspawned).toMatchObject({
       tick: 0,
       tiles: 0,
       borderSize: 0,
       freeFrontier: 0,
-      freeAcrossWater: false,
       tribes: [],
       nations: [],
       outgoing: [],

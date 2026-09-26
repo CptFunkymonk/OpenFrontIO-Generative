@@ -15,11 +15,23 @@ import {
   OWNER_WATER,
   OwnerGrid,
   RaceGrid,
+  VoyageField,
+  voyageField,
 } from "../../../lib/RaceField";
 import { Prio } from "../../../lib/Scheduler";
 import type { Controller, View } from "../policy";
-import { type ApexState, stateLog } from "../state";
-import { inStall, SNACK_TILES, tribeSizing } from "./ExpansionController";
+import { type ApexState, noteLine } from "../state";
+import {
+  activeTribePlans,
+  headroomOk,
+  inStall,
+  ledgerBusy,
+  scanTribe,
+  SNACK_TILES,
+  snackSend,
+  tribeLaunch,
+  tribeSizing,
+} from "./ExpansionController";
 
 // Boats (spec §3.7, §5.4). Every o.boatEvery ticks, while fewer than
 // config.boatMaxNumber() of our boats are at sea and the Purse has
@@ -36,10 +48,41 @@ import { inStall, SNACK_TILES, tribeSizing } from "./ExpansionController";
 // A target is tried only after a me.canBuild(TransportShip) probe, at most
 // o.boatProbes per decision; a failed probe is remembered per race-grid cell
 // in s.probes for PROBE_TTL ticks, and the target query leaves those cells
-// out, as it does targets a boat of ours is bound for. One boat per landmass of free land and one
-// per tribe at a time. Troops (§3.7): free land max(tnSat·S_sat, min(avail/3,
-// p_TN·islandFree)); a tribe S_b + o.beachheadExtra, skipped when it does
-// not fit (never a partial stack).
+// out, as it does targets a boat of ours is bound for. One boat per landmass
+// of free land and one per tribe at a time. Troops (§3.7): free land
+// max(tnSat·S_sat, min(avail/3, p_TN·free)); a tribe S_b + o.beachheadExtra,
+// skipped when it does not fit (never a partial stack).
+//
+// Not in the spec, from the arena (quick@4, showcase), each behind its own
+// option:
+// - Warships (o.boatAvoidWarships; the spec leaves them to M6): a target is
+//   skipped when its landing tile, or the straight route from the launch
+//   tile, passes within config.warshipTargettingRange() + o.boatWarshipMargin
+//   of a warship whose owner may shoot our boats (WarshipExecution
+//   .findBestTarget: transports first). Boats sunk 10-30 ticks after launch
+//   cost 550-940k troops on Onion and Four Islands. With o.boatRoutePrecheck
+//   the route is judged before the ~2 ms canBuild probe, from the launch
+//   tile the last probe to that landmass returned (s.naval.launch) or our
+//   shore tile nearest the landing.
+// - Voyages (o.boatVoyageScore, o.boatMaxVoyage): targets are scored by a
+//   sea-distance estimate (RaceField.voyageField, one BFS per OwnerGrid)
+//   instead of the distance from our centroid, and farther ones dropped.
+// - Tribes nations are eating (o.boatAvoidEatenTribes): a transport's
+//   target is the landing tile's owner at launch
+//   (TransportShipExecution.ts:75); a tile a nation takes during the voyage
+//   makes the nation build a warship at us and drop 15
+//   (NationWarshipBehavior.ts:188-297), and a tile it took before launch
+//   makes the boat attack the nation.
+// - After launch (onTick): o.boatCancelOnFlip turns back a boat whose
+//   landing an unallied nation now owns; o.boatCancelDead one whose target
+//   lost the landing, far out.
+// - Troops (o.boatPocket): free land counts the pocket around the landing,
+//   not the whole landmass; o.boatHeadroom applies §3.6.7 outside stall.
+// - Busy (busyTargets): a ship keeps its send's landmass or tribe busy
+//   (Ledger ships) whoever owns its landing now, a landed free-land boat's
+//   landmass for o.boatLandmassHold ticks, and this decision's land
+//   launches (Scheduler.hasKey) count; without o.boatBorderTribes, tribes
+//   that border us are the land allocator's.
 
 /** A failed canBuild probe is remembered this long, per race-grid cell. */
 export const PROBE_TTL = 200;
@@ -49,6 +92,14 @@ export const BOAT_TARGETS = 8;
  *  TAKE_TICKS (30 s). */
 const TAKE_TICKS = 300;
 const TAKE_FACTOR = 2;
+/** A nation lets be a transport closer than this (Manhattan) to its
+ *  landing (NationWarshipBehavior.ts:219-226). */
+export const NATION_TRACK_MIN = 20;
+/** Ticks a cancel_boat stays in flight (the retreat shows two ticks on). */
+const CANCEL_IN_FLIGHT = 5;
+/** Largest free-land pocket flood-filled around a landing; a larger one is
+ *  sized by its landmass's free land. */
+export const POCKET_MAX = 4096;
 
 export type BoatTrigger = "blocked" | "stall" | "water";
 
@@ -68,8 +119,102 @@ export interface LandmassFood {
   tribe: Map<number, number>;
 }
 
+/** Our memory (spec §2.10: controllers keep none of their own); plain data,
+ *  created on first use. */
+export interface NavalMemory {
+  /** The launch tile the last probe to each target landmass returned. */
+  launch: Record<string, { src: TileRef; at: number }>;
+  /** Boats we asked to turn back: unit id -> tick. */
+  cancelled: Record<string, number>;
+  /** Counts for logs and tests; never read by decisions. */
+  stats: {
+    cancels: number;
+    eaten: number;
+    headroom: number;
+    prechecks: number;
+  };
+}
+
+declare module "../state" {
+  interface ApexState {
+    /** NavalController memory (NavalController.ts). */
+    naval?: NavalMemory;
+  }
+}
+
+export function navalMemory(s: ApexState): NavalMemory {
+  s.naval ??= {
+    launch: {},
+    cancelled: {},
+    stats: { cancels: 0, eaten: 0, headroom: 0, prechecks: 0 },
+  };
+  return s.naval;
+}
+
+/** The voyage field of an OwnerGrid's decisions (one BFS per grid), from
+ *  our ocean-shore border then: a memo of plain data. */
+const voyageMemo = new WeakMap<OwnerGrid, { mine: number; f: VoyageField }>();
+
+function voyageOf(v: View, grid: RaceGrid, og: OwnerGrid): VoyageField {
+  const mine = v.me.smallID();
+  const memo = voyageMemo.get(og);
+  if (memo !== undefined && memo.mine === mine) return memo.f;
+  const f = voyageField(v.game, grid, v.wm.shoreSample);
+  voyageMemo.set(og, { mine, f });
+  return f;
+}
+
 export class NavalController implements Controller {
   readonly name = "naval";
+
+  /** After launch: turn back boats whose landing went wrong (o.boatCancelOnFlip,
+   *  o.boatCancelDead). A few ships a tick. */
+  onTick(v: View, s: ApexState): void {
+    const { o, game, me, tick } = v;
+    if (!o.boatCancelOnFlip && !o.boatCancelDead) return;
+    if (me.unitCount(UnitType.TransportShip) === 0) return;
+    const mem = navalMemory(s);
+    for (const [id, at] of Object.entries(mem.cancelled)) {
+      if (tick - at >= CANCEL_IN_FLIGHT) delete mem.cancelled[id];
+    }
+    for (const u of me.units(UnitType.TransportShip)) {
+      const dst = u.targetTile();
+      if (dst === undefined || u.transportShipState().isRetreating) continue;
+      if (mem.cancelled[String(u.id())] !== undefined) continue;
+      const rec = v.ledger.ship(u.id());
+      if (rec === undefined) continue;
+      const owner = game.owner(dst);
+      const ownerID = owner.isPlayer() ? owner.smallID() : 0;
+      if (ownerID === rec.target) continue;
+      const left = game.manhattanDist(u.tile(), dst);
+      const nation =
+        owner.isPlayer() &&
+        owner !== me &&
+        owner.type() === PlayerType.Nation &&
+        !me.isAlliedWith(owner);
+      let why: string | null = null;
+      if (o.boatCancelOnFlip && nation && left >= NATION_TRACK_MIN) {
+        why = `landing now ${owner.isPlayer() ? owner.name() : "?"}'s`;
+      } else if (o.boatCancelDead && left > o.boatCancelFar) {
+        why = `target ${rec.target} lost the landing`;
+      }
+      if (why === null) continue;
+      const ok = v.scheduler.offer({
+        intent: { type: "cancel_boat", unitID: u.id() },
+        prio: Prio.Recall,
+        cls: "defense",
+        key: `cancel_boat:${u.id()}`,
+      });
+      if (!ok) continue;
+      mem.cancelled[String(u.id())] = tick;
+      mem.stats.cancels++;
+      this.note(
+        v,
+        s,
+        `boat cancel #${u.id()} ${Math.round(u.troops())} (${why}, ${left} tiles out)`,
+      );
+    }
+  }
 
   decide(v: View, s: ApexState): void {
     const { o, game, me, tick, wm, race, owners } = v;
@@ -87,8 +232,9 @@ export class NavalController implements Controller {
     if (trigger === null) return;
     s.timers.lastBoat = tick;
     pruneProbes(s, tick);
+    const mem = navalMemory(s);
 
-    const busy = busyTargets(v, race);
+    const busy = busyTargets(v, race, trigger);
     const failed = new Set<number>();
     for (const [cell, at] of Object.entries(s.probes)) {
       if (tick - at < PROBE_TTL) failed.add(Number(cell));
@@ -108,13 +254,24 @@ export class NavalController implements Controller {
       mask.comps?.has(comp) === true ||
       (owner === 0 ? busy.comps.has(comp) : busy.tribes.has(owner)) ||
       failed.has(cell);
+    const guard = o.boatAvoidWarships ? hostileWarships(game, me) : [];
+    const reach = game.config().warshipTargettingRange() + o.boatWarshipMargin;
+    const voyage = o.boatVoyageScore
+      ? { field: voyageOf(v, race, owners), max: o.boatMaxVoyage }
+      : undefined;
+    let guarded = 0;
+    const markGuarded = (cell: number) => {
+      guarded++;
+      s.probes[String(cell)] = tick;
+      failed.add(cell);
+    };
     let inFlight = wm.boatsInFlight;
     let probes = 0;
     let rounds = 0;
     while (probes < o.boatProbes && inFlight < max && rounds <= o.boatProbes) {
       rounds++;
       const og = maskOwners(game, race, owners, me.smallID(), mask);
-      const list = boatTargets(game, race, og, me, BOAT_TARGETS);
+      const list = boatTargets(game, race, og, me, BOAT_TARGETS, voyage);
       let fresh = false;
       for (const t of list) {
         if (probes >= o.boatProbes || inFlight >= max) return;
@@ -122,23 +279,77 @@ export class NavalController implements Controller {
         const cell = cellOf(race, game, t.tile);
         // (The landing may lie in a neighbour of its sample's cell.)
         if (skip(t.comp, t.tribeSmallID ?? 0, cell)) continue;
-        const send = this.sizing(v, t, food);
+        if (nearWarship(game, guard, t.tile, t.tile, reach)) {
+          markGuarded(cell);
+          continue;
+        }
+        if (o.boatRoutePrecheck && guard.length > 0) {
+          const est = this.launchEstimate(v, mem, t);
+          if (est !== null && nearWarship(game, guard, est, t.tile, reach)) {
+            mem.stats.prechecks++;
+            markGuarded(cell);
+            continue;
+          }
+        }
+        const send = this.sizing(v, s, t, food, trigger);
         if (send === null) continue;
         fresh = true;
         probes++;
-        if (me.canBuild(UnitType.TransportShip, t.tile) === false) {
+        const src = me.canBuild(UnitType.TransportShip, t.tile);
+        if (src === false) {
           s.probes[String(cell)] = tick;
           failed.add(cell);
           continue;
         }
-        if (!this.send(v, s, trigger, t, send)) return;
+        mem.launch[String(t.comp)] = { src, at: tick };
+        if (nearWarship(game, guard, src, t.tile, reach)) {
+          markGuarded(cell);
+          continue;
+        }
+        if (!this.send(v, s, trigger, t, send, guarded)) return;
         inFlight++;
         if (t.tribeSmallID !== null) busy.tribes.add(t.tribeSmallID);
         else busy.comps.add(t.comp);
       }
       // Nothing in the list was worth a probe: a new query finds the same.
-      if (!fresh) return;
+      if (!fresh) break;
     }
+    // (A send's own line counts the targets skipped before it.)
+    if (guarded > 0 && inFlight === wm.boatsInFlight) {
+      this.note(
+        v,
+        s,
+        `boat (${trigger}) none: ${guarded} targets guarded by ${guard.length / 2} warships`,
+      );
+    }
+  }
+
+  /**
+   * Where a boat to `t` would likely leave from, before a probe says: the
+   * launch tile the last probe to its landmass returned (within PROBE_TTL),
+   * else our ocean-shore border tile (WorldModel.shoreSample) nearest the
+   * landing on the landing's water body; null if none.
+   */
+  private launchEstimate(
+    v: View,
+    mem: NavalMemory,
+    t: BoatTarget,
+  ): TileRef | null {
+    const { game, tick } = v;
+    const known = mem.launch[String(t.comp)];
+    if (known !== undefined && tick - known.at < PROBE_TTL) return known.src;
+    const wc = game.getWaterComponent(t.tile);
+    let best: TileRef | null = null;
+    let bestD = Infinity;
+    for (const x of v.wm.shoreSample) {
+      if (wc !== null && !game.hasWaterComponent(x, wc)) continue;
+      const d = game.manhattanDist(x, t.tile);
+      if (d < bestD || (d === bestD && best !== null && x < best)) {
+        best = x;
+        bestD = d;
+      }
+    }
+    return best;
   }
 
   /** Offers the boat; false when the Scheduler refuses it. */
@@ -148,6 +359,7 @@ export class NavalController implements Controller {
     trigger: BoatTrigger,
     t: BoatTarget,
     send: BoatSend,
+    guarded = 0,
   ): boolean {
     const tribe = t.tribeSmallID;
     const accepted = v.scheduler.offer({
@@ -172,23 +384,39 @@ export class NavalController implements Controller {
     this.note(
       v,
       s,
-      `boat (${trigger}) ${send.troops} to ${tribe !== null ? `tribe ${tribe}` : "free land"} at ${game.x(t.tile)},${game.y(t.tile)} (landmass ${t.comp}, food ${t.food})`,
+      `boat (${trigger}) ${send.troops} to ${tribe !== null ? `tribe ${tribe}` : "free land"} at ${game.x(t.tile)},${game.y(t.tile)} (landmass ${t.comp}, food ${t.food}, ${Math.round(t.dist)} tiles)${guarded > 0 ? `, ${guarded} guarded skipped` : ""}`,
     );
     return true;
   }
 
-  /** Troops for a boat to `t`, or null when the target is taken, not
-   *  attackable, or does not fit the Purse. */
-  private sizing(v: View, t: BoatTarget, food: LandmassFood): BoatSend | null {
+  /** Troops for a boat to `t`, or null when the target is taken, eaten,
+   *  not attackable, or does not fit the Purse or the cap headroom. */
+  private sizing(
+    v: View,
+    s: ApexState,
+    t: BoatTarget,
+    food: LandmassFood,
+    trigger: BoatTrigger,
+  ): BoatSend | null {
     const { o, game, me, models } = v;
     const avail = v.purse.available("boat");
     const mix = tileMix(game, t.tile);
     if (t.tribeSmallID === null) {
-      const islandFree = food.free.get(t.comp) ?? 0;
-      const troops = Math.max(
-        o.tnSat * models.tnSaturation(mix),
-        Math.min(avail / 3, models.tnPrice(mix) * islandFree),
-      );
+      const sat = o.tnSat * models.tnSaturation(mix);
+      const price = models.tnPrice(mix);
+      let free = food.free.get(t.comp) ?? 0;
+      if (o.boatPocket) {
+        if (food.ours.has(t.comp)) {
+          // Our own landmass: its free land is specks inside nations'
+          // land, taken during the voyage.
+          free = 0;
+        } else {
+          const limit = Math.min(POCKET_MAX, Math.ceil(avail / 3 / price));
+          const pocket = freePocket(game, t.tile, limit);
+          if (pocket < limit) free = pocket;
+        }
+      }
+      const troops = Math.max(sat, Math.min(avail / 3, price * free));
       return { troops: Math.floor(Math.min(troops, avail)) };
     }
     const b = game.playerBySmallID(t.tribeSmallID);
@@ -196,6 +424,10 @@ export class NavalController implements Controller {
       return null;
     }
     if (me.isFriendly(b) || !me.canAttackPlayer(b)) return null;
+    if (o.boatAvoidEatenTribes && tribeEaten(v, b, t.tile) !== null) {
+      navalMemory(s).stats.eaten++;
+      return null;
+    }
     const sz = tribeSizing(
       models,
       me.numTilesOwned(),
@@ -213,21 +445,139 @@ export class NavalController implements Controller {
     if (sz.p > o.tribeMaxPrice * models.tnPrice(mix)) return null;
     const troops = Math.ceil(sz.S + o.beachheadExtra);
     if (troops > avail) return null;
-    return {
-      troops,
-      clamp: sz.A0 * o.tribeMargin,
-      refund: Math.max(0, troops - sz.cost),
-    };
+    const refund = Math.max(0, troops - sz.cost);
+    // §3.6.7 outside stall: the refund would come home above the cap.
+    if (
+      o.boatHeadroom &&
+      refund > 0 &&
+      trigger !== "stall" &&
+      !inStall(s, v.tick, o) &&
+      !headroomOk(v, troops, refund)
+    ) {
+      navalMemory(s).stats.headroom++;
+      return null;
+    }
+    return { troops, clamp: sz.A0 * o.tribeMargin, refund };
   }
 
   private note(v: View, s: ApexState, line: string): void {
-    if (v.log !== undefined) {
-      v.log(line);
-      return;
-    }
-    stateLog(s, `[${v.tick}] ${line}`);
-    v.live?.log(line);
+    noteLine(v, s, line);
   }
+}
+
+/**
+ * Why tribe `b` is being eaten by nations around landing `tile`
+ * (o.boatAvoidEatenTribes), or null: the landing is not its own (live), a
+ * nation attacks it, a nation's tile lies within o.boatEatenRadius
+ * (Chebyshev) of the landing, or a nation touching it has
+ * o.boatEatenRatio × its troops above its own reserve (T − reserve·M, the
+ * tribe budget of calculateBotAttackTroops, AiAttackBehavior.ts:1149-1166).
+ */
+export function tribeEaten(
+  v: Pick<View, "game" | "me" | "models" | "nm" | "o">,
+  b: Player,
+  tile: TileRef,
+): string | null {
+  const { game, me, o } = v;
+  if (game.ownerID(tile) !== b.smallID()) return "landing not its own";
+  const isNation = (p: Player) => p !== me && p.type() === PlayerType.Nation;
+  for (const a of b.incomingAttacks()) {
+    if (isNation(a.attacker())) return `attacked by ${a.attacker().name()}`;
+  }
+  const r = Math.max(0, Math.floor(o.boatEatenRadius));
+  const x0 = game.x(tile);
+  const y0 = game.y(tile);
+  for (
+    let y = Math.max(0, y0 - r);
+    y <= Math.min(game.height() - 1, y0 + r);
+    y++
+  ) {
+    for (
+      let x = Math.max(0, x0 - r);
+      x <= Math.min(game.width() - 1, x0 + r);
+      x++
+    ) {
+      const id = game.ownerID(game.ref(x, y));
+      if (id === 0 || id === b.smallID() || id === me.smallID()) continue;
+      const p = game.playerBySmallID(id);
+      if (p.isPlayer() && isNation(p)) return `${p.name()} near the landing`;
+    }
+  }
+  const D = b.troops();
+  for (const n of scanTribe(game, b, me.smallID()).nations) {
+    const N = game.playerBySmallID(n);
+    if (!N.isPlayer() || N === me) continue;
+    const free = N.troops() - v.nm.params(N.id()).reserve * v.models.cap(N);
+    if (free >= o.boatEatenRatio * D) return `${N.name()} can eat it`;
+  }
+  return null;
+}
+
+/** Unowned passable land connected (4-neighbours) to `tile`, counted up to
+ *  `limit` (a flood fill of at most `limit` tiles; `limit` means "at least").
+ *  Fallout tiles do not count, as free land is taken around them. */
+export function freePocket(game: Game, tile: TileRef, limit: number): number {
+  if (limit <= 0) return 0;
+  const free = (t: TileRef) =>
+    game.isLand(t) &&
+    !game.isImpassable(t) &&
+    !game.hasOwner(t) &&
+    !game.hasFallout(t);
+  if (!free(tile)) return 0;
+  const seen = new Set<TileRef>([tile]);
+  const stack: TileRef[] = [tile];
+  while (stack.length > 0 && seen.size < limit) {
+    const t = stack.pop()!;
+    game.forEachNeighbor(t, (n) => {
+      if (seen.size >= limit || seen.has(n) || !free(n)) return;
+      seen.add(n);
+      stack.push(n);
+    });
+  }
+  return Math.min(seen.size, limit);
+}
+
+/** Positions (x, y pairs) of the warships that may shoot our boats: active,
+ *  not ours, and owned by a player not friendly to us (the warship's own
+ *  test is owner.canAttackPlayer(us, true), WarshipExecution.ts:295-305). */
+export function hostileWarships(game: Game, me: Player): number[] {
+  const out: number[] = [];
+  for (const w of game.units(UnitType.Warship)) {
+    if (!w.isActive()) continue;
+    const owner = w.owner();
+    if (owner === me || owner.isFriendly(me, true)) continue;
+    const t = w.tile();
+    out.push(game.x(t), game.y(t));
+  }
+  return out;
+}
+
+/** Whether a warship of `ws` (x, y pairs) lies within `range` (Euclidean,
+ *  as its targeting, GameImpl.nearbyUnits) of the segment a-b. */
+export function nearWarship(
+  game: Game,
+  ws: readonly number[],
+  a: TileRef,
+  b: TileRef,
+  range: number,
+): boolean {
+  if (ws.length === 0) return false;
+  const ax = game.x(a);
+  const ay = game.y(a);
+  const dx = game.x(b) - ax;
+  const dy = game.y(b) - ay;
+  const len2 = dx * dx + dy * dy;
+  const r2 = range * range;
+  for (let i = 0; i < ws.length; i += 2) {
+    const px = ws[i] - ax;
+    const py = ws[i + 1] - ay;
+    const u =
+      len2 === 0 ? 0 : Math.min(1, Math.max(0, (px * dx + py * dy) / len2));
+    const ex = px - u * dx;
+    const ey = py - u * dy;
+    if (ex * ex + ey * ey <= r2) return true;
+  }
+  return false;
 }
 
 /** Which trigger holds (§3.7), most permissive first; null: none. */
@@ -236,7 +586,7 @@ export function boatTrigger(
   s: ApexState,
   food: LandmassFood,
 ): BoatTrigger | null {
-  if (blocked(v)) return "blocked";
+  if (blocked(v, s)) return "blocked";
   if (v.o.stallBoats && inStall(s, v.tick, v.o)) return "stall";
   if (waterPriority(v, s, food)) return "water";
   return null;
@@ -244,49 +594,37 @@ export function boatTrigger(
 
 /**
  * "Blocked": no free land borders us, and no tribe launch is open to the
- * land allocator: every bordering tribe it may attack has a plan, costs
- * more than the Purse holds for tribes, or is too dense (the §3.6.4
- * eligibility, with the ExpansionController's own sizing). A snack counts
- * as a launch. With the allocator's tribes off, no free land is enough.
+ * land allocator. The allocator's own tests (ExpansionController:
+ * ledgerBusy, snackSend, tribeLaunch, headroomOk, activeTribePlans), so the
+ * two never disagree: every bordering tribe it may attack is busy, a snack
+ * it would skip (growing past 100 tiles first, or over the snack purse with
+ * its attacks on us), or a launch it would skip (over the tribe purse with
+ * its attacks on us, too dense, or, outside stall mode with o.headroom,
+ * over the cap headroom). A tribe the allocator launched at this decision
+ * means not blocked. With the allocator's tribes off, no free land is
+ * enough. `s` gives stall mode (headroom off); without it, not in stall.
  */
-export function blocked(v: View): boolean {
-  const { o, wm, models } = v;
+export function blocked(v: View, s?: ApexState): boolean {
+  const { o, wm } = v;
   if (wm.freeFrontier > 0) return false;
   if (!o.expansion) return true;
-  let active = 0;
-  for (const plan of v.ledger.allPlans()) {
-    if (plan.kind === "tribe" || plan.kind === "snipe") active++;
-  }
-  const avail = v.purse.available("tribe");
-  const l = v.ledger;
+  const active = activeTribePlans(v);
+  const headroom = o.headroom && !(s !== undefined && inStall(s, v.tick, o));
   for (const b of wm.tribes) {
-    // Busy as the allocator counts it: a plan, or troops on it.
     const sid = b.smallID;
-    if (l.plan(sid) !== undefined || l.stackOn(sid) > 0) continue;
-    if (l.retreatingOn(sid) > 0) continue;
+    if (v.scheduler.hasKey(`attack:${sid}`)) return false;
+    if (ledgerBusy(v, sid)) continue;
+    const p = v.game.playerBySmallID(sid);
+    if (!p.isPlayer() || !p.isAlive()) continue;
     if (b.tiles <= SNACK_TILES) {
-      if (o.snacks) return false;
+      if (o.snacks && snackSend(v, b, p) !== null) return false;
       continue;
     }
     if (!o.tribes || active >= o.maxTribeAttacks) continue;
-    const p = v.game.playerBySmallID(b.smallID);
-    if (!p.isPlayer()) continue;
-    const sz = tribeSizing(
-      models,
-      wm.tiles,
-      {
-        tiles: b.tiles,
-        troops: b.troops,
-        isTraitor: p.isTraitor(),
-        contact: b.contact,
-        contactMix: b.contactMix,
-      },
-      models.regrowth(p),
-      o.tribeRatio,
-      o,
-    );
-    if (sz.S > avail) continue;
-    if (sz.p > o.tribeMaxPrice * models.tnPrice(b.contactMix)) continue;
+    const launch = tribeLaunch(v, b, p, o.tribeRatio, 1);
+    if (launch === null) continue;
+    const S = Math.ceil(launch.sizing.S + launch.cancel);
+    if (headroom && !headroomOk(v, S, launch.sizing.refund)) continue;
     return false;
   }
   return true;
@@ -370,7 +708,7 @@ export function landmassFood(
     const cell = cells[i];
     if (cell < 0) continue;
     const comp = grid.comp[cell];
-    if (comp < 0) continue;
+    if (comp < 0 || comp > maxComp) continue;
     const id = owner[i];
     if (id === mine) ours[comp] = 1;
     else if (id === 0) free[comp]++;
@@ -414,11 +752,14 @@ export function maskOwners(
   let maxComp = -1;
   for (const c of grid.compLand.keys()) maxComp = Math.max(maxComp, c);
   const compOff = new Uint8Array(maxComp + 2);
-  for (const c of mask.comps ?? []) if (c >= 0) compOff[c] |= 1;
-  for (const c of mask.freeComps) if (c >= 0) compOff[c] |= 2;
+  for (const c of mask.comps ?? []) if (c >= 0 && c <= maxComp) compOff[c] |= 1;
+  for (const c of mask.freeComps) if (c >= 0 && c <= maxComp) compOff[c] |= 2;
   const cellOff = new Uint8Array(grid.cw * grid.ch);
   for (const c of mask.cells) if (c >= 0 && c < cellOff.length) cellOff[c] = 1;
-  const ownerOff = mask.owners;
+  let maxOwner = 0;
+  for (const id of mask.owners) maxOwner = Math.max(maxOwner, id);
+  const ownerOff = new Uint8Array(maxOwner + 1);
+  for (const id of mask.owners) if (id > 0) ownerOff[id] = 1;
   const cells = sampleCells(game, grid, og);
   const owner = og.owner.slice();
   for (let i = 0; i < owner.length; i++) {
@@ -426,11 +767,11 @@ export function maskOwners(
     const cell = cells[i];
     if (id === OWNER_WATER || id === mine || cell < 0) continue;
     const comp = grid.comp[cell];
-    const off = comp >= 0 ? compOff[comp] : 0;
+    const off = comp >= 0 && comp <= maxComp ? compOff[comp] : 0;
     if (
       (off & 1) !== 0 ||
       cellOff[cell] === 1 ||
-      (id === 0 ? (off & 2) !== 0 : ownerOff.has(id))
+      (id === 0 ? (off & 2) !== 0 : id <= maxOwner && ownerOff[id] === 1)
     ) {
       owner[i] = OWNER_WATER;
     }
@@ -438,23 +779,52 @@ export function maskOwners(
   return { ...og, owner };
 }
 
-/** Landmasses with our free-land boat heading there, and tribes with a
- *  boat of ours or any plan (one boat per landmass, one per tribe). */
-function busyTargets(
+/**
+ * Landmasses and tribes a boat must not go to now (one boat per landmass of
+ * free land, one per tribe):
+ * - tribes with a plan of ours, or given an attack this decision (the
+ *   allocator's offers are flushed after Naval decides: Scheduler.hasKey);
+ * - each ship of ours (Ledger ships): its send's tribe, or for a free-land
+ *   send its landing's landmass, whoever owns the landing now; a free-land
+ *   ship landed less than o.boatLandmassHold ticks ago keeps its landmass
+ *   (a land TN send absorbs the landing attack, which then has no source
+ *   tile, AttackExecution.ts:171-181, and the OwnerGrid shows the landing
+ *   only at its next refresh);
+ * - landmasses where a landing of ours still fights (an attack with a
+ *   source tile on free land);
+ * - without o.boatBorderTribes, unless the trigger is "water", every tribe
+ *   that borders us (the land allocator's).
+ */
+export function busyTargets(
   v: View,
   grid: RaceGrid,
+  trigger: BoatTrigger,
 ): { comps: Set<number>; tribes: Set<number> } {
-  const { game, me } = v;
+  const { game, me, o, tick } = v;
   const comps = new Set<number>();
   const tribes = new Set<number>();
+  const compOf = (t: TileRef) => grid.comp[cellOf(grid, game, t)];
   for (const plan of v.ledger.allPlans()) {
     if (plan.targetSmallID !== 0) tribes.add(plan.targetSmallID);
+  }
+  for (const b of v.wm.tribes) {
+    if (v.scheduler.hasKey(`attack:${b.smallID}`)) tribes.add(b.smallID);
+    else if (!o.boatBorderTribes && trigger !== "water") tribes.add(b.smallID);
+  }
+  for (const r of v.ledger.allShips()) {
+    if (r.dst < 0) continue;
+    if (r.goneAt === null) {
+      if (r.target !== 0) tribes.add(r.target);
+      else comps.add(compOf(r.dst));
+    } else if (r.target === 0 && tick - r.goneAt < o.boatLandmassHold) {
+      comps.add(compOf(r.dst));
+    }
   }
   for (const u of me.units(UnitType.TransportShip)) {
     const t = u.targetTile();
     if (t === undefined) continue;
     const owner = game.ownerID(t);
-    if (owner === 0) comps.add(grid.comp[cellOf(grid, game, t)]);
+    if (owner === 0) comps.add(compOf(t));
     else tribes.add(owner);
   }
   // A landing still fighting: its landmass is being taken (the OwnerGrid,
@@ -462,7 +832,7 @@ function busyTargets(
   for (const a of me.outgoingAttacks()) {
     const src = a.sourceTile();
     if (src === null) continue;
-    if (!a.target().isPlayer()) comps.add(grid.comp[cellOf(grid, game, src)]);
+    if (!a.target().isPlayer()) comps.add(compOf(src));
   }
   return { comps, tribes };
 }

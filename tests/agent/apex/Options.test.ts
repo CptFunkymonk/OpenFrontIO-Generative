@@ -5,6 +5,7 @@ import {
   APEX_DEFAULTS,
   ApexOptions,
   parseApexOptions,
+  UNBUILT,
 } from "../../../src/agent/agents/apex/options";
 import {
   ApexPolicy,
@@ -97,21 +98,46 @@ describe("apex options", () => {
     expect(() => parseApexOptions({ homeX: NaN })).toThrow("homeX");
   });
 
-  test("merges class caps, dedupes windows, and allows a null reach", () => {
+  test("merges class caps and allows a null reach", () => {
     const o = parseApexOptions({
       classCapsPerMinute: { tn: 20 },
-      strikeWindows: ["W1", "W3", "W1"],
       allyReachCells: 5,
     });
     expect(o.classCapsPerMinute).toEqual({
       ...APEX_DEFAULTS.classCapsPerMinute,
       tn: 20,
     });
-    expect(o.strikeWindows).toEqual(["W1", "W3"]);
     expect(o.allyReachCells).toBe(5);
     expect(parseApexOptions({ allyReachCells: null }).allyReachCells).toBe(
       null,
     );
+  });
+
+  test("refuses every unbuilt feature set on, and accepts its default", () => {
+    const on: Record<string, unknown> = {
+      softFloor: true,
+      allyOracle: true,
+      defenseSearch: true,
+      deleteCaptured: true,
+      strikeWindows: ["W1", "W3", "W1"],
+      strikeFork: true,
+      steering: true,
+      steerGoldShare: 0.9,
+      bombs: true,
+      mirvGate: true,
+    };
+    expect(Object.keys(on).sort()).toEqual(Object.keys(UNBUILT).sort());
+    for (const [key, value] of Object.entries(on)) {
+      expect(() => parseApexOptions({ [key]: value }), key).toThrow(
+        new RegExp(`"${key}" is not built until M\\d`),
+      );
+      const k = key as keyof ApexOptions;
+      expect(parseApexOptions({ [key]: APEX_DEFAULTS[k] })[k]).toEqual(
+        APEX_DEFAULTS[k],
+      );
+    }
+    // The endgame stub's flag is a documented no-op: tests trim with it.
+    expect(parseApexOptions({ endgame: false }).endgame).toBe(false);
   });
 
   test("defaults follow the M2 build order", () => {
@@ -142,8 +168,12 @@ describe("apex options", () => {
     ];
     for (const key of on) expect(APEX_DEFAULTS[key], key).toBe(true);
     expect(APEX_DEFAULTS.spawnMode).toBe("race");
-    // Step 4 of the build uses "free" until NukeModel exists (M3).
-    expect(APEX_DEFAULTS.structurePolicy).toBe("free");
+    // The §3.9 target default, with the level cap and the spread: step
+    // 5's "free" lost stacked cities to atom bombs (arena quick@4,
+    // showcase, smoke).
+    expect(APEX_DEFAULTS.structurePolicy).toBe("exposure");
+    expect(APEX_DEFAULTS.cityMaxLevel).toBe(3);
+    expect(APEX_DEFAULTS.citySpread).toBe(true);
     // Step 8 (rollout spawn), step 9 (stall strike) and M3-M5 off.
     const off: (keyof ApexOptions)[] = [
       "stallStrike",

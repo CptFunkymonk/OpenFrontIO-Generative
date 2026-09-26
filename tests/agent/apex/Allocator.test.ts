@@ -30,6 +30,7 @@ import {
   SpendKind,
 } from "../../../src/agent/lib/Scheduler";
 import { scanWorld } from "../../../src/agent/lib/WorldModel";
+import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { PlayerExecution } from "../../../src/core/execution/PlayerExecution";
 import { Player } from "../../../src/core/game/Game";
 import {
@@ -289,6 +290,64 @@ describe("apex allocator (§3.6): one decision over a recording Purse", () => {
       expect(launched).not.toContain(i.targetID);
     }
     void tribes;
+  });
+});
+
+describe("apex allocator: sends to a tribe that is attacking us", () => {
+  test("carry its attack's troops, which the new attack cancels 1:1 at init [PIN AttackMerge]; the snack still kills and the launch keeps its S", async () => {
+    const { f, tribes } = await scene(400_000);
+    const snackT = tribes.get("SNACK001")!;
+    const cheap = tribes.get("CHEAP001")!;
+    // Both attack us (tribe attacks are built as AiAttackBehavior builds
+    // them); the attacks init in this tick.
+    f.game.addExecution(new AttackExecution(1_500, snackT, f.me.id()));
+    f.game.addExecution(new AttackExecution(4_000, cheap, f.me.id()));
+    f.game.executeNextTick();
+    const incoming = (p: Player) =>
+      f.me
+        .incomingAttacks()
+        .filter((a) => a.attacker() === p)
+        .reduce((x, a) => x + a.troops(), 0);
+    const X1 = incoming(snackT);
+    const X2 = incoming(cheap);
+    expect(X1).toBeGreaterThan(0);
+    expect(X2).toBeGreaterThan(0);
+    const s = createState();
+    const { sent, wm, models } = decideOnce(f, OPTIONS, s);
+    const to = (p: Player) =>
+      sent.find((i) => i.type === "attack" && i.targetID === p.id());
+    const snack = to(snackT);
+    const launch = to(cheap);
+    expect(snack).toBeDefined();
+    expect(launch).toBeDefined();
+    const info1 = wm.neighbors.get(snackT.smallID())!;
+    expect(snack!.type === "attack" && snack!.troops).toBe(
+      snackStack(models, wm.tiles, { ...info1, isTraitor: false }, OPTIONS) +
+        Math.ceil(X1),
+    );
+    const info2 = wm.neighbors.get(cheap.smallID())!;
+    const sz = tribeSizing(
+      models,
+      wm.tiles,
+      { ...info2, isTraitor: false },
+      models.regrowth(cheap),
+      OPTIONS.tribeRatio,
+      OPTIONS,
+    );
+    expect(launch!.type === "attack" && launch!.troops).toBe(
+      Math.ceil(sz.S + X2),
+    );
+    for (const i of sent) submit(f, i);
+    f.game.executeNextTick(); // init: both incoming attacks are cancelled
+    expect(incoming(snackT)).toBe(0);
+    expect(incoming(cheap)).toBe(0);
+    // At least S is left: their attack ticked first in this turn and lost
+    // troops taking our tiles, so it cancelled a little less than X.
+    const ours = f.me.outgoingAttacks().find((a) => a.target() === cheap)!;
+    expect(ours.troops()).toBeGreaterThanOrEqual(sz.S - 1);
+    expect(ours.troops()).toBeLessThanOrEqual(sz.S + X2);
+    f.game.executeNextTick(); // the snack's first tile
+    expect(snackT.isAlive()).toBe(false);
   });
 });
 

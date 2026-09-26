@@ -7,6 +7,7 @@ import {
 import { Ledger, PlanKind, SendMeta } from "../../../src/agent/lib/Ledger";
 import {
   createPurse,
+  DUP_GUARD_TICKS,
   HomeFloors,
   IntentClass,
   Prio,
@@ -129,6 +130,44 @@ describe("apex Scheduler (§2.6, §3.10)", () => {
     classCapsPerMinute: { ...APEX_DEFAULTS.classCapsPerMinute },
   };
 
+  test("never sends an attack 17-23 ticks after a cancel (the duplication bug)", () => {
+    const s = new Scheduler(o, MS_PER_TICK);
+    const { ledger } = recorder();
+    const send = (): SendResult => "ok";
+    const at = (tick: number) => {
+      s.begin(tick, { perSecond: 10, perMinute: 150 }, rich());
+      return s.offer(proposal("tn", Prio.TN));
+    };
+    s.begin(100, { perSecond: 10, perMinute: 150 }, rich());
+    expect(
+      s.offer(
+        proposal("defense", Prio.Emergency, {
+          intent: { type: "cancel_attack", attackID: "a1" },
+        }),
+      ),
+    ).toBe(true);
+    s.flush(send, ledger, 100);
+    const [from, to] = DUP_GUARD_TICKS;
+    expect(from).toBeLessThanOrEqual(20);
+    expect(to).toBeGreaterThanOrEqual(20);
+    // A rescue re-click 1-16 ticks on is safe, and so is anything after.
+    expect(at(100 + from - 1)).toBe(true);
+    for (let d = from; d <= to; d++) {
+      expect(at(100 + d)).toBe(false);
+      expect(s.lastRefusal).toBe("dupGuard");
+    }
+    expect(at(100 + to + 1)).toBe(true);
+    // A cancel_boat starts the same window.
+    s.begin(200, { perSecond: 10, perMinute: 150 }, rich());
+    s.offer(
+      proposal("boat", Prio.Emergency, {
+        intent: { type: "cancel_boat", unitID: 7 },
+      }),
+    );
+    s.flush(send, ledger, 200);
+    expect(at(220)).toBe(false);
+  });
+
   test("refuses everything before begin", () => {
     const s = new Scheduler(o, MS_PER_TICK);
     expect(s.offer(proposal("tn", Prio.TN))).toBe(false);
@@ -224,6 +263,76 @@ describe("apex Scheduler (§2.6, §3.10)", () => {
     expect(s.offer(proposal("tn", Prio.TN))).toBe(true);
     expect(s.offer(proposal("tn", Prio.TN))).toBe(false);
     expect(sends).toHaveLength(4);
+  });
+
+  test("hasKey sees this tick's accepted keys only", () => {
+    const s = new Scheduler(o, MS_PER_TICK);
+    s.begin(5, { perSecond: 10, perMinute: 150 }, rich());
+    expect(s.offer(proposal("tribe", Prio.Tribe, { key: "attack:7" }))).toBe(
+      true,
+    );
+    expect(s.hasKey("attack:7")).toBe(true);
+    expect(s.hasKey("attack:8")).toBe(false);
+    expect(s.lastSent("tribe")).toBeNull();
+    s.flush(() => "ok", recorder().ledger, 5);
+    s.begin(6, { perSecond: 10, perMinute: 150 }, rich());
+    expect(s.hasKey("attack:7")).toBe(false);
+    expect(s.lastSent("tribe")).toBe(5);
+    s.begin(5 + TICKS_PER_MINUTE, { perSecond: 10, perMinute: 150 }, rich());
+    expect(s.lastSent("tribe")).toBeNull();
+  });
+
+  test("paceOk: a send now is refused when the cadence after it would hit the class cap before the window frees it", () => {
+    // tn capped at 30 a minute, a cadence of one send per 21 ticks (28.6 a
+    // minute): with the window empty a send now fits (1 + 28 ≤ 30); a
+    // burst of sends 12 ticks apart is refused by paceOk before the cap
+    // stops it, and a stream that sends early only while paceOk allows
+    // never meets the cap.
+    const cap = 30;
+    const s = new Scheduler(
+      { ...o, classCapsPerMinute: { tn: cap } },
+      MS_PER_TICK,
+    );
+    const send = (): SendResult => "ok";
+    const { ledger } = recorder();
+    s.begin(0, { perSecond: 10, perMinute: 150 }, rich());
+    expect(s.paceOk("tn", 0, 21)).toBe(true);
+    expect(s.paceOk("tribe", 0, 1)).toBe(true); // uncapped
+    // An unpaced burst: a send every 12 ticks while paceOk would refuse
+    // them, until the cap refuses.
+    let t = 0;
+    let refusedByPace = -1;
+    let stalled = -1;
+    for (; t < 2 * TICKS_PER_MINUTE; t += 12) {
+      s.begin(t, { perSecond: 10, perMinute: 150 }, rich());
+      if (refusedByPace < 0 && !s.paceOk("tn", t, 21)) refusedByPace = t;
+      if (!s.offer(proposal("tn", Prio.TN))) {
+        stalled = t;
+        break;
+      }
+      s.flush(send, ledger, t);
+    }
+    expect(refusedByPace).toBeGreaterThanOrEqual(0);
+    expect(refusedByPace).toBeLessThan(stalled);
+    expect(stalled).toBeLessThan(TICKS_PER_MINUTE);
+    // A paced stream: early sends only while paceOk, else every 21 ticks.
+    const p = new Scheduler(
+      { ...o, classCapsPerMinute: { tn: cap } },
+      MS_PER_TICK,
+    );
+    let last = -Infinity;
+    let sent = 0;
+    for (let tick = 0; tick < 5 * TICKS_PER_MINUTE; tick += 3) {
+      p.begin(tick, { perSecond: 10, perMinute: 150 }, rich());
+      const due =
+        tick - last >= 20 || (tick - last >= 12 && p.paceOk("tn", tick, 21));
+      if (!due) continue;
+      expect(p.offer(proposal("tn", Prio.TN))).toBe(true);
+      p.flush(send, ledger, tick);
+      last = tick;
+      sent++;
+    }
+    expect(sent).toBeGreaterThan(5 * 28);
   });
 
   test("an unflushed proposal counts toward nothing and is dropped at the next begin", () => {

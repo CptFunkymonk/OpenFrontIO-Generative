@@ -1459,6 +1459,111 @@ export interface BoatTarget {
   tn: boolean;
   tribeSmallID: number | null;
   score: number;
+  /** The estimated voyage in tiles (with a VoyageField), else the Manhattan
+   *  distance from our centroid. */
+  dist: number;
+}
+
+/**
+ * Not in spec §2.7: estimated sea distances over the race grid. `dist[c]` is
+ * the tiles a boat sails from our shore to cell c: a BFS over the cells
+ * holding water (a cell with fewer passable land tiles than tiles),
+ * 4-connected, cell tiles per step, from the cells of `sources` (and their
+ * water neighbours). −1 where the BFS does not reach. A cell of land only is
+ * reached through its nearest water neighbour (voyageAt).
+ */
+export interface VoyageField {
+  dist: Int32Array;
+  cell: number;
+}
+
+export function voyageField(
+  game: Game,
+  grid: RaceGrid,
+  sources: readonly TileRef[],
+): VoyageField {
+  const { cw, ch, cell } = grid;
+  const n = cw * ch;
+  const W = game.width();
+  const H = game.height();
+  // Water: fewer passable land tiles than tiles (edge cells are cut).
+  const full = cell * cell;
+  const lastW = W - (cw - 1) * cell;
+  const lastH = H - (ch - 1) * cell;
+  const water = new Uint8Array(n);
+  for (let cy = 0; cy < ch; cy++) {
+    const h = cy === ch - 1 ? lastH : cell;
+    const row = cy * cw;
+    for (let cx = 0; cx < cw; cx++) {
+      const area = cx === cw - 1 ? lastW * h : h === cell ? full : cell * h;
+      if (grid.land[row + cx] < area) water[row + cx] = 1;
+    }
+  }
+  const dist = new Int32Array(n).fill(-1);
+  const queue = new Int32Array(n);
+  let tail = 0;
+  for (const t of sources) {
+    const c = cellOf(grid, game, t);
+    if (c < 0 || c >= n) continue;
+    const cx = c % cw;
+    // The source cell and its water neighbours.
+    const seeds = [c];
+    if (cx > 0 && water[c - 1] === 1) seeds.push(c - 1);
+    if (cx + 1 < cw && water[c + 1] === 1) seeds.push(c + 1);
+    if (c >= cw && water[c - cw] === 1) seeds.push(c - cw);
+    if (c + cw < n && water[c + cw] === 1) seeds.push(c + cw);
+    for (const e of seeds) {
+      if (dist[e] >= 0) continue;
+      dist[e] = 0;
+      queue[tail++] = e;
+    }
+  }
+  // 4-connected BFS, inlined (a closure per cell cost ~50 ms on 142k).
+  for (let head = 0; head < tail; head++) {
+    const c = queue[head];
+    const d = dist[c] + cell;
+    const cx = c % cw;
+    let e = c - 1;
+    if (cx > 0 && water[e] === 1 && dist[e] < 0) {
+      dist[e] = d;
+      queue[tail++] = e;
+    }
+    e = c + 1;
+    if (cx + 1 < cw && water[e] === 1 && dist[e] < 0) {
+      dist[e] = d;
+      queue[tail++] = e;
+    }
+    e = c - cw;
+    if (e >= 0 && water[e] === 1 && dist[e] < 0) {
+      dist[e] = d;
+      queue[tail++] = e;
+    }
+    e = c + cw;
+    if (e < n && water[e] === 1 && dist[e] < 0) {
+      dist[e] = d;
+      queue[tail++] = e;
+    }
+  }
+  return { dist, cell };
+}
+
+/** Sea tiles to cell c: its own distance, else one step past its nearest
+ *  reached neighbour (a land cell on the shore); −1 if none. */
+export function voyageAt(f: VoyageField, grid: RaceGrid, c: number): number {
+  if (f.dist[c] >= 0) return f.dist[c];
+  const { cw } = grid;
+  const n = f.dist.length;
+  const cx = c % cw;
+  let best = -1;
+  const take = (e: number) => {
+    const d = f.dist[e];
+    if (d >= 0 && (best < 0 || d < best)) best = d;
+  };
+  if (cx > 0) take(c - 1);
+  if (cx + 1 < cw) take(c + 1);
+  if (c >= cw) take(c - cw);
+  if (c + cw < n) take(c + cw);
+  return best < 0 ? -1 : best + f.cell;
 }
 
 /**
@@ -1470,8 +1575,12 @@ export interface BoatTarget {
  * food(comp) / (Manhattan distance from our centroid + 50), food being the
  * free plus tribe land of the landmass, estimated from the samples (×
  * stride²). Best first, one per landing tile, at most `max` (from at most
- * 4·max landing searches); empty while we hold no sample. Whether a boat can reach a target is for the caller's
- * canBuild probes.
+ * 4·max landing searches); empty while we hold no sample. Whether a boat
+ * can reach a target is for the caller's canBuild probes.
+ *
+ * With `voyage` (not in the spec): the distance is the sample cell's
+ * estimated voyage (voyageAt) instead, and a sample the field does not
+ * reach, or farther than `voyage.max` tiles, is no candidate.
  */
 export function boatTargets(
   game: Game,
@@ -1479,6 +1588,7 @@ export function boatTargets(
   og: OwnerGrid,
   me: Player,
   max: number,
+  voyage?: { field: VoyageField; max: number },
 ): BoatTarget[] {
   if (max <= 0) return [];
   const map = game.map();
@@ -1532,6 +1642,7 @@ export function boatTargets(
   const K = BOAT_TRIES_PER_TARGET * max;
   const heapScore = new Float64Array(K);
   const heapBlock = new Int32Array(K);
+  const heapDist = new Float64Array(K);
   let size = 0;
   // Min-heap order: lower score first, then higher block (worse).
   const worse = (a: number, b: number) =>
@@ -1544,6 +1655,9 @@ export function boatTargets(
     const b0 = heapBlock[a];
     heapBlock[a] = heapBlock[b];
     heapBlock[b] = b0;
+    const d0 = heapDist[a];
+    heapDist[a] = heapDist[b];
+    heapDist[b] = d0;
   };
   const down = (i: number) => {
     for (;;) {
@@ -1563,11 +1677,20 @@ export function boatTargets(
     if (f < BOAT_MIN_FOOD) continue;
     const bx = i % ow;
     const by = (i - bx) / ow;
-    const dist = Math.abs(sampleX(bx) - mx) + Math.abs(sampleY(by) - my);
+    let dist: number;
+    if (voyage !== undefined) {
+      const c =
+        Math.floor(sampleY(by) / cell) * cw + Math.floor(sampleX(bx) / cell);
+      dist = voyageAt(voyage.field, grid, c);
+      if (dist < 0 || dist > voyage.max) continue;
+    } else {
+      dist = Math.abs(sampleX(bx) - mx) + Math.abs(sampleY(by) - my);
+    }
     const score = f / (dist + BOAT_DIST_OFFSET);
     if (size < K) {
       heapScore[size] = score;
       heapBlock[size] = i;
+      heapDist[size] = dist;
       let j = size++;
       while (j > 0) {
         const p = (j - 1) >> 1;
@@ -1581,6 +1704,7 @@ export function boatTargets(
     ) {
       heapScore[0] = score;
       heapBlock[0] = i;
+      heapDist[0] = dist;
       down(0);
     }
   }
@@ -1607,6 +1731,7 @@ export function boatTargets(
       tn: id === 0,
       tribeSmallID: id === 0 ? null : id,
       score: heapScore[j],
+      dist: heapDist[j],
     });
   }
   return out;
