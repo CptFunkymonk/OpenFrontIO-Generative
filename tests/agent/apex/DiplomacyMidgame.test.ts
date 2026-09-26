@@ -858,6 +858,47 @@ describe("the ceiling: the web adds no alliance past A_ext (midCeiling)", () => 
   });
 });
 
+describe("same-tick sends (sentThisTick)", () => {
+  test("a renew in onTick and a request in decide cannot both take the last slot below the ceiling", () => {
+    // A (kept) and D (not kept) allied; C kept and unallied. At A's lapse
+    // the renew of A takes the one slot below A_ext; C waits. The lapse
+    // is tried on three ticks so it lands on a decision tick once
+    // (thinkEvery 3).
+    const share = { [A]: 0.95, [B]: 0.05, [C]: 0.7, [D]: 0.3 };
+    for (const shift of [0, 1, 2]) {
+      const w = synth(
+        { webMidgame: true, allyMinP: 2, webKeepFeasible: false },
+        share,
+      );
+      // Five one-tile nations far away: 10 non-bot players, A_max 3,
+      // A_ext 2.
+      for (let i = 0; i < 5; i++) {
+        const p = w.game.addPlayer(
+          new PlayerInfo(`x${i}`, PlayerType.Nation, null, `NATIONX${i}`),
+        );
+        p.conquer(w.game.ref(199, 90 + i));
+      }
+      w.game.addExecution(new PlayerExecution(w.us));
+      while (w.game.ticks() < 110) w.h.step();
+      for (const id of [A, D]) ally(w, id);
+      expect(allySlots(w.game, w.us, 0)).toMatchObject({ max: 3, ext: 2 });
+      while (diplomacyMemory(w.s).mid!.at < 150) w.h.step();
+      expect(diplomacyMemory(w.s).mid!.keep).toEqual([A, C]);
+      // Requests may pass from here on (the renew has its own minimum).
+      (w.policy as unknown as { o: { allyMinP: number } }).o.allyMinP = 0.25;
+      const e = w.game.ticks() + 30 + shift;
+      expireAt(w, A, e);
+      const req: AgentIntent[] = [];
+      while (w.game.ticks() < e + 20) {
+        for (const x of w.h.step()) {
+          if (x.type === "allianceRequest") req.push(x);
+        }
+      }
+      expect(req).toEqual([{ type: "allianceRequest", recipient: A }]);
+    }
+  });
+});
+
 describe("gold for friendship (webFriendGold)", () => {
   // A (dmid 1.09, bordering us and C, C unallied: the extension trap).
   const share = { [A]: 1.2, [B]: 0.05, [C]: 0.58, [D]: 0.3 };

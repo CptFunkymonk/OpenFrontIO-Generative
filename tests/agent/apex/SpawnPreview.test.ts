@@ -31,6 +31,7 @@ import {
   eraseCandidates,
   eraseLayout,
   landReach,
+  placedNations,
   rankErasures,
   reachScore,
   scoreErasure,
@@ -297,6 +298,24 @@ describe("SpawnErase", () => {
         expect(
           eraseCandidates(grid, arr, L.game, L.me, o, ranked[0].bound),
         ).toEqual([]);
+        // spawnEraseMinLeft: an erasure leaves the placed nations but the
+        // erased; asking for all of them left cuts every site.
+        const placed = placedNations(L.game);
+        expect(placed).toBe(nations(L.game).filter((n) => n.isAlive()).length);
+        const all = { ...o, spawnEraseMinLeft: placed - 1 };
+        const kept = eraseCandidates(grid, arr, L.game, L.me, all, -Infinity);
+        expect(kept.length).toBeGreaterThan(0);
+        for (const e of kept) expect(e.also).toEqual([]);
+        expect(
+          eraseCandidates(
+            grid,
+            arr,
+            L.game,
+            L.me,
+            { ...o, spawnEraseMinLeft: placed },
+            -Infinity,
+          ),
+        ).toEqual([]);
       }
     },
     TIMEOUT,
@@ -369,13 +388,13 @@ describe("land reach (landlocked pockets)", () => {
 
 describe("spawnPreview", () => {
   test(
-    "World: sent at tick 1 on the race best of the tick-3 layout; lands in tick 2 ahead of every nation, which land as in the layout",
+    "World, spawnPreviewEarly: sent at tick 1 on the race best of the tick-3 layout; lands in tick 2 ahead of every nation, which land as in the layout",
     async () => {
       const L = await layoutOf(GameMapType.World, WORLD_ID);
       const want = raceCandidates(L.game, L.me)[0].tile;
       const r = await start(
         GameMapType.World,
-        { spawnPreview: true },
+        { spawnPreview: true, spawnPreviewEarly: true },
         WORLD_ID,
       );
       r.step();
@@ -420,6 +439,8 @@ describe("spawnPreview", () => {
     async () => {
       expect(APEX_DEFAULTS.spawnPreview).toBe(false);
       expect(APEX_DEFAULTS.spawnErase).toBe(false);
+      expect(APEX_DEFAULTS.spawnPreviewEarly).toBe(false);
+      expect(APEX_DEFAULTS.spawnEraseMinLeft).toBe(2);
       expect(
         parseApexOptions({ spawnPreview: true, spawnErase: true }).spawnErase,
       ).toBe(true);
@@ -430,11 +451,28 @@ describe("spawnPreview", () => {
         APEX_DEFAULTS.spawnDelay,
       ]);
 
+      // The preview alone has nothing to send at tick 1: it does not run.
+      const alone = await start(
+        GameMapType.Onion,
+        { spawnPreview: true },
+        "G0avyep3",
+      );
+      stepTo(alone, APEX_DEFAULTS.spawnDelay);
+      expect(alone.spawns().map((s) => s.tick)).toEqual([
+        APEX_DEFAULTS.spawnDelay,
+      ]);
+      expect(alone.host.stats.forks).toBe(0);
+      expect(spawnTile(alone.spawns()[0])).toBe(spawnTile(off.spawns()[0]));
+
       // The browser's budget: planned at T* = spawnDelay + 10 + 20, sent at
       // T* − 1 (§3.2.6), never at tick 1.
       const browser = await start(
         GameMapType.Onion,
-        { spawnPreview: true, spawnWallBudgetMs: BROWSER_SPAWN_WALL_MS },
+        {
+          spawnPreview: true,
+          spawnErase: true,
+          spawnWallBudgetMs: BROWSER_SPAWN_WALL_MS,
+        },
         "G0avyep3",
       );
       stepTo(browser, APEX_DEFAULTS.spawnDelay + 30);
@@ -446,7 +484,7 @@ describe("spawnPreview", () => {
       // The first call at tick 2 (a batched host): planned at spawnDelay.
       const late = await start(
         GameMapType.Onion,
-        { spawnPreview: true },
+        { spawnPreview: true, spawnErase: true },
         "G0avyep3",
       );
       late.step(false);
@@ -513,7 +551,7 @@ describe("spawnErase", () => {
   );
 
   test(
-    "Europe at margin 0: no erasure site beats the race best, so the preview's race best goes out, with one fork",
+    "Europe at margin 0: no erasure site beats the race best, so the preview is dropped and apex's own plan goes out at spawnDelay",
     async () => {
       const L = await layoutOf(GameMapType.Europe, EUROPE_ID);
       const want = raceCandidates(L.game, L.me)[0].tile;
@@ -525,15 +563,20 @@ describe("spawnErase", () => {
         EUROPE_ID,
       );
       r.step();
-      const spawns = r.spawns();
-      expect(spawns).toHaveLength(1);
-      expect(spawns[0].tick).toBe(PREVIEW_TICK);
-      expect(spawnTile(spawns[0])).toBe(want);
+      expect(r.spawns()).toHaveLength(0);
       expect(r.host.stats.forks).toBe(1);
-      expect(r.host.logs.some((l) => l.includes("erase: no site above"))).toBe(
-        true,
-      );
-      stepTo(r, LAYOUT_TICK, false);
+      const logs = r.host.logs;
+      expect(logs.some((l) => l.includes("erase: no site above"))).toBe(true);
+      expect(
+        logs.some((l) => l.includes("spawn preview: no erasure, planning")),
+      ).toBe(true);
+      stepTo(r, APEX_DEFAULTS.spawnDelay);
+      const spawns = r.spawns();
+      expect(spawns.map((s) => s.tick)).toEqual([APEX_DEFAULTS.spawnDelay]);
+      expect(spawnTile(spawns[0])).toBe(want);
+      expect(logs.some((l) => l.includes("spawn (race) at"))).toBe(true);
+      expect(logs.some((l) => l.includes("spawn (race, preview"))).toBe(false);
+      stepTo(r, APEX_DEFAULTS.spawnDelay + 2, false);
       for (const n of nations(L.game)) {
         expect(r.game.player(n.id()).isAlive()).toBe(true);
       }
@@ -576,10 +619,68 @@ describe("spawnErase", () => {
         true,
       );
       expect(r.host.stats.forks).toBe(1);
-      expect(r.spawns()).toHaveLength(1);
+      expect(r.spawns()).toHaveLength(0);
+      stepTo(r, APEX_DEFAULTS.spawnDelay);
+      expect(r.spawns().map((s) => s.tick)).toEqual([APEX_DEFAULTS.spawnDelay]);
+      expect(r.host.logs.some((l) => l.includes("spawn (race) at"))).toBe(true);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "Bering Strait, 2 nations: the guard keeps both (an erasure would leave a duel) and the game replays apex's exactly; spawnEraseMinLeft 0 erases one at tick 1",
+    async () => {
+      const BERING_ID = "G0avyep2";
+      const apex = await start(GameMapType.BeringStrait, {}, BERING_ID);
+      const guarded = await start(
+        GameMapType.BeringStrait,
+        { spawnPreview: true, spawnErase: true },
+        BERING_ID,
+      );
+      guarded.step();
+      const logs = guarded.host.logs;
       expect(
-        r.host.logs.some((l) => l.includes("spawn (race, preview) at")),
+        logs.some((l) =>
+          l.includes("erase: 2 nations placed, an erasure would leave 1"),
+        ),
       ).toBe(true);
+      expect(guarded.host.stats.forks).toBe(1);
+      expect(guarded.spawns()).toHaveLength(0);
+      // Same intents at the same ticks, and the same game, as apex's.
+      apex.step();
+      const END = 300;
+      stepTo(apex, END);
+      stepTo(guarded, END);
+      expect(guarded.host.stats.errors).toBe(0);
+      expect(guarded.spawns().map((s) => s.tick)).toEqual([
+        APEX_DEFAULTS.spawnDelay,
+      ]);
+      expect(guarded.sent.length).toBeGreaterThan(5);
+      expect(JSON.stringify(guarded.sent)).toBe(JSON.stringify(apex.sent));
+      expect(guarded.me.numTilesOwned()).toBe(apex.me.numTilesOwned());
+      expect(guarded.me.troops()).toBe(apex.me.troops());
+      for (const n of nations(apex.game)) {
+        expect(guarded.game.player(n.id()).numTilesOwned()).toBe(
+          n.numTilesOwned(),
+        );
+      }
+
+      // Without the guard the race picks a nation to erase, sent at tick 1.
+      const L = await layoutOf(GameMapType.BeringStrait, BERING_ID);
+      const r = await start(
+        GameMapType.BeringStrait,
+        { spawnPreview: true, spawnErase: true, spawnEraseMinLeft: 0 },
+        BERING_ID,
+      );
+      r.step();
+      expect(r.spawns().map((s) => s.tick)).toEqual([PREVIEW_TICK]);
+      const erased = nations(L.game).find(
+        (n) => n.spawnTile() === spawnTile(r.spawns()[0]),
+      );
+      expect(erased).toBeDefined();
+      stepTo(r, LAYOUT_TICK, false);
+      expect(r.game.player(erased!.id()).hasSpawned()).toBe(false);
+      expect(nations(r.game).filter((n) => n.isAlive())).toHaveLength(1);
     },
     TIMEOUT,
   );
@@ -593,7 +694,12 @@ describe("preview with the lookahead modes", () => {
       // layout and stepped on with the phase ended.
       const idle = await start(
         GameMapType.Pangaea,
-        { spawnMode: "idle", spawnIdleTicks: 150, spawnPreview: true },
+        {
+          spawnMode: "idle",
+          spawnIdleTicks: 150,
+          spawnPreview: true,
+          spawnPreviewEarly: true,
+        },
         "SPAWNCTL",
       );
       idle.step();
@@ -606,6 +712,45 @@ describe("preview with the lookahead modes", () => {
       stepTo(idle, LAYOUT_TICK, false);
       expect(idle.me.hasSpawned()).toBe(true);
       expect(idle.game.inSpawnPhase()).toBe(false);
+
+      // idle with spawnErase alone: no idle fork at tick 1. An erasure is
+      // scored on the static field and goes out at once; without one, mode
+      // idle plans at spawnDelay as without the preview.
+      const idleOpts = {
+        spawnMode: "idle",
+        spawnIdleTicks: 150,
+        spawnPreview: true,
+        spawnErase: true,
+      };
+      const idleErase = await start(
+        GameMapType.Pangaea,
+        { ...idleOpts, spawnEraseMargin: -1 },
+        "SPAWNCTL",
+      );
+      idleErase.step();
+      expect(idleErase.spawns().map((s) => s.tick)).toEqual([PREVIEW_TICK]);
+      expect(idleErase.host.stats.forks).toBe(2);
+      expect(
+        idleErase.host.logs.some((l) =>
+          l.includes("spawn (race, preview, erase"),
+        ),
+      ).toBe(true);
+      const idleNone = await start(
+        GameMapType.Pangaea,
+        { ...idleOpts, spawnEraseMargin: 10 },
+        "SPAWNCTL",
+      );
+      idleNone.step();
+      expect(idleNone.spawns()).toHaveLength(0);
+      expect(idleNone.host.stats.forks).toBe(1);
+      stepTo(idleNone, APEX_DEFAULTS.spawnDelay);
+      expect(idleNone.spawns().map((s) => s.tick)).toEqual([
+        APEX_DEFAULTS.spawnDelay,
+      ]);
+      expect(idleNone.host.stats.forks).toBe(2);
+      expect(
+        idleNone.host.logs.some((l) => l.includes("spawn (idle) at")),
+      ).toBe(true);
 
       // rollout: each rolled-out candidate forks the live game at tick 1
       // with the spawn in turn 1, so it lands in the fork's tick 2 too.
@@ -637,6 +782,37 @@ describe("preview with the lookahead modes", () => {
       stepTo(roll, LAYOUT_TICK, false);
       expect(roll.me.hasSpawned()).toBe(true);
       expect(roll.me.spawnTile()).toBe(spawnTile(roll.spawns()[0]));
+
+      // No erasure (a margin no site clears): nothing is rolled out at tick
+      // 1; the rollouts run at spawnDelay on the live game, as without the
+      // preview.
+      const none = await start(
+        GameMapType.Pangaea,
+        {
+          spawnMode: "rollout",
+          spawnRolloutK: 2,
+          spawnKeep: 1,
+          spawnRound1: 30,
+          spawnFinal: 30,
+          spawnPreview: true,
+          spawnErase: true,
+          spawnEraseMargin: 10,
+        },
+        "SPAWNCTL",
+      );
+      none.step();
+      expect(none.spawns()).toHaveLength(0);
+      expect(none.host.stats.forks).toBe(1);
+      expect(none.host.logs.some((l) => l.includes("rollout r1"))).toBe(false);
+      stepTo(none, APEX_DEFAULTS.spawnDelay);
+      expect(none.host.stats.errors).toBe(0);
+      expect(none.spawns().map((s) => s.tick)).toEqual([
+        APEX_DEFAULTS.spawnDelay,
+      ]);
+      expect(none.host.logs.some((l) => l.includes("rollout r1"))).toBe(true);
+      expect(none.host.logs.some((l) => l.includes("spawn (rollout) at"))).toBe(
+        true,
+      );
     },
     TIMEOUT,
   );

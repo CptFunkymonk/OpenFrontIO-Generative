@@ -1,11 +1,15 @@
 import { AgentIntent } from "../../../src/agent/Agent";
 import {
   BETRAY_SHARE,
+  contactAtLeast,
   deterrenceFloor,
+  exposedNations,
   postCover,
+  reachableTiles,
   STRIKE_REST,
   StrikeController,
   strikeMemory,
+  targetNeighbours,
   TOPUP_LEAD,
 } from "../../../src/agent/agents/apex/controllers/StrikeController";
 import { homeFloors } from "../../../src/agent/agents/apex/HomeTarget";
@@ -18,7 +22,7 @@ import { ApexState, createState } from "../../../src/agent/agents/apex/state";
 import { Ledger } from "../../../src/agent/lib/Ledger";
 import { createModels } from "../../../src/agent/lib/Models";
 import { NationModel } from "../../../src/agent/lib/NationModel";
-import { createPurse, Scheduler } from "../../../src/agent/lib/Scheduler";
+import { createPurse, Prio, Scheduler } from "../../../src/agent/lib/Scheduler";
 import { scanWorld, WorldModel } from "../../../src/agent/lib/WorldModel";
 import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { NationExecution } from "../../../src/core/execution/NationExecution";
@@ -65,13 +69,19 @@ interface Scene {
 
 /** `gap`: a lake column at x = US between us and the nation, open only
  *  in rows [28, 28 + gap), so the front is `gap` tiles wide (a lake, not
- *  ocean: no boats). */
-async function scene(gap: number | null = null): Promise<Scene> {
+ *  ocean: no boats). `split`: a lake column at x = split across the whole
+ *  field, which cuts the nation's land in two. */
+async function scene(
+  gap: number | null = null,
+  split: number | null = null,
+): Promise<Scene> {
   const f = await field({
     width: W,
     height: H,
     terrain: (x, y) =>
-      gap !== null && x === US && (y < 28 || y >= 28 + gap) ? "lake" : "plains",
+      (gap !== null && x === US && (y < 28 || y >= 28 + gap)) || x === split
+        ? "lake"
+        : "plains",
   });
   const { game, me } = f;
   own(me, rect(game, 0, 0, US, H));
@@ -135,8 +145,15 @@ function run(sc: Scene, s: ApexState): Run {
 }
 
 /** One onTick of the StrikeController over a View as the policy builds it;
- *  returns what it offered (flushed as the policy flushes). */
-function strikeTick(sc: Scene, o: ApexOptions, r: Run): AgentIntent[] {
+ *  returns what it offered (flushed as the policy flushes). `before` runs
+ *  first, as the controllers that tick before it do (Defense, Diplomacy). */
+function strikeTick(
+  sc: Scene,
+  o: ApexOptions,
+  r: Run,
+  before?: (v: View) => void,
+  apply: (i: AgentIntent) => boolean = () => true,
+): AgentIntent[] {
   const { game, me } = sc.f;
   const tick = game.ticks();
   const models = createModels(game);
@@ -166,6 +183,7 @@ function strikeTick(sc: Scene, o: ApexOptions, r: Run): AgentIntent[] {
     live: null,
     log: (line) => r.logs.push(line),
   };
+  before?.(v);
   new StrikeController().onTick(v, r.s);
   const sent: AgentIntent[] = [];
   scheduler.flush(
@@ -176,7 +194,7 @@ function strikeTick(sc: Scene, o: ApexOptions, r: Run): AgentIntent[] {
     r.ledger,
     tick,
   );
-  for (const x of sent) submit(sc.f, x);
+  for (const x of sent) if (apply(x)) submit(sc.f, x);
   return sent;
 }
 
@@ -389,6 +407,7 @@ describe("apex window strikes (§5.2, package A1)", () => {
       game,
       me,
       tick,
+      models: createModels(game),
     };
     expect(v.wm.nations.map((n) => n.id).sort()).toEqual([
       "NATIONA1",
@@ -573,6 +592,7 @@ describe("apex window strikes (§5.2, package A1)", () => {
       game: f.game,
       me,
       tick,
+      models: createModels(f.game),
     });
     const d0 = nm.nextDecision(B.id(), tick);
     const d150 = nm.nextDecision(B.id(), tick + 150);
@@ -589,5 +609,236 @@ describe("apex window strikes (§5.2, package A1)", () => {
       deterrenceFloor(v(0), A.id()),
     );
     void game;
+  });
+
+  // ── Review of A1 (round 2) ─────────────────────────────────────────────
+
+  test("strikeDetNearTarget: the floor covers the nations bordering the target, which the conquest makes ours", async () => {
+    // Us | T | X: X borders T, not us.
+    const f = await field({ width: 120, height: 40 });
+    const { game, me, config } = f;
+    own(me, rect(game, 0, 0, 30, 40));
+    const add = (id: string, x0: number, x1: number) => {
+      const n = game.addPlayer(new PlayerInfo(id, PlayerType.Nation, null, id));
+      own(n, rect(game, x0, 0, x1, 40));
+      return n;
+    };
+    const T = add("NATIONT1", 30, 60);
+    const X = add("NATIONX1", 60, 120);
+    for (let i = 0; i < 60; i++) game.executeNextTick();
+    T.setTroops(Math.round(0.08 * config.maxTroops(T)));
+    X.setTroops(Math.round(0.95 * config.maxTroops(X)));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const nm = new NationModel(game, me, GAME_ID, createModels(game));
+    const tick = game.ticks();
+    nm.observe(tick);
+    const v = (o: ApexOptions) => ({
+      o,
+      wm: scanWorld(game, me, null),
+      nm,
+      game,
+      me,
+      tick,
+      models: createModels(game),
+    });
+    const near = parseApexOptions({ strikes: true, strikeDetNearTarget: true });
+    expect(v(STRIKES).wm.nations.map((n) => n.id)).toEqual([T.id()]);
+    expect(targetNeighbours(v(near), T.id()).map((p) => p.id())).toEqual([
+      X.id(),
+    ]);
+    // Without the option no bordering nation but the target: no floor.
+    expect(deterrenceFloor(v(STRIKES), T.id())).toBe(0);
+    // With it, X's land line at its decision.
+    const dX = nm.nextDecision(X.id(), tick);
+    expect(deterrenceFloor(v(near), T.id())).toBeCloseTo(
+      (nm.troopsAt(X.id(), dX) + 1) / nm.sendCapSafe(),
+      6,
+    );
+    // Below its reserve X cannot attack: no line.
+    X.setTroops(Math.round(0.1 * config.maxTroops(X)));
+    expect(deterrenceFloor(v(near), T.id())).toBe(0);
+    // An ally: the betrayal line.
+    X.setTroops(Math.round(0.95 * config.maxTroops(X)));
+    me.createAllianceRequest(X)!.accept();
+    expect(deterrenceFloor(v(near), T.id())).toBeCloseTo(
+      BETRAY_SHARE * X.troops(),
+      6,
+    );
+  });
+
+  test("strikeDetNearTarget: a W1 strike that would leave home under a far neighbour's line does not go", async () => {
+    for (const on of [false, true]) {
+      const f = await field({ width: 120, height: 40 });
+      const { game, me, config } = f;
+      own(me, rect(game, 0, 0, 30, 40));
+      const nationObj = new Nation(
+        new Cell(45, 20),
+        new PlayerInfo("t", PlayerType.Nation, null, "NATIONT1"),
+      );
+      const T = game.addPlayer(nationObj.playerInfo);
+      own(T, rect(game, 30, 0, 60, 40));
+      const X = game.addPlayer(
+        new PlayerInfo("x", PlayerType.Nation, null, "NATIONX1"),
+      );
+      own(X, rect(game, 60, 0, 120, 40));
+      for (let i = 0; i < 60; i++) game.executeNextTick();
+      X.setTroops(config.maxTroops(X));
+      const sc: Scene = { f, nation: T, rate: 0, phase: 0, answers: [] };
+      const r = run(sc, stalled());
+      const p = r.nm.params(T.id());
+      sc.rate = p.rate;
+      sc.phase = p.phase;
+      const o = parseApexOptions({ strikes: true, strikeDetNearTarget: on });
+      const launch = untilLaunch(sc, r, o, 0.08, 3 * sc.rate);
+      if (on) {
+        expect(launch).toBeNull();
+        const skips = strikeMemory(r.s).stats.skips;
+        expect((skips.stack ?? 0) + (skips.budget ?? 0)).toBeGreaterThan(0);
+      } else {
+        expect(launch).not.toBeNull();
+      }
+    }
+  });
+
+  test("strikeDetNearReach: only the target's neighbours next to the land the stack can reach", async () => {
+    // Us | T (80 columns) | X: X meets T only at T's far side.
+    const f = await field({ width: 120, height: 40 });
+    const { game, me, config } = f;
+    own(me, rect(game, 0, 0, 30, 40));
+    const add = (id: string, x0: number, x1: number) => {
+      const n = game.addPlayer(new PlayerInfo(id, PlayerType.Nation, null, id));
+      own(n, rect(game, x0, 0, x1, 40));
+      return n;
+    };
+    const T = add("NATIONT1", 30, 110);
+    const X = add("NATIONX1", 110, 120);
+    for (let i = 0; i < 60; i++) game.executeNextTick();
+    X.setTroops(config.maxTroops(X));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const nm = new NationModel(game, me, GAME_ID, createModels(game));
+    const tick = game.ticks();
+    nm.observe(tick);
+    const v = {
+      o: parseApexOptions({
+        strikes: true,
+        strikeDetNearTarget: true,
+        strikeDetNearReach: true,
+      }),
+      wm: scanWorld(game, me, null),
+      nm,
+      game,
+      me,
+      tick,
+      models: createModels(game),
+    };
+    // The walk meets X after 79 of T's 80 columns.
+    const exposed = new Map<number, number>();
+    expect(reachableTiles(game, me, T, undefined, undefined, exposed)).toBe(
+      80 * 40,
+    );
+    expect(exposed.get(X.smallID())).toBeGreaterThanOrEqual(78 * 40);
+    expect(exposed.get(X.smallID())).toBeLessThanOrEqual(80 * 40);
+    // A stack that can take 1,000 tiles does not reach it; one that can
+    // take the whole of T does.
+    expect(exposedNations(v, T, exposed, 1000)).toEqual([]);
+    expect(exposedNations(v, T, exposed, 80 * 40).map((p) => p.id())).toEqual([
+      X.id(),
+    ]);
+    // The floor: X's line only when reached.
+    expect(deterrenceFloor(v, T.id(), [])).toBe(0);
+    const dX = nm.nextDecision(X.id(), tick);
+    expect(deterrenceFloor(v, T.id(), [X])).toBeCloseTo(
+      (nm.troopsAt(X.id(), dX) + 1) / nm.sendCapSafe(),
+      6,
+    );
+  });
+
+  test("reachableTiles: the target's land an attack of ours can reach, capped", async () => {
+    // A lake column at x = 104 cuts the nation's land: 4 columns (240
+    // tiles) next to us, 15 (900) behind the lake.
+    const sc = await scene(null, 104);
+    const { game, me } = sc.f;
+    expect(sc.nation.numTilesOwned()).toBe(240 + 900);
+    expect(reachableTiles(game, me, sc.nation)).toBe(240);
+    // The walk stops at its cap: at least that many.
+    expect(reachableTiles(game, me, sc.nation, 100)).toBe(Infinity);
+    // Undivided: all of it.
+    const open = await scene();
+    expect(reachableTiles(open.f.game, open.f.me, open.nation)).toBe(
+      open.nation.numTilesOwned(),
+    );
+  });
+
+  test("strikeReachModel: a strike on a pocket is valued as one, and it does end with the pocket, the rest coming home", async () => {
+    const sc = await scene(null, 104);
+    const { game, me } = sc.f;
+    const REACH = parseApexOptions({ strikes: true, strikeReachModel: true });
+    const r = run(sc, stalled());
+    const launch = untilLaunch(sc, r, REACH, 0.08, 3 * sc.rate);
+    expect(launch).not.toBeNull();
+    const line = r.logs.find((l) => l.includes(" wstrike "))!;
+    expect(line).toContain(" W1 ");
+    expect(line).toContain("kill=n");
+    expect(line).toContain("reach=240 pocket");
+    const sid = sc.nation.smallID();
+    expect(r.ledger.plan(sid)?.expectedRefund).toBeGreaterThan(0);
+    // The old model saw a kill the attack cannot make.
+    const sc2 = await scene(null, 104);
+    const r2 = run(sc2, stalled());
+    expect(untilLaunch(sc2, r2, STRIKES, 0.08, 3 * sc2.rate)).not.toBeNull();
+    expect(r2.logs.find((l) => l.includes(" wstrike "))).toContain("kill=y");
+    // The attack takes the pocket and ends; what is left comes home.
+    const S = (launch!.intent as { troops: number }).troops;
+    const before = me.troops();
+    for (let i = 0; i < 40 && ourAttackOn(me, sc.nation).length > 0; i++) {
+      game.executeNextTick();
+    }
+    expect(ourAttackOn(me, sc.nation)).toEqual([]);
+    expect(sc.nation.numTilesOwned()).toBe(900);
+    expect(me.troops() - before).toBeGreaterThan(0.5 * S);
+  });
+
+  test("contactAtLeast: a live count of the pairs our land shares with the target", async () => {
+    const sc = await scene(4);
+    const { game, me } = sc.f;
+    expect(contactAtLeast(game, me, sc.nation, 4)).toBe(true);
+    expect(contactAtLeast(game, me, sc.nation, 5)).toBe(false);
+    expect(contactAtLeast(game, me, sc.nation, 0)).toBe(true);
+  });
+
+  test("strikeLiveCheck: no launch next to an alliance request queued this tick", async () => {
+    for (const on of [false, true]) {
+      const sc = await scene();
+      const r = run(sc, stalled());
+      const o = parseApexOptions({ strikes: true, strikeLiveCheck: on });
+      const { game, me, config } = sc.f;
+      let launched = false;
+      for (let i = 0; i < 3 * sc.rate && !launched; i++) {
+        sc.nation.setTroops(Math.round(0.08 * config.maxTroops(sc.nation)));
+        me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+        const sent = strikeTick(
+          sc,
+          o,
+          r,
+          (v) => {
+            // The DefenseController's recall (Prio.Recall, key ally:<id>).
+            v.scheduler.offer({
+              intent: { type: "allianceRequest", recipient: NATION_ID },
+              prio: Prio.Recall,
+              cls: "defense",
+              key: `ally:${NATION_ID}`,
+            });
+          },
+          // Not applied: a pending request blocks the launch in any case.
+          (x) => x.type !== "allianceRequest",
+        );
+        launched = sent.some((x) => x.type === "attack");
+        game.executeNextTick();
+      }
+      expect(launched).toBe(!on);
+      if (on) {
+        expect(strikeMemory(r.s).stats.skips.request ?? 0).toBeGreaterThan(0);
+      }
+    }
   });
 });

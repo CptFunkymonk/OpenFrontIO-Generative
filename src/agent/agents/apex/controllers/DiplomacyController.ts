@@ -386,6 +386,31 @@ export function islandThreat(
   return true;
 }
 
+/**
+ * o.webMidgame: alliance requests sent this tick (s.web.requested at t: the
+ * recall, a renew, a counter-accept, a web request) that the game does not
+ * show yet, as a pending request or an alliance: intents run in the next
+ * turn. Slot counts add them, so two sends in one tick (a renew in onTick,
+ * a request in decide) cannot both take the last slot below the ceiling.
+ */
+export function sentThisTick(
+  v: Pick<View, "game" | "me" | "tick">,
+  s: ApexState,
+): number {
+  const { game, me, tick: t } = v;
+  let n = 0;
+  for (const [id, at] of Object.entries(s.web.requested)) {
+    if (at !== t || !game.hasPlayer(id)) continue;
+    const N = game.player(id);
+    if (me.isAlliedWith(N)) continue;
+    if (me.outgoingAllianceRequests().some((r) => r.recipient() === N)) {
+      continue;
+    }
+    n++;
+  }
+  return n;
+}
+
 /** The centre of a player's largest cluster (AiAttackBehavior
  *  getPlayerCenter, Util.boundingBoxCenter; its border fallback, for a
  *  player PlayerExecution has not measured yet, is left out: null). */
@@ -643,7 +668,9 @@ export class DiplomacyController implements Controller {
     const mid = midActive(v) ? mem.mid : undefined;
     let held =
       me.alliances().length +
-      (mid !== undefined ? me.outgoingAllianceRequests().length : 0);
+      (mid !== undefined
+        ? me.outgoingAllianceRequests().length + sentThisTick(v, s)
+        : 0);
     const limit = mid !== undefined ? midCeiling(o, slots) : slots.max;
     const order = mid !== undefined ? mid.keep : s.web.allySet;
     let wanted = 0;
@@ -715,7 +742,7 @@ export class DiplomacyController implements Controller {
     const mid = midActive(v) ? mem.mid : undefined;
     if (mid !== undefined) {
       if (v.o.web) {
-        this.requests(v, s, mem, mid.keep, this.midRoom(v, mid, slots));
+        this.requests(v, s, mem, mid.keep, this.midRoom(v, s, mid, slots));
       }
       if (v.o.extensions) {
         this.extensions(v, s, mem, slots, mid.keep, v.o.webExtendLead);
@@ -794,7 +821,10 @@ export class DiplomacyController implements Controller {
       if (limit === null) {
         const slots = allySlots(game, me, o.allySlotsReserve);
         limit = o.webRenewOver ? slots.max : midCeiling(o, slots);
-        held = me.alliances().length + me.outgoingAllianceRequests().length;
+        held =
+          me.alliances().length +
+          me.outgoingAllianceRequests().length +
+          sentThisTick(v, s);
       }
       if (held >= limit) {
         v.log?.(
@@ -1184,11 +1214,11 @@ export class DiplomacyController implements Controller {
    *   outside the keep set counts until it lapses, even if its extension,
    *   asked while it was kept, may still pass.
    */
-  midRoom(v: View, mid: MidPlan, slots: AllySlots): number {
+  midRoom(v: View, s: ApexState, mid: MidPlan, slots: AllySlots): number {
     const { me, o } = v;
     const keep = new Set(mid.keep);
     let kept = 0;
-    let total = 0;
+    let total = sentThisTick(v, s);
     for (const a of me.alliances()) {
       total++;
       if (keep.has(a.other(me).id())) kept++;

@@ -327,6 +327,18 @@ export interface EraseCandidate {
 export interface EraseOptions extends RaceFieldOptions {
   /** Most erasure sites scored exactly. */
   spawnEraseK: number;
+  /** Nations that must be left after an erasure (placedNations minus the
+   *  erased ones); a site that would leave fewer is not considered. */
+  spawnEraseMinLeft: number;
+}
+
+/** The nations placed in the layout: alive once their spawn tick has run. */
+export function placedNations(game: Game): number {
+  let n = 0;
+  for (const p of game.players()) {
+    if (p.type() === PlayerType.Nation && p.isAlive()) n++;
+  }
+  return n;
 }
 
 /** What spawning on `tile` does to the layout's nations, or null when it
@@ -446,7 +458,8 @@ export function scoreErasure(
 /**
  * The erasure sites worth considering, exact-scored, best first: in the
  * order of rankErasures, while a site's bound beats both `floor` and the
- * best exact score so far, at most o.spawnEraseK of them.
+ * best exact score so far, at most o.spawnEraseK of them. A site that would
+ * leave fewer than o.spawnEraseMinLeft nations is skipped.
  */
 export function eraseCandidates(
   grid: RaceGrid,
@@ -457,10 +470,12 @@ export function eraseCandidates(
   floor: number,
 ): EraseCandidate[] {
   const out: EraseCandidate[] = [];
+  const placed = placedNations(game);
   let best = -Infinity;
   for (const r of rankErasures(grid, arr, game, me, o)) {
     if (out.length >= o.spawnEraseK) break;
     if (r.bound <= Math.max(floor, best)) break;
+    if (placed - 1 - r.also.length < o.spawnEraseMinLeft) continue;
     const site = scoreErasure(grid, arr, game, me, o, r);
     out.push({ ...r, site });
     best = Math.max(best, site.score);

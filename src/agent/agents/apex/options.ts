@@ -115,33 +115,51 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   spawnWallBudgetMs: number;
 
   // ── Package A3 SPAWN PREVIEW (H1; chapter 13 §2.1, §5.1;
-  //    SpawnController.previewPlan, lib/SpawnErase.ts). Off by default. ──
-  /** Spawn at the agent's first call (ctx.tick 1), planned on a fork
+  //    SpawnController.previewPlan, lib/SpawnErase.ts). Off by default; the
+  //    options after spawnErase act only when spawnPreview is on. ──
+  /** Plan the spawn at the agent's first call (ctx.tick 1) on a fork
    *  advanced 2 ticks without us: the tribes (tick 1) and every nation
-   *  (tick 2) are on the ground there, exactly as they will be. The spawn
-   *  lands in tick 2 ahead of every nation and ends the phase before any
-   *  nation hops. Singleplayer outside the browser only; otherwise, or if
-   *  the fork fails, the spawn goes out at spawnDelay as before. Alone it
-   *  picks apex's tile and only shifts the game by 2 ticks (A3 ab1, quick@4:
-   *  progress −0.001 [−0.021, +0.026]); it is what spawnErase needs. */
+   *  (tick 2) are on the ground there, exactly as they will be, and a spawn
+   *  sent then lands in tick 2, ahead of every nation. It acts through
+   *  spawnErase: without a verified erasure (or if a fork fails) the spawn
+   *  is planned and sent at spawnDelay as without the preview, so such a
+   *  game replays apex exactly (see spawnPreviewEarly). Singleplayer
+   *  outside the browser only: the browser autopilot cannot count on turn 1
+   *  (chapter 13 §2.1 Open), so arena numbers with this on include an
+   *  opening the browser does not get. */
   spawnPreview: boolean;
   /** With spawnPreview: also consider spawning on exactly a nation's pick,
    *  which covers its disc so it is never placed. Scored as a race site on
    *  the arrival field without that nation (A and B capped by the land
    *  connected to the site when that land is landlocked), and verified in
    *  a second fork (the nation disappears and no other nation is cut).
-   *  Package A3, with spawnEraseMargin −0.25, against apex: quick@4
-   *  progress +0.043 [+0.024, +0.067], 27/5, ≥ top nation at minute 3
-   *  50% → 72%; quick@20 +0.058 [+0.034, +0.085], 28/4, top 3 at minute
-   *  10 22% → 34%, out before 20 min 6 → 5 of 32. On 2-3-nation maps
-   *  (Bering Strait, Onion) we lead early and the nation left wins sooner. */
+   *  A3 round 1 (margin −0.25, no guard, quick 32 games against apex): the
+   *  gain is in the opening and the peak, not in survival. @4: ≥ top
+   *  nation at minute 3 50% → 72%. @20: progress +0.058 [+0.034, +0.085]
+   *  and peak +4.6 points, but final land +1.4 [−1.2, +4.2], survival −0.3
+   *  min [−1.7, +1.0], lost before minute 20 (any cause) 14 → 14; top 3 at
+   *  minute 10 3 → 11 of 28 on maps with 4+ nations (8-0) and 4 → 0 of 4 on
+   *  Bering Strait and Onion, where the nations left win sooner. */
   spawnErase: boolean;
   /** An erasure site must score above (1 + this) × the best race
-   *  candidate's score (quick@4: +0.1 < 0 < −0.1 < −0.25, where it erases
-   *  in 31 of 32 games). */
+   *  candidate's score. −0.25 is provisional: chosen on the quick@4 games
+   *  it was reported on (+0.1 < 0 < −0.1 < −0.25; it erases in 31 of 32). */
   spawnEraseMargin: number;
   /** Most erasure sites scored exactly (each a full nation search). */
   spawnEraseK: number;
+  /** Nations that must be left after an erasure (the layout's placed
+   *  nations minus the erased ones). 2 never leaves a duel: in a 1v1 every
+   *  nation attack and nuke is ours (NationNukeBehavior targets the other
+   *  player once two are left), and each of the 4 Bering Strait erasures of
+   *  round 1 lost by minute 6.1-7.0 against 9.5-19.1 for apex. 0: no guard
+   *  (round 1). */
+  spawnEraseMinLeft: number;
+  /** Without a verified erasure, send the preview's race best at tick 1
+   *  anyway (round 1). It is apex's tile, but landing in tick 2 instead of
+   *  4 shifts the whole game and runs our PlayerExecution ahead of the
+   *  nations', for no measured gain (quick@4 progress −0.001 [−0.021,
+   *  +0.026], 11/21). */
+  spawnPreviewEarly: boolean;
 
   // ── HomeTarget and floors (§3.1) ─────────────────────────────────────
   /** Home target as a share of the cap (H_econ). E3. */
@@ -517,7 +535,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   webRenewMinP: number;
   /** The renew may restore A_max alliances (the count before the lapse):
    *  at A_max at least one ally is outside the keep set (A_ext at most), so
-   *  the spell ends when it lapses. Off: the renew too stops at A_ext. */
+   *  the spell ends when it lapses. Off: the renew too stops at A_ext.
+   *  Arena quick@20 and a dev shard (v4, 64 games): 23 renews restored
+   *  A_max on maps with A_ext >= 1, all accepted, and none of those
+   *  nations attacked apex later; not screened on its own. */
   webRenewOver: boolean;
   /** Only while a strike feature is on (strikes, stallStrike or
    *  strikeWindows): in stall mode with no unallied bordering nation left
@@ -633,10 +654,15 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  detMaxShare of the cap are dropped (we could not hold them without
    *  freezing). The TN floor stays max(H_vw, tnKeep·H): free land may
    *  spend down to tnKeep of the line (HomeTarget.ts). Not adopted
-   *  (package B1 A/B): inconclusive on quick@20 0:12 (3 eliminations more
-   *  of 12, all 3 discordant games against it, sign test p = 0.25; half
-   *  the games unchanged); most invasions that kill come from nations
-   *  whose line T/1.1 is above our cap, which no floor can hold. */
+   *  (package B1 A/B, quick@20 0:32 from a frozen snapshot, with
+   *  detCapLines and detHold 300): progress −0.003 [−0.006, −0.001], 2
+   *  better and 8 worse of 32; eliminated 6 → 7 (1 discordant game, sign
+   *  test p = 1); ≥ top nation at minute 3 50% → 41%. Its cost is growth:
+   *  in the expansion phase the lines of bordering nations are above our
+   *  home, so it stops tribe attacks (Middle East: a floor of 0.5-1.3M
+   *  from tick 737, 21-31k tiles against 44-101k, eliminated at 2582
+   *  against 8751). And most invasions that kill come from nations whose
+   *  line T/1.1 is above our cap, which no floor can hold. */
   deterrence: boolean;
   /** Margin on the land line (T_N(d) + 1)/1.1. */
   detMargin: number;
@@ -873,6 +899,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (quick@20 g3: Alaska, Russia's neighbour, land-attacked 1.87M 70
    *  ticks after a 3.05M strike on Russia with the floor at 0). */
   strikeDetNearTarget: boolean;
+  /** With strikeDetNearTarget, only the target's neighbours next to the
+   *  land the stack can reach: a walk from our border through the target
+   *  (reachableTiles), as deep as the budget before their lines pays for
+   *  (at most REACH_CAP tiles), at launch and at each top-up. All of them
+   *  blocked the strikes that kept apex alive on quick@20 Alps and World
+   *  (A1 round 2, ab4). */
+  strikeDetNearReach: boolean;
   /** A top-up that only saves the stack from an answer that would delete
    *  it goes only where the answer is certain (gate open; below trigger the
    *  list runs 1 decision in 10) and the saved stack keeps strikeMaxRatio
@@ -883,8 +916,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  ratio after the answer (strikePosts did, without posts), and only the
    *  target's land reachable from our border (a capped BFS): a pocket that
    *  runs out first is a partial win whose rest comes home, a kill needs
-   *  all of it reachable. Review of A1: 22 strikes predicted a kill, 3
-   *  killed; 29 of 42 ended with the frontier emptied. */
+   *  all of it reachable. A kill or a pocket is valued at the answer
+   *  expected (1 decision in 10 below the trigger), the stack still sized
+   *  for it. Review of A1: 22 strikes predicted a kill, 3 killed; 29 of 42
+   *  ended with the frontier emptied. */
   strikeReachModel: boolean;
   /** Launch only while our land touches the target in at least
    *  max(1, strikeMinContact) pairs now (the scan may be thinkEvery − 1
@@ -1009,6 +1044,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   spawnErase: false,
   spawnEraseMargin: -0.25,
   spawnEraseK: 4,
+  spawnEraseMinLeft: 2,
+  spawnPreviewEarly: false,
 
   homeX: 0.3,
   vwGuard: 0.17,
@@ -1219,6 +1256,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeDetHorizon: 0,
   strikeMinContact: 0,
   strikeDetNearTarget: false,
+  strikeDetNearReach: false,
   strikeSaveOpenOnly: false,
   strikeReachModel: false,
   strikeLiveCheck: false,

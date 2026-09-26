@@ -103,6 +103,10 @@ const POST_THREATS = 3;
 /** o.detPosts: a nation that attacked us within this many ticks is a
  *  threat whatever its list picks now (its next wave comes). */
 const POST_RECENT = 600;
+/** Logs only: ticks between two scans for new transport ships (a ship is
+ *  first seen at most this many ticks after its launch; the scan walks
+ *  every nation's units: arena GWM, every tick, +0.12 ms mean think). */
+export const BOAT_SCAN_EVERY = 5;
 /** Logs only: ticks a transport ship is remembered after its unit is gone
  *  (a landed ship's attack is seen a tick or two after the unit goes). */
 const BOAT_GONE = 20;
@@ -132,14 +136,15 @@ export interface DefenseMemory {
   lastIn?: Record<PlayerID, number>;
   /** Logs only (never read by decisions): nation transport ships, by unit
    *  id, from the scan that first saw them at sea until BOAT_GONE ticks
-   *  after their unit is gone (scanBoats). */
+   *  after their unit is gone (scanBoats), and the tick of the last scan. */
   boats?: Record<number, SeenBoat>;
+  lastBoatScan?: number;
   stats: DefenseStats;
 }
 
 /** A nation transport ship as first seen at sea (logs only). Plain data. */
 export interface SeenBoat {
-  /** Tick first seen: at most one tick after its launch. */
+  /** Tick first seen: at most BOAT_SCAN_EVERY ticks after its launch. */
   at: number;
   by: PlayerID;
   /** Its landing tile (Unit.targetTile), where its attack will start. */
@@ -557,18 +562,23 @@ export class DefenseController implements Controller {
    * with attackWhy read then. A boat's attack exists only once it lands,
    * often 100 ticks or more after the launch, so what the nation saw at
    * its decision (the ship took its troops at the launch,
-   * PlayerImpl.buildUnit) is read here, the tick after the launch. A ship
+   * PlayerImpl.buildUnit) is read here, at most BOAT_SCAN_EVERY ticks
+   * after the launch (a ship landing sooner is logged "not seen"). A ship
    * first seen bound elsewhere is remembered as not ours, so a landing
    * tile we take later does not make it look like a boat at us.
    */
   private scanBoats(v: View, mem: DefenseMemory): void {
     const { me, game, tick: t } = v;
+    if (t - (mem.lastBoatScan ?? NEVER) < BOAT_SCAN_EVERY) return;
+    mem.lastBoatScan = t;
     const boats = (mem.boats ??= {});
     const live = new Set<number>();
     // Every nation: a boat comes from over the sea, so its nation is not
     // among the scan's neighbours (v.wm.nations are land contacts).
+    // unitCount is memoized on the unit list's version (WorldModel.ts).
     for (const N of game.players()) {
       if (N.type() !== PlayerType.Nation) continue;
+      if (N.unitCount(UnitType.TransportShip) === 0) continue;
       for (const u of N.units(UnitType.TransportShip)) {
         const dst = u.targetTile();
         if (dst === undefined) continue;

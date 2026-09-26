@@ -35,7 +35,10 @@
  *   (detPostMinShare, detPostMinThreat, detPostLead, detPostsMax).
  */
 import { AgentIntent } from "../../../src/agent/Agent";
-import { defenseMemory } from "../../../src/agent/agents/apex/controllers/DefenseController";
+import {
+  BOAT_SCAN_EVERY,
+  defenseMemory,
+} from "../../../src/agent/agents/apex/controllers/DefenseController";
 import {
   homeFloors,
   HomeTargetInputs,
@@ -1068,19 +1071,20 @@ describe("potentialSend (stand-ins)", () => {
 // ── Boat diagnostics (logs only) ─────────────────────────────────────────
 
 describe("boat diagnostics: what the nation saw at the launch (logs only)", () => {
-  /** x 0-9 the nation's island, x 10-19 ocean, x 20-29 our land but for
-   *  y 0-2 there (free land on the shore); the DefenseController alone. */
-  async function sea() {
+  /** x 0-9 the nation's island, then `water` tiles of ocean, then 10 of
+   *  our land but for y 0-2 there (free land on the shore); the
+   *  DefenseController alone. */
+  async function sea(water = 10) {
     const f = await field({
-      width: 30,
+      width: 20 + water,
       height: 12,
-      terrain: (x) => (x >= 10 && x < 20 ? "water" : "plains"),
+      terrain: (x) => (x >= 10 && x < 10 + water ? "water" : "plains"),
     });
     const nation = f.game.addPlayer(
       new PlayerInfo("nation", PlayerType.Nation, null, NATION_ID),
     );
     own(nation, rect(f.game, 0, 0, 10, 12));
-    own(f.me, rect(f.game, 20, 3, 30, 12));
+    own(f.me, rect(f.game, 10 + water, 3, 20 + water, 12));
     const s = createState();
     const policy = new ApexPolicy(parseApexOptions({ ...DEFENSE_ONLY }), s);
     const h = new Harness(f, (ctx) => policy.tick({ ...ctx, gameID: "boats" }));
@@ -1098,11 +1102,20 @@ describe("boat diagnostics: what the nation saw at the launch (logs only)", () =
     f.game.addExecution(
       new TransportShipExecution(nation, f.game.ref(25, 8), 20_000),
     );
-    for (let i = 0; i < 3 && lines(h, "boat").length === 0; i++) h.step();
+    for (
+      let i = 0;
+      i < BOAT_SCAN_EVERY + 2 && lines(h, "boat").length === 0;
+      i++
+    ) {
+      h.step();
+    }
     const boat = lines(h, "boat");
     expect(boat).toHaveLength(1);
+    // Seen by the first scan after its launch (the ship is built in the
+    // turn after the addExecution).
     const at = Number(/^\[\d+\] (\d+) /.exec(boat[0])![1]);
-    expect(at - launch).toBeLessThanOrEqual(2);
+    expect(at - launch).toBeGreaterThanOrEqual(1);
+    expect(at - launch).toBeLessThanOrEqual(BOAT_SCAN_EVERY);
     // T is its troops before the launch (the ship took 20k of them); our
     // home 50k is half of it: juicy and weakest.
     expect(boat[0]).toContain(" def boat nation 20000 ");
@@ -1153,14 +1166,15 @@ describe("boat diagnostics: what the nation saw at the launch (logs only)", () =
   });
 
   test("two ships to one landing tile: a landing is matched to the ship with the nearest troops", async () => {
-    const { f, nation, h } = await sea();
+    // A wide sea: both ships are still at sea when the test lands one.
+    const { f, nation, h } = await sea(40);
     nation.setTroops(200_000);
     f.me.setTroops(50_000);
     const send = (troops: number) => {
       f.game.addExecution(
-        new TransportShipExecution(nation, f.game.ref(25, 8), troops),
+        new TransportShipExecution(nation, f.game.ref(55, 8), troops),
       );
-      for (let i = 0; i < 5; i++) h.step();
+      for (let i = 0; i < 2 * BOAT_SCAN_EVERY; i++) h.step();
     };
     send(10_000);
     send(30_000);
@@ -1170,6 +1184,7 @@ describe("boat diagnostics: what the nation saw at the launch (logs only)", () =
     }));
     expect(seen.map((x) => x.troops)).toEqual([10_000, 30_000]);
     expect(seen[0].at).toBeLessThan(seen[1].at);
+    expect(nation.units(UnitType.TransportShip)).toHaveLength(2);
     // The 30k ship "lands" first: its attack starts at the landing tile.
     const [ship] = nation.units(UnitType.TransportShip);
     const dst = ship.targetTile()!;
@@ -1182,18 +1197,24 @@ describe("boat diagnostics: what the nation saw at the launch (logs only)", () =
   });
 
   test("a ship bound for free land is not logged, even when we take its landing tile", async () => {
-    const { f, nation, h } = await sea();
+    const { f, nation, h, s } = await sea();
     nation.setTroops(100_000);
     f.me.setTroops(50_000);
     f.game.addExecution(
       new TransportShipExecution(nation, f.game.ref(24, 1), 5_000),
     );
     h.step();
-    h.step();
     const [ship] = nation.units(UnitType.TransportShip);
     expect(ship).toBeDefined();
     const dst = ship.targetTile()!;
     expect(f.game.hasOwner(dst)).toBe(false);
+    // Once a scan has seen it bound for free land, we take the tile.
+    for (let i = 0; i < BOAT_SCAN_EVERY + 1; i++) {
+      if (defenseMemory(s).boats?.[ship.id()] !== undefined) break;
+      h.step();
+    }
+    expect(defenseMemory(s).boats?.[ship.id()]?.ours).toBe(false);
+    expect(ship.isActive()).toBe(true);
     f.me.conquer(dst);
     for (let i = 0; i < 100 && ship.isActive(); i++) h.step();
     expect(lines(h, "boat")).toEqual([]);

@@ -203,6 +203,10 @@ export const VULTURE_INCOMING = 0.5;
 export const DECOY_MARGIN = 1.2;
 /** Score factor of a vulture target: others are eating it now. */
 export const VULTURE_BONUS = 1.5;
+/** Below its trigger a nation runs its strategy list, retaliate first,
+ *  only 1 decision in 10 (AiAttackBehavior.ts:293, chance(10)) [PIN
+ *  NationRetaliate]: the answer o.strikeReachModel expects there. */
+export const BELOW_TRIGGER_ANSWER_ODDS = 0.1;
 /** isSafeToBetray / the only-neighbour rule (NationAllianceBehavior.ts
  *  :404-491): an ally with 3× (about) our home betrays us [PIN
  *  NationAlliance: 0.32 betrayed, 0.34 not]. */
@@ -341,16 +345,19 @@ export function windowInput(
  * (sendCapSafe Infinity: Easy, Medium).
  *
  * With o.strikeDetNearTarget, also the nations that border the target
- * `except` (targetNeighbours): the conquest makes them ours while the
- * stack is away. They are read as at a decision of theirs that sees us as a
- * neighbour: unallied ones at their land line unless below their reserve
- * (the free-land lock is not read: their state may be one full refresh
- * old, and their free land may be gone by the time they border us), allies
- * at the betrayal line.
+ * `except`: the conquest makes them ours while the stack is away. All its
+ * neighbours (targetNeighbours), or the `near` ones given (with
+ * o.strikeDetNearReach, those next to the land the stack can reach:
+ * exposedNations). They are read as at a decision of theirs that sees us
+ * as a neighbour: unallied ones at their land line unless below their
+ * reserve (the free-land lock is not read: their state may be one full
+ * refresh old, and their free land may be gone by the time they border
+ * us), allies at the betrayal line.
  */
 export function deterrenceFloor(
   v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models">,
   except: PlayerID | null,
+  near?: readonly Player[],
 ): number {
   if (!v.o.strikeDeterrence) return 0;
   const safe = v.nm.sendCapSafe();
@@ -375,7 +382,7 @@ export function deterrenceFloor(
     floor = Math.max(floor, (v.nm.troopsAt(info.id, d) + 1) / safe);
   }
   if (!v.o.strikeDetNearTarget || except === null) return floor;
-  for (const N of targetNeighbours(v, except)) {
+  for (const N of near ?? targetNeighbours(v, except)) {
     const id = N.id();
     if (seen.has(id)) continue;
     const d = v.nm.nextDecision(id, v.tick + horizon);
@@ -416,11 +423,42 @@ export function targetNeighbours(
 
 /** Troops a strike on `target` may spend now: purse.available("strike"),
  *  at most home − deterrenceFloor (both after this tick's earlier takes). */
-export function strikeBudget(v: View, target: PlayerID): number {
+export function strikeBudget(
+  v: View,
+  target: PlayerID,
+  near?: readonly Player[],
+): number {
   const avail = v.purse.available("strike");
   if (avail <= 0) return 0;
-  const det = deterrenceFloor(v, target);
+  const det = deterrenceFloor(v, target, near);
   return Math.max(0, Math.min(avail, v.purse.home - det));
+}
+
+/**
+ * o.strikeDetNearReach: the live nations (type Nation, not us or `N`) that
+ * `exposed` (reachableTiles' third owners, each at the count of N's tiles
+ * walked when first seen) meets within the first `depth` tiles of N's
+ * land from our border: the neighbours a conquest that deep makes ours.
+ * The walk goes breadth-first from our border, near enough the order an
+ * attack takes tiles (AttackExecution conquers only tiles next to ours).
+ */
+export function exposedNations(
+  v: Pick<View, "game" | "me">,
+  N: Player,
+  exposed: ReadonlyMap<number, number>,
+  depth: number,
+): Player[] {
+  const out: Player[] = [];
+  for (const [sid, at] of exposed) {
+    if (at > depth) continue;
+    const p = v.game.playerBySmallID(sid);
+    if (!p.isPlayer()) continue;
+    const X = p as Player;
+    if (X === v.me || X === N || X.type() !== PlayerType.Nation) continue;
+    if (!X.isAlive()) continue;
+    out.push(X);
+  }
+  return out.sort((a, b) => a.smallID() - b.smallID());
 }
 
 /** Loss per tile (models.hitMix over the contact terrain) of a stack of
@@ -570,7 +608,10 @@ export class ReachSet {
  * retreats with no malus, so the rest comes home (AttackExecution.ts
  * :302-326). Walked breadth-first from our border, at most
  * min(cap, REACH_CAP) tiles: Infinity when the walk stops at that bound
- * short of N's size (at least that many), else the exact count. Read-only.
+ * short of N's size (at least that many), else the exact count. With
+ * `exposed`, also notes each third player (smallID) next to a tile walked,
+ * or next to our border, at the count of N's tiles walked when first seen
+ * (o.strikeDetNearReach). Read-only.
  */
 export function reachableTiles(
   game: Game,
@@ -578,21 +619,35 @@ export function reachableTiles(
   N: Player,
   cap: number = REACH_CAP,
   set: ReachSet = new ReachSet(),
+  exposed?: Map<number, number>,
 ): number {
   const them = N.smallID();
+  const us = me.smallID();
   const size = N.numTilesOwned();
   const limit = Math.max(1, Math.min(cap, REACH_CAP, size));
   set.clear();
   const queue: TileRef[] = [];
   const visit = (n: TileRef) => {
-    if (set.size >= limit || game.ownerID(n) !== them) return;
+    const owner = game.ownerID(n);
+    if (owner !== them) {
+      // o.strikeDetNearReach: a third player next to the land walked.
+      if (exposed !== undefined && owner !== us && owner !== 0) {
+        if (!exposed.has(owner)) exposed.set(owner, set.size);
+      }
+      return;
+    }
+    if (set.size >= limit) return;
     if (set.add(n)) queue.push(n);
   };
-  for (const b of me.borderTiles()) {
-    game.forEachNeighbor(b, visit);
-    if (set.size >= limit) break;
-  }
-  for (let i = 0; i < queue.length && set.size < limit; i++) {
+  // forEach walks the dense storage (the values() generator is slower); the
+  // seeds past the limit cost one size check a tile.
+  me.borderTiles().forEach((b) => {
+    if (set.size < limit) game.forEachNeighbor(b, visit);
+  });
+  for (let i = 0; i < queue.length; i++) {
+    // Capped short of N's size: stop. All of N walked: only the third
+    // players next to the last tiles are left to note.
+    if (set.size >= limit && (limit < size || exposed === undefined)) break;
     game.forEachNeighbor(queue[i], visit);
   }
   const n = set.size;
@@ -754,7 +809,10 @@ export class StrikeController implements Controller {
       evals++;
       const { inp, d1 } = windowInput(v, N, prev);
       const inc = incomingFrom(v, info.smallID);
-      const budget = strikeBudget(v, info.id);
+      // o.strikeDetNearReach: the target's neighbours are read once the walk
+      // below knows which of them the stack can reach; none yet.
+      const nearReach = o.strikeDetNearTarget && o.strikeDetNearReach;
+      let budget = strikeBudget(v, info.id, nearReach ? [] : undefined);
       if (budget < 1) {
         this.skip(v, mem, info.id, "budget");
         continue;
@@ -767,12 +825,33 @@ export class StrikeController implements Controller {
         ? postLossFactor(cover, v.game.config().defensePostDefenseBonus())
         : 1;
       const size = N.numTilesOwned();
+      const cost = strikeCost(v, N, info, inp.T1, o.strikeRatio);
       // o.strikeReachModel: the land an attack of ours can reach; no kill
       // stack for a target we cannot reach whole.
-      const reach = o.strikeReachModel
-        ? reachableTiles(v.game, v.me, N, REACH_CAP, this.reachSet)
-        : Infinity;
-      const cost = strikeCost(v, N, info, inp.T1, o.strikeRatio);
+      let reach = Infinity;
+      let near: Player[] | undefined = nearReach ? [] : undefined;
+      if (o.strikeReachModel || nearReach) {
+        const exposed = nearReach ? new Map<number, number>() : undefined;
+        const r = reachableTiles(
+          v.game,
+          v.me,
+          N,
+          REACH_CAP,
+          this.reachSet,
+          exposed,
+        );
+        if (o.strikeReachModel) reach = r;
+        if (exposed !== undefined) {
+          // As deep as the budget before their lines pays for.
+          const depth = Math.min(REACH_CAP, budget / Math.max(1, cost.p));
+          near = exposedNations(v, N, exposed, depth);
+          budget = strikeBudget(v, info.id, near);
+          if (budget < 1) {
+            this.skip(v, mem, info.id, "budget");
+            continue;
+          }
+        }
+      }
       const killable = reach >= size - KILL_FREE;
       const plan = planStrike(
         inp,
@@ -798,8 +877,7 @@ export class StrikeController implements Controller {
       // cheapest a tile).
       const p =
         o.strikePosts || o.strikeReachModel
-          ? strikeLoss(v, N, info, inp.T1 - plan.verdict.answer, left) *
-            factor
+          ? strikeLoss(v, N, info, inp.T1 - plan.verdict.answer, left) * factor
           : cost.p;
       let kill: boolean;
       let pocket = false;
@@ -807,7 +885,19 @@ export class StrikeController implements Controller {
       let spent: number;
       let refund: number;
       if (o.strikeReachModel) {
-        const y = strikeYield(plan.S, left, p, size, reach, KILL_FREE);
+        // Valued at the answer expected, sized for it for certain: below
+        // its trigger at d1 it answers 1 decision in 10.
+        const odds =
+          inp.T1 < inp.trigger * inp.M ? BELOW_TRIGGER_ANSWER_ODDS : 1;
+        const y = strikeYield(
+          plan.S,
+          left,
+          p,
+          size,
+          reach,
+          KILL_FREE,
+          inc + odds * plan.verdict.answer,
+        );
         ({ kill, pocket, tiles, spent, refund } = y);
       } else {
         const killCost = o.strikePosts
@@ -861,7 +951,8 @@ export class StrikeController implements Controller {
               (pocket ? " pocket" : "")
             : "") +
           (o.strikeDetNearTarget
-            ? ` det=${k(deterrenceFloor(v, info.id))}`
+            ? ` det=${k(deterrenceFloor(v, info.id, near))}` +
+              (near !== undefined ? ` near=${near.length}` : "")
             : ""),
       };
     }
@@ -1094,7 +1185,21 @@ export class StrikeController implements Controller {
       const inc = incomingFrom(v, sid);
       const need = conquestStack(Td, answer, inc, sizing);
       if (A >= TOPUP_AT * need) continue;
-      const budget = strikeBudget(v, id);
+      let near: Player[] | undefined;
+      if (o.strikeDetNearTarget && o.strikeDetNearReach) {
+        // The target's neighbours next to the land the topped-up stack can
+        // reach from our border now.
+        near = [];
+        if (info !== null) {
+          const exposed = new Map<number, number>();
+          reachableTiles(v.game, v.me, N, REACH_CAP, this.reachSet, exposed);
+          const most = A + strikeBudget(v, id, []);
+          const p = strikeLoss(v, N, info, Td, most);
+          const depth = Math.min(REACH_CAP, most / Math.max(1, p));
+          near = exposedNations(v, N, exposed, depth);
+        }
+      }
+      const budget = strikeBudget(v, id, near);
       const add = Math.floor(Math.min(need - A, budget));
       if (add < 1) continue;
       // Worth it if it restores a ratio of at most maxRatio after the

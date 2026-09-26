@@ -261,6 +261,26 @@ describe("StrikeWindows: yield and top-up saves (review of A1)", () => {
     });
   });
 
+  test("strikeYield: a kill or a pocket is valued at the cancels expected, sized for the answer for certain", () => {
+    // The answer (190k) of a nation below its trigger comes 1 decision in
+    // 10: 10k of its attacks on us plus 19k expected.
+    const exp = 10_000 + 0.1 * 190_000;
+    const y = strikeYield(S, left, 40, 63_000, 1_100, 99, exp);
+    expect(y).toMatchObject({ pocket: true, tiles: 1_100 });
+    expect(y.spent).toBeCloseTo(40 * 1_100 + exp, 6);
+    expect(y.refund).toBeCloseTo(S - exp - 40 * 1_100, 6);
+    const k = strikeYield(S, left, 40, 20_000, Infinity, 99, exp);
+    expect(k.kill).toBe(true);
+    expect(k.spent).toBeCloseTo(40 * 19_901 + exp, 6);
+    // Feasibility still reads `left` (the answer assumed): one troop short
+    // of the kill at the answer is no kill, whatever is expected.
+    expect(strikeYield(S, 796_039, 40, 20_000, Infinity, 99, 0).kill).toBe(
+      false,
+    );
+    // A stack that burns out spends all of it.
+    expect(strikeYield(S, left, 40, 63_000, 20_000, 99, exp).spent).toBe(S);
+  });
+
   test("strikeYield: nothing left after the cancels buys nothing", () => {
     expect(strikeYield(S, 0, 40, 500, Infinity, 99)).toMatchObject({
       kill: false,

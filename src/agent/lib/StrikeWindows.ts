@@ -244,15 +244,20 @@ export interface StrikeYield {
 /**
  * The yield of a stack `S` on a nation of `tiles` tiles, `reach` of them
  * reachable by land from our border (Infinity: at least what the stack can
- * pay for), `left` = S − answer − its attacks on us after the 1:1 cancels,
- * at `p` troops lost per tile (at the stack's real ratio):
+ * pay for), `left` = S − answer − its attacks on us after the 1:1 cancels
+ * (the answer assumed, as the stack is sized), at `p` troops lost per tile
+ * (at the stack's real ratio then):
  * - kill: all but the `killFree` tiles of the annex line are reachable and
  *   `left` pays for them [PIN TribeStats: the last 99 fall with the one that
  *   takes it under 100];
  * - pocket: fewer tiles reachable than `left` pays for: it takes them, and
- *   the rest comes home when the frontier empties (arena quick@20: 29 of 42
- *   strikes ended so, most far short of the target's size);
+ *   the rest comes home when the frontier empties (AttackExecution.ts
+ *   :302-305; arena quick@20: 29 of 42 strikes ended so, most far short of
+ *   the target's size);
  * - else it burns out after left/p tiles.
+ * A kill or a pocket spends its tiles' losses and `expectedCancel`, the
+ * cancels expected (default S − left, the answer for certain; below its
+ * trigger a nation answers 1 decision in 10), and the rest comes home.
  */
 export function strikeYield(
   S: number,
@@ -261,10 +266,11 @@ export function strikeYield(
   tiles: number,
   reach: number,
   killFree: number,
+  expectedCancel: number = S - left,
 ): StrikeYield {
   const none = { kill: false, pocket: false, tiles: 0, spent: S, refund: 0 };
   if (!(left > 0) || !(p > 0)) return none;
-  const cancel = Math.max(0, S - left);
+  const cancel = Math.min(Math.max(0, expectedCancel), S);
   const need = Math.max(0, tiles - killFree);
   if (reach >= need && left >= p * need) {
     const cost = p * need;
@@ -273,7 +279,7 @@ export function strikeYield(
       pocket: false,
       tiles,
       spent: cost + cancel,
-      refund: left - cost,
+      refund: S - cancel - cost,
     };
   }
   const afford = left / p;
@@ -284,7 +290,7 @@ export function strikeYield(
       pocket: true,
       tiles: reach,
       spent: cost + cancel,
-      refund: left - cost,
+      refund: S - cancel - cost,
     };
   }
   return {
