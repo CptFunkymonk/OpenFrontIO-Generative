@@ -93,6 +93,19 @@ the arena measurement that confirms or kills it. The rules quoted were checked
 against source on 2026-09-26; conclusions drawn from them are **[DERIVED]**
 and must be pinned by a scenario test before an agent depends on them.
 
+**Pinned 2026-09-26.** Every hypothesis below was pinned by scenario tests
+in `tests/agent/mechanics/`; [`13-mechanics.md`](13-mechanics.md) gives each
+verdict (1 TRUE, 11 PARTIAL: the mechanics hold, the numbers or scope need
+correcting), quotes each sentence here that is wrong or imprecise with its
+correction (§3 there), and tabulates every constant an agent should use
+(§5 there). Where this section and chapter 13 disagree, chapter 13 is right.
+The largest surprises: a spawn sent at the agent's first call (turn 1)
+lands before every nation; any player left at 100 tiles or fewer is annexed
+whole by the loss of one tile, so a 1-troop attack kills a fresh tribe; a
+single attack on a nation makes it Hostile for 1,001 ticks; and a
+simulation bug duplicates a stack when a land attack inits exactly 20 ticks
+after a `cancel_attack` on the same target (agents must avoid that tick).
+
 Treat chapter 09 as a prior, not a spec. For example, its advice to run 2–3
 parallel land attacks on free land buys nothing: a new land attack on the same
 target absorbs every earlier one (`AttackExecution.init`).

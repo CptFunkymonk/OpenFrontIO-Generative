@@ -26,6 +26,7 @@ most importantly, **there is no population or worker system here**, and
 | [`10-agent-interface.md`](10-agent-interface.md)           | How an agent plugs in: the agent API, the headless arena, the browser autopilot, lookahead    |
 | [`11-roadmap.md`](11-roadmap.md)                           | The plan: measured starting point, goal, strategy hypotheses, milestones, evaluation protocol |
 | [`12-ledger.md`](12-ledger.md)                             | Arena results worth keeping, one row per adopted change or milestone run                      |
+| [`13-mechanics.md`](13-mechanics.md)                       | Every mechanic the agent relies on, pinned by a scenario test; corrections to chapters 00–11  |
 | [`99-quirks-and-traps.md`](99-quirks-and-traps.md)         | Dead code, wrong comments, fork divergences, traps                                            |
 
 ## Conventions

@@ -39,8 +39,11 @@
  *      PlayerImpl.ts:946-958);
  *    7 accept if Friendly (value >= 50) and nextInt(0, 100) >= 33 (:339-358);
  *    8 checkAlreadyEnoughAlliances (:305-337, Impossible :313-332): with >= 2
- *      non-bot neighbours, us among them, reject if all the others are its
- *      friends; otherwise reject if its alliances >= nextInt(2, 4);
+ *      non-bot neighbours (nearby(), PlayerImpl.ts:605-650), us among them,
+ *      reject if all the others are its friends (isFriendly, so an ally of
+ *      it counts, and so do we while we ask for an extension); in every other
+ *      case (we are its only neighbour, we do not border it, it has < 2)
+ *      reject if its alliances >= nextInt(2, 4);
  *    9 isEarlygame (:218-249, Impossible :240-245): accept if ticks() < 600 +
  *      numSpawnPhaseTurns() = 700 and nextInt(0, 100) >= 70;
  *   10 isAlliancePartnerSimilarlyStrong (:361-400): accept if our troops +
@@ -52,6 +55,14 @@
  *   no relation; the counter-request path (both ask, AllianceRequestExecution
  *   .ts:45-65) also gives +100 both ways, ends temporary embargoes and
  *   destroys nukes in flight between the two.
+ * - Either side's land attack or boat on the other rejects the attacker's
+ *   pending incoming request from its target (AttackExecution.ts:113-122,
+ *   :389-396; TransportShipExecution.ts:94-101, :339). Every answered request
+ *   (accepted or refused) starts allianceRequestCooldown() = 300 ticks,
+ *   counted from its creation, before the next one to the same player
+ *   (Config.ts:810-812; canSendAllianceRequest PlayerImpl.ts:814-858;
+ *   GameImpl.ts:466, :481); an intent inside it is dropped
+ *   (AllianceRequestExecution.ts:41-43).
  * - Duration: expiresAt = createdAt + allianceDuration() (AllianceImpl.ts:23;
  *   3000 ticks unless customAllianceDuration, Config.ts:813-819), expired by
  *   PlayerExecution.tick (PlayerExecution.ts:105-109) through
@@ -59,7 +70,9 @@
  *   Extension: AllianceExtensionExecution has no timing check
  *   (AllianceExtensionExecution.ts:23-87); the nation agrees when
  *   getAllianceDecision(us) says yes now (:79-94), and extend() sets
- *   expiresAt = now + allianceDuration() (AllianceImpl.ts:88-92).
+ *   expiresAt = now + allianceDuration() (AllianceImpl.ts:88-92). That
+ *   decision sees us as allied: the alliance counts toward our 25% (3) and
+ *   we count as its bordering friend in 8.
  * - Allies (isFriendly, PlayerImpl.ts:1296-1304): AttackExecution.init drops
  *   an attack on a friend (AttackExecution.ts:101-111) and a running attack
  *   retreats without loss once they are friends (:285-288, retreat
@@ -67,16 +80,22 @@
  *   (TransportShipExecution.ts:109-112), but one already at sea conquers its
  *   landing tile and adds its troops home (:270-275). Nukes: nukeSpawn
  *   refuses teammates only (PlayerImpl.ts:1625-1645); at launch
- *   NukeExecution.maybeBreakAlliances (NukeExecution.ts:148-197, :232-234)
- *   breaks with every player listNukeBreakAlliance names (Util.ts:100-129):
- *   weighted tiles (1 inside inner, 0.5 to outer; AtomBomb 12/30,
- *   Config.ts:1103-1113) > nukeAllianceBreakThreshold() = 100
- *   (Config.ts:1115-1117), or a structure within outer.
+ *   NukeExecution.maybeBreakAlliances (NukeExecution.ts:148-197, :232-234;
+ *   never for MIRV warheads, :152-155) breaks with every player
+ *   listNukeBreakAlliance names (Util.ts:100-129): weighted tiles (1 inside
+ *   inner, 0.5 to outer) > nukeAllianceBreakThreshold() = 100
+ *   (Config.ts:1115-1117), or a structure within outer (Util.ts:122-127;
+ *   Euclidean, UnitGrid.ts:181-200). nukeMagnitudes (Config.ts:1103-1113):
+ *   AtomBomb 12/30, HydrogenBomb 80/100. A MIRV launch breaks the alliance
+ *   with the owner of its target tile whatever it covers, and costs -100
+ *   both ways (MIRVExecution.ts:88, :110-120).
  * - Relations: our attack on it -100 (AttackExecution.ts:190-209); its attack
  *   on us makes us embargo it (AttackExecution.ts:113-122), for which it
- *   takes -20 at its next decision until the embargo ends
- *   (NationExecution.ts:314-333); relations decay 0.05 a tick toward 0 in
- *   PlayerExecution (PlayerExecution.ts:57, PlayerImpl.ts:978-988).
+ *   takes -20 once, at its next decision, and +20 back at the first decision
+ *   after the embargo ends (updateRelationsFromEmbargos, NationExecution.ts:
+ *   313-334, embargoMalusApplied); relations decay 0.05 a tick toward 0 in
+ *   PlayerExecution (PlayerExecution.ts:57, PlayerImpl.ts:978-988), so the
+ *   -20 is gone ~400 ticks later with the embargo still on.
  * - Breaking: GameImpl.breakAlliance marks the breaker a traitor unless the
  *   other already is one (GameImpl.ts:874-906, :887); isTraitor() holds for
  *   traitorDuration() = 300 ticks from the break tick (PlayerImpl.ts:869-879,
@@ -84,12 +103,27 @@
  *   betrayed (:46) and -40 from every player in the breaker's nearby()
  *   (:48-56). attackLogic against a traitor multiplies the attacker's loss by
  *   traitorDefenseDebuff() = 0.5 and the time per tile by traitorSpeedDebuff()
- *   = 0.8 (Config.ts:287-292, :933-968; fed by AttackExecution.ts:377). An
- *   Impossible ally betrays a traitor with < 1.2x its troops (maybeBetray
- *   :440-448, via the betray strategy AiAttackBehavior.ts:346-347, :428,
- *   :583-608) and attacks it in the same decision (:604); non-allied ones
- *   attack traitors with < 1.2x their troops (traitor strategy, findTraitor
- *   AiAttackBehavior.ts:570-581; shouldAttack :932-943).
+ *   = 0.8 (Config.ts:287-292, :933-968; fed by AttackExecution.ts:377).
+ *   Breaking with a traitor skips only the traitor mark: the -100 and -40s
+ *   still land.
+ * - Betrayal by the nation (maybeBetray :404-461), reached at a decision
+ *   through maybeAttack (AiAttackBehavior.ts:98-157) -> attackBestTarget
+ *   (:278-304: only at >= reserveRatio of its cap, :290, and >= triggerRatio
+ *   or a 1-in-10 chance, :293) -> the Impossible list [retaliate, bots,
+ *   veryWeak, betray, assist, victim, traitor, juicy, ...] (:428) ->
+ *   maybeBetrayAndAttack (:583-608), which attacks the betrayed ally in the
+ *   same decision (:604). For each bordering ally, first match:
+ *    a its juiciest bordering ally (findJuiciestAlly :464-469) if
+ *      isSafeToBetray (:473-491): that ally + its non-allied bordering
+ *      players (tribes too) + its other allies (none if the target is a
+ *      traitor), troops + outgoing attacks, < 0.33x its troops (:414-423);
+ *    b a traitor with < 1.2x its troops (:440-448);
+ *    c its only bordering player (friends + enemies = 1) with troops() x 3
+ *      < its troops, home troops only (:450-458).
+ *   betray() calls player.breakAlliance (:493-497): the nation turns traitor
+ *   unless we already are one (GameImpl.ts:887), and no relation changes.
+ *   Non-allied ones attack traitors with < 1.2x their troops (traitor
+ *   strategy, findTraitor AiAttackBehavior.ts:570-581).
  *
  * VERDICT: PARTIAL. Every rule the claim lists holds as stated (threat test
  * strict and on home troops; traitors 12 of 100 accepted here; 25% of the
@@ -102,23 +136,32 @@
  *   both sides always passes, <= 0.80x never), and 71 of 100 Friendly ones,
  *   unless its relation to us is below Neutral or the neighbour limit (8)
  *   applies. isEarlygame only adds 30% for requesters that are neither.
- * - Requests made by tick 101 are always refused, threats too.
- * - The relation gate: our attack makes it Hostile, its attack on us costs
- *   -20 through our automatic embargo (lifting the embargo restores it);
- *   either blocks everything but a threat.
+ * - Requests made by tick 101 are always refused, threats too; its attack
+ *   on us refuses our pending one at once; each answer starts a 300-tick
+ *   cooldown.
+ * - The relation gate: our attack makes it Hostile; its attack on us costs
+ *   -20 once through our automatic embargo (lifting the embargo gives it
+ *   back; so does ~400 ticks of relation decay); either blocks everything
+ *   but a threat while it lasts.
  * - Extensions: askable any time, restart the 5 minutes from the nation's
  *   decision (not added), and need a yes now with this alliance counted in
- *   the 25% (so with 2 non-bot players never); a refused one stays asked.
- * - Allies cannot land-attack each other, and a running attack either way
- *   retreats in full the tick the alliance forms; a boat at sea still takes
- *   its landing tile; nukes on an ally are allowed and break the alliance
- *   (traitor) only above 100 weighted tiles or with one of its structures in
- *   range.
- * - Breaking also costs -100 from the betrayed (-140 if also a neighbour),
- *   -40 from every player next to us (tribes too, by the code), and the
- *   betrayal, plus an attack, by every Impossible ally we have less than
- *   1.2x the troops of, at its next decision that reaches its strategy list
- *   (above its reserve). Breaking with a traitor marks no one.
+ *   the 25% (so with 2 non-bot players never) and us counted as its
+ *   bordering friend (so a nation with 2 non-bot neighbours, the other not
+ *   its ally, extends only a threat or a Friendly); a refused one stays
+ *   asked.
+ * - "Allies cannot attack each other" holds for us, not for it: an
+ *   Impossible ally above its reserve breaks the alliance and attacks us in
+ *   the same decision if we are its only neighbour with < 1/3 of its troops
+ *   at home (troops in flight do not help), or if we plus its other
+ *   neighbours and allies hold < 0.33x its troops, or if we are a traitor
+ *   with < 1.2x its troops. A running attack either way retreats in full the
+ *   tick the alliance forms; a boat at sea still takes its landing tile;
+ *   nukes on an ally are allowed and break the alliance (traitor) only above
+ *   100 weighted tiles or with one of its structures within the bomb's outer
+ *   radius (30 tiles AtomBomb, 100 HydrogenBomb); a MIRV always breaks it.
+ * - Breaking also costs -100 from the betrayed (-140 if also a neighbour)
+ *   and -40 from every player next to us (tribes too, by the code), even
+ *   when the betrayed is a traitor (then only the traitor mark is spared).
  *
  * Setting: the real Config class (not TestConfig, tests/util/TestConfig.ts),
  * built as the arena builds it (GameRunner.ts:46: new Config(config, null,
@@ -130,8 +173,9 @@
  * real Config). The NationExecution is the real one, seeded as in a game
  * (gameID + nation id); the seed sweeps vary the gameID. "Others" are
  * Nation seats with no NationExecution. No PlayerExecution runs except in
- * the lapse test, so troops and relations stay where the test puts them (the
- * real game adds income and relation decay). Tests set troops, relations,
+ * the lapse test (ours) and the decay test (the nation's), so troops and
+ * relations stay where the test puts them (the real game adds income and
+ * relation decay). Tests set troops, relations,
  * tiles, gold and units to build scenarios (agents never may); our own
  * actions go through IntentSchema and Executor.createExec, the path of
  * ctx.send (AgentHost.isValid, src/agent/AgentHost.ts:197-205).
@@ -143,7 +187,10 @@ import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
 import { NationExecution } from "../../../src/core/execution/NationExecution";
 import { PlayerExecution } from "../../../src/core/execution/PlayerExecution";
-import { computeNukeBlastCounts } from "../../../src/core/execution/Util";
+import {
+  computeNukeBlastCounts,
+  listNukeBreakAlliance,
+} from "../../../src/core/execution/Util";
 import {
   AllianceRequest,
   Cell,
@@ -591,12 +638,13 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
     expect(answer(w, request(w)).accepted).toBe(false);
   });
 
-  test("its attack on us auto-embargoes it, costing -20 with it until we lift the embargo", () => {
+  test("its attack on us auto-embargoes it, costing -20 with it once (not per decision) until we lift the embargo", () => {
     // AttackExecution.init: the target (us) embargoes the attacker
     // (AttackExecution.ts:113-122); at its next decision the nation takes
-    // -20 for it, and gives it back once the embargo is gone
-    // (updateRelationsFromEmbargos, NationExecution.ts:314-333, which runs
-    // before handleAllianceRequests, :219-220).
+    // -20 for it once (embargoMalusApplied), and gives it back at the first
+    // decision after the embargo is gone (updateRelationsFromEmbargos,
+    // NationExecution.ts:313-334, which runs before handleAllianceRequests,
+    // :219-220). No PlayerExecution here, so no decay (next test).
     for (const lift of [false, true]) {
       const w = world({ usTiles: 150 });
       advanceTo(w, 690);
@@ -604,6 +652,10 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
       w.game.addExecution(new AttackExecution(1, w.nation, AGENT_ID));
       tick(w);
       expect(w.us.hasEmbargoAgainst(w.nation)).toBe(true);
+      throughNextDecision(w);
+      expect(relationValue(w.nation, w.us)).toBe(-20);
+      // Two more decisions with the embargo on: still -20, not -60.
+      throughNextDecision(w);
       throughNextDecision(w);
       expect(relationValue(w.nation, w.us)).toBe(-20);
       expect(w.nation.relation(w.us)).toBe(Relation.Distrustful);
@@ -620,13 +672,109 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
     }
   });
 
-  test("checkAlreadyEnoughAlliances: no ally for its last non-allied neighbour, nor past 2-3 alliances when we are its only neighbour", () => {
+  test("with relation decay running, the -20 is gone ~400 ticks later with the embargo still on; lifting it then gives +20", () => {
+    // Every spawned player has a PlayerExecution (SpawnExecution.ts:112-113),
+    // whose tick decays each relation 0.05 toward 0 and snaps |r| < 0.1 to 0
+    // (PlayerExecution.ts:57, PlayerImpl.ts:978-988).
+    const w = world({ usTiles: 150 });
+    advanceTo(w, 690);
+    startNation(w);
+    w.game.addExecution(new PlayerExecution(w.nation));
+    w.game.addExecution(new AttackExecution(1, w.nation, AGENT_ID));
+    tick(w);
+    expect(w.us.hasEmbargoAgainst(w.nation)).toBe(true);
+    const d = throughNextDecision(w);
+    // The NationExecution ticks before the PlayerExecution: -20, one decay.
+    expect(relationValue(w.nation, w.us)).toBeCloseTo(-19.95, 9);
+    let zeroAt = -1;
+    while (zeroAt < 0 && w.game.ticks() < d + 450) {
+      // Its income would lift it over its reserve (then it attacks us).
+      w.nation.setTroops(20_000);
+      tick(w);
+      if (relationValue(w.nation, w.us) === 0) zeroAt = w.game.ticks() - 1;
+    }
+    // -20 / 0.05 = 400 ticks, less the snap and float drift.
+    expect(zeroAt - d).toBeGreaterThanOrEqual(390);
+    expect(zeroAt - d).toBeLessThanOrEqual(400);
+    expect(w.us.hasEmbargoAgainst(w.nation)).toBe(true);
+    expect(w.nation.relation(w.us)).toBe(Relation.Neutral);
+    // Similarly strong (not a threat): accepted with the embargo still on.
+    toEveOfDecision(w);
+    w.nation.setTroops(20_000);
+    w.us.setTroops(25_000);
+    send(w, { type: "allianceRequest", recipient: NATION_ID });
+    tick(w);
+    expect(answer(w, pendingFromUs(w)).accepted).toBe(true);
+    expect(w.us.hasEmbargoAgainst(w.nation)).toBe(true);
+    expect(relationValue(w.nation, w.us)).toBe(0);
+    // The malus is still "applied", so ending the embargo pays +20.
+    send(w, { type: "embargo", targetID: NATION_ID, action: "stop" });
+    tick(w, 2);
+    expect(w.us.hasEmbargoAgainst(w.nation)).toBe(false);
+    throughNextDecision(w);
+    expect(relationValue(w.nation, w.us)).toBeCloseTo(19.95, 9);
+  });
+
+  test("its attack on us refuses our pending request at once, a threat's too (rejectIncomingAllianceRequests)", () => {
+    // AttackExecution.init, both sides non-bot: the target embargoes the
+    // attacker and the attacker's incoming request from the target is
+    // rejected (AttackExecution.ts:113-122, :389-396), before its decision.
+    const w = world();
+    // Past tick 700 and weak at its decision, so it sends us no request of
+    // its own (maybeSendAllianceRequests, NationAllianceBehavior.ts:96-117).
+    advanceTo(w, 700);
+    startNation(w);
+    throughNextDecision(w);
+    w.us.setTroops(100_000); // 5x its troops: its decision would say yes
+    const req = request(w);
+    expect(isDecisionTick(w, w.game.ticks())).toBe(false);
+    w.game.addExecution(new AttackExecution(1_000, w.nation, AGENT_ID));
+    tick(w);
+    expect(req.status()).toBe("rejected");
+    expect(w.us.isAlliedWith(w.nation)).toBe(false);
+    const onUs = w.nation.outgoingAttacks().filter((a) => a.target() === w.us);
+    expect(onUs).toHaveLength(1);
+  });
+
+  test("an answered request blocks the next one to it for allianceRequestCooldown() = 300 ticks from its creation", () => {
+    // canSendAllianceRequest (PlayerImpl.ts:814-858) over
+    // pastOutgoingAllianceRequests, which both accept and reject fill
+    // (GameImpl.ts:466, :481); AllianceRequestExecution.init drops the intent
+    // (AllianceRequestExecution.ts:41-43).
+    const w = world({ usTiles: 150 });
+    advanceTo(w, 700);
+    startNation(w);
+    w.us.setTroops(8_000); // weak: refused past tick 700
+    const req = request(w);
+    expect(answer(w, req).accepted).toBe(false);
+    const cooldown = w.config.allianceRequestCooldown();
+    expect(cooldown).toBe(300);
+    const fromUs = () =>
+      w.nation.incomingAllianceRequests().filter((r) => r.requestor() === w.us);
+    advanceTo(w, req.createdAt() + cooldown - 1);
+    expect(w.us.canSendAllianceRequest(w.nation)).toBe(false);
+    send(w, { type: "allianceRequest", recipient: NATION_ID });
+    tick(w);
+    expect(fromUs()).toHaveLength(0);
+    expect(w.game.ticks()).toBe(req.createdAt() + cooldown);
+    expect(w.us.canSendAllianceRequest(w.nation)).toBe(true);
+    send(w, { type: "allianceRequest", recipient: NATION_ID });
+    tick(w);
+    expect(fromUs()).toHaveLength(1);
+    expect(fromUs()[0].createdAt()).toBe(req.createdAt() + cooldown);
+  });
+
+  test("checkAlreadyEnoughAlliances: no ally for its last non-allied neighbour, nor past 2-3 alliances when we are not one of >= 2 neighbours", () => {
     // NationAllianceBehavior.ts:305-337 (Impossible :313-332), reached only
     // by requests that are no threat and not Friendly (:169-172). Past tick
     // 700, similarly strong (19,000 against 20,000), neutral.
     interface Case {
-      /** other0 takes one of our tiles next to the nation. */
-      beside: boolean;
+      /**
+       * beside: other0 takes one of our tiles next to the nation, which then
+       * borders [us, other0]; alone: it borders only us; cut: other0 takes
+       * our whole column x = 10, so it borders only other0, not us.
+       */
+      layout: "beside" | "alone" | "cut";
       /** The nation's allies among the others (0 is other0). */
       allies: number[];
       troops: number;
@@ -634,18 +782,24 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
     }
     const cases: Case[] = [
       // Bordering [us, other0], other0 allied: 2 <= 1 + 1.
-      { beside: true, allies: [0], troops: 19_000, accepted: false },
+      { layout: "beside", allies: [0], troops: 19_000, accepted: false },
       // ... but a threat is decided before this rule.
-      { beside: true, allies: [0], troops: 100_000, accepted: true },
+      { layout: "beside", allies: [0], troops: 100_000, accepted: true },
       // Bordering [us, other0], none allied: 2 <= 0 + 1 is false.
-      { beside: true, allies: [], troops: 19_000, accepted: true },
+      { layout: "beside", allies: [], troops: 19_000, accepted: true },
       // We are its only neighbour: alliances >= nextInt(2, 4) = 2 or 3.
-      { beside: false, allies: [1], troops: 19_000, accepted: true },
-      { beside: false, allies: [1, 2, 3], troops: 19_000, accepted: false },
+      { layout: "alone", allies: [1], troops: 19_000, accepted: true },
+      { layout: "alone", allies: [1, 2, 3], troops: 19_000, accepted: false },
+      // We do not border it at all: the same count rule.
+      { layout: "cut", allies: [1], troops: 19_000, accepted: true },
+      { layout: "cut", allies: [1, 2, 3], troops: 19_000, accepted: false },
     ];
     for (const c of cases) {
       const w = world({ usTiles: 150, others: 4 });
-      if (c.beside) w.others[0].conquer(w.game.ref(10, 19));
+      if (c.layout === "beside") w.others[0].conquer(w.game.ref(10, 19));
+      if (c.layout === "cut") {
+        for (let y = 0; y < 20; y++) w.others[0].conquer(w.game.ref(10, y));
+      }
       advanceTo(w, 690);
       startNation(w);
       for (const i of c.allies) {
@@ -661,7 +815,8 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
       const neighbours = w.nation
         .nearby()
         .filter((p) => p.isPlayer() && p.type() !== PlayerType.Bot);
-      expect(neighbours).toHaveLength(c.beside ? 2 : 1);
+      expect(neighbours).toHaveLength(c.layout === "beside" ? 2 : 1);
+      expect(neighbours.includes(w.us)).toBe(c.layout !== "cut");
       advanceTo(w, 700);
       w.us.setTroops(c.troops);
       expect(answer(w, request(w)).accepted).toBe(c.accepted);
@@ -833,7 +988,8 @@ describe("NationAlliance: duration", () => {
     tick(w);
     expect(w.us.isAlliedWith(w.nation)).toBe(false);
     // No cost (GameImpl.expireAlliance, GameImpl.ts:910-930): no traitor,
-    // no relation change, no embargo, no request cooldown.
+    // no relation change, no embargo, and no cooldown of its own (the
+    // 300-tick request cooldown counts from our request, 3000 ticks ago).
     expect(w.us.isTraitor()).toBe(false);
     expect(w.nation.isTraitor()).toBe(false);
     expect(w.us.betrayals()).toBe(0);
@@ -900,6 +1056,43 @@ describe("NationAlliance: duration", () => {
     expect(w.us.troops()).toBeGreaterThan(w.nation.troops() * 1.5);
     expect(alliance.expiresAt()).toBe(expires);
     expect(alliance.agreedToExtend(w.nation)).toBe(false);
+  });
+
+  test("the extension counts us as its bordering friend: with non-bot neighbours [us, X], X not its ally, only a threat (or Friendly) gets one", () => {
+    // checkAlreadyEnoughAlliances (NationAllianceBehavior.ts:315-328): the
+    // first request sees 2 <= 0 + 1 (pass), the extension 2 <= 1 + 1 (we
+    // are isFriendly now, PlayerImpl.ts:1296-1304). 3 others: 5 non-bot
+    // players, so the alliance passes the 25% limit (1 < 1.25).
+    for (const beside of [true, false]) {
+      const w = world({ usTiles: 150, others: 3 });
+      if (beside) w.others[0].conquer(w.game.ref(10, 19));
+      advanceTo(w, 700);
+      startNation(w);
+      w.us.setTroops(19_000); // similarly strong, not a threat
+      expect(answer(w, request(w)).accepted).toBe(true);
+      const alliance = w.us.allianceWith(w.nation)!;
+      const expires = alliance.expiresAt();
+      send(w, { type: "allianceExtension", recipient: NATION_ID });
+      tick(w);
+      let decided = -1;
+      for (let i = 0; i < 5 && alliance.expiresAt() === expires; i++) {
+        decided = throughNextDecision(w);
+      }
+      expect(w.nation.troops()).toBe(20_000);
+      expect(w.us.troops()).toBe(19_000);
+      if (!beside) {
+        expect(alliance.expiresAt()).toBe(
+          decided + w.config.allianceDuration(),
+        );
+        continue;
+      }
+      // Five decisions, five refusals; still asked (see above).
+      expect(alliance.expiresAt()).toBe(expires);
+      expect(alliance.agreedToExtend(w.us)).toBe(true);
+      w.us.setTroops(100_000);
+      decided = throughNextDecision(w);
+      expect(alliance.expiresAt()).toBe(decided + w.config.allianceDuration());
+    }
   });
 });
 
@@ -1106,6 +1299,104 @@ describe("NationAlliance: what allies can and cannot do to each other", () => {
     expect(post.broken).toBe(true);
     expect(post.b.us.isTraitor()).toBe(true);
   });
+
+  test("the structure radius is the bomb's outer radius: 30 tiles for an AtomBomb, 100 for a HydrogenBomb", () => {
+    // listNukeBreakAlliance: nearbyUnits(target, magnitude.outer, Structures)
+    // (Util.ts:122-127), Euclidean (UnitGrid.ts:181-200). us x 0-119, the
+    // nation x 120-159; target (22, 20); its DefensePost at (120, 20) is 98
+    // tiles away.
+    const config = world().config;
+    expect(config.nukeMagnitudes(UnitType.AtomBomb)).toEqual({
+      inner: 12,
+      outer: 30,
+    });
+    expect(config.nukeMagnitudes(UnitType.HydrogenBomb)).toEqual({
+      inner: 80,
+      outer: 100,
+    });
+    const run = (
+      bomb: UnitType.AtomBomb | UnitType.HydrogenBomb,
+      post: boolean,
+    ) => {
+      const b = base(160, 40, "hbomb");
+      const w = { ...b };
+      fill(b.game, b.us, 0, 120, 0, 40);
+      fill(b.game, b.nation, 120, 160, 0, 40);
+      b.us.setTroops(100_000);
+      b.nation.setTroops(100_000);
+      b.us.buildUnit(UnitType.MissileSilo, b.game.ref(2, 2), {});
+      if (post) {
+        b.nation.buildUnit(UnitType.DefensePost, b.game.ref(120, 20), {});
+      }
+      b.us.addGold(1_000_000_000n);
+      advanceTo(w, b.config.spawnImmunityDuration());
+      allyUsWith(w, b.nation);
+      const target = b.game.ref(22, 20);
+      const weight =
+        computeNukeBlastCounts({
+          gm: b.game,
+          targetTile: target,
+          magnitude: b.config.nukeMagnitudes(bomb),
+        }).get(b.nation.smallID()) ?? 0;
+      send(w, { type: "build_unit", unit: bomb, tile: target });
+      for (let i = 0; i < 5 && b.us.units(bomb).length === 0; i++) tick(w);
+      expect(b.us.units(bomb)).toHaveLength(1);
+      return { weight, broken: !b.us.isAlliedWith(b.nation), us: b.us };
+    };
+    const threshold = config.nukeAllianceBreakThreshold();
+    const hNoPost = run(UnitType.HydrogenBomb, false);
+    expect(hNoPost.weight).toBeGreaterThan(0);
+    expect(hNoPost.weight).toBeLessThanOrEqual(threshold);
+    expect(hNoPost.broken).toBe(false);
+    const hPost = run(UnitType.HydrogenBomb, true);
+    expect(hPost.broken).toBe(true);
+    expect(hPost.us.isTraitor()).toBe(true);
+    const aPost = run(UnitType.AtomBomb, true);
+    expect(aPost.weight).toBe(0);
+    expect(aPost.broken).toBe(false);
+  });
+
+  test("a MIRV at an ally breaks the alliance at launch whatever it covers (we turn traitor), -100 both ways", () => {
+    // MIRVExecution.tick at launch (MIRVExecution.ts:110-120), target player
+    // = the owner of the target tile at init (:88); its warheads never break
+    // alliances (NukeExecution.ts:152-155).
+    const b = base(100, 80, "mirv");
+    const w = { ...b };
+    fill(b.game, b.us, 0, 60, 0, 80);
+    fill(b.game, b.nation, 60, 100, 0, 80);
+    // One ally tile alone in our land: an AtomBomb on it would weigh 1 and
+    // reach none of its structures, so it would not break the alliance.
+    const enclave = b.game.ref(30, 40);
+    b.nation.conquer(enclave);
+    b.us.setTroops(100_000);
+    b.nation.setTroops(100_000);
+    b.us.buildUnit(UnitType.MissileSilo, b.game.ref(2, 2), {});
+    b.us.addGold(1_000_000_000n);
+    advanceTo(w, b.config.spawnImmunityDuration());
+    allyUsWith(w, b.nation);
+    const atom = listNukeBreakAlliance({
+      game: b.game,
+      targetTile: enclave,
+      magnitude: b.config.nukeMagnitudes(UnitType.AtomBomb),
+      threshold: b.config.nukeAllianceBreakThreshold(),
+    });
+    expect(atom.has(b.nation.smallID())).toBe(false);
+    const before = [
+      relationValue(b.nation, b.us),
+      relationValue(b.us, b.nation),
+    ];
+    send(w, { type: "build_unit", unit: UnitType.MIRV, tile: enclave });
+    for (let i = 0; i < 5 && b.us.units(UnitType.MIRV).length === 0; i++) {
+      tick(w);
+    }
+    expect(b.us.units(UnitType.MIRV)).toHaveLength(1);
+    expect(b.us.isAlliedWith(b.nation)).toBe(false);
+    expect(b.us.isTraitor()).toBe(true);
+    expect([
+      relationValue(b.nation, b.us) - before[0],
+      relationValue(b.us, b.nation) - before[1],
+    ]).toEqual([-100, -100]);
+  });
 });
 
 describe("NationAlliance: breaking an alliance", () => {
@@ -1137,7 +1428,8 @@ describe("NationAlliance: breaking an alliance", () => {
     }
   });
 
-  test("breaking with a traitor costs no traitor mark (the relations still drop)", () => {
+  test("breaking with a traitor costs no traitor mark, but the -100 and the -40s still land", () => {
+    // us x 10-29: the nation and other0 border us, other1 does not.
     const w = world({ usTiles: 400, others: 2 });
     advanceTo(w, 100);
     allyUsWith(w, w.others[0]);
@@ -1154,12 +1446,20 @@ describe("NationAlliance: breaking an alliance", () => {
     );
     tick(w, 2);
     expect(w.others[0].isTraitor()).toBe(true);
+    const players = [w.nation, w.others[0], w.others[1]];
+    const before = players.map((p) => relationValue(p, w.us));
     breakWith(w, w.others[0]);
     // GameImpl.breakAlliance: markTraitor only if the other is no traitor
     // (GameImpl.ts:887).
     expect(w.us.isTraitor()).toBe(false);
     expect(w.us.betrayals()).toBe(0);
-    expect(relationValue(w.nation, w.us)).toBe(-40);
+    // BreakAllianceExecution.ts:45-56 has no traitor test: -100 from the
+    // betrayed, -40 from every player in our nearby() (it included).
+    expect(before).toEqual([0, 100, 0]);
+    const delta = players.map((p, i) => relationValue(p, w.us) - before[i]);
+    expect(delta).toEqual([-40, -140, 0]);
+    // -40 makes the nation Distrustful: it now refuses all but a threat.
+    expect(w.nation.relation(w.us)).toBe(Relation.Distrustful);
   });
 
   test("attacking a traitor: attackLogic halves the attacker's losses and takes 0.8x the time per tile", () => {
@@ -1227,39 +1527,120 @@ describe("NationAlliance: breaking an alliance", () => {
     expect(perTile(traitor) / perTile(honest)).toBeLessThan(0.6);
   });
 
-  test("an Impossible ally betrays a traitor with < 1.2x its troops at its next decision, and attacks it at once", () => {
-    // maybeAttack -> attackBestTarget (above reserve and trigger) -> the
-    // Impossible strategy list [retaliate, bots, veryWeak, betray, ...]
-    // (AiAttackBehavior.ts:428) -> maybeBetrayAndAttack (:583-608) ->
-    // maybeBetray's traitor rule (NationAllianceBehavior.ts:440-448), then
-    // sendAttack(friend, true) (:604).
-    for (const [ratio, betrayed] of [
-      [0.6, true],
-      [1.25, false],
-    ] as const) {
-      const w = world({ others: 1 });
-      advanceTo(w, 100);
-      startNation(w);
-      w.us.setTroops(100_000);
-      expect(answer(w, request(w)).accepted).toBe(true);
-      allyUsWith(w, w.others[0]);
-      // Above its reserve and trigger (AiAttackBehavior.ts:289-293).
-      const nationTroops = Math.ceil(0.9 * w.config.maxTroops(w.nation));
-      expect(w.n.triggerRatio).toBeLessThan(0.9);
-      expect(w.n.reserveRatio).toBeLessThan(w.n.triggerRatio);
-      w.nation.setTroops(nationTroops);
-      w.us.setTroops(Math.floor(ratio * nationTroops));
-      breakWith(w, w.others[0]);
-      expect(w.us.isTraitor()).toBe(true);
-      expect(w.us.isAlliedWith(w.nation)).toBe(true);
-      throughNextDecision(w);
-      expect(w.us.isAlliedWith(w.nation)).toBe(!betrayed);
-      // Betraying a traitor makes no traitor (GameImpl.ts:887).
-      expect(w.nation.isTraitor()).toBe(false);
+  /**
+   * Allied with the nation as a threat, then the nation at 0.9 of its cap,
+   * above its reserve and trigger (AiAttackBehavior.ts:289-293), so its
+   * decisions reach the Impossible strategy list (:428) and betray (:346-347,
+   * maybeBetrayAndAttack :583-608).
+   */
+  function alliedStrongNation(spec: Spec): { w: World; troops: number } {
+    const w = world(spec);
+    advanceTo(w, 100);
+    startNation(w);
+    w.us.setTroops(100_000);
+    expect(answer(w, request(w)).accepted).toBe(true);
+    const troops = Math.ceil(0.9 * w.config.maxTroops(w.nation));
+    expect(w.n.triggerRatio).toBeLessThan(0.9);
+    expect(w.n.reserveRatio).toBeLessThan(w.n.triggerRatio);
+    return { w, troops };
+  }
+
+  test("REFUTES 'allies cannot attack each other' for the nation: as our only neighbour it betrays and attacks us if we are a traitor with < 1.2x its troops, or hold < 1/3 of its troops at home", () => {
+    // maybeBetray (NationAllianceBehavior.ts:404-461), first match:
+    //  a juiciest ally and isSafeToBetray (:414-423, :473-491): ours +
+    //    outgoing < 0.33x its troops (no other neighbours or allies here);
+    //  b traitor with < 1.2x its troops (:440-448);
+    //  c only bordering player with troops() x 3 < its troops (:450-458).
+    interface Case {
+      traitor: boolean;
+      /** Our home troops and our attack on free land, x its troops. */
+      home: number;
+      inFlight: number;
+      betrayed: boolean;
+    }
+    const cases: Case[] = [
+      { traitor: false, home: 0.32, inFlight: 0, betrayed: true }, // a and c
+      { traitor: false, home: 0.34, inFlight: 0, betrayed: false },
+      // c counts home troops only: 0.4x in all, betrayed (a fails).
+      { traitor: false, home: 0.2, inFlight: 0.2, betrayed: true },
+      { traitor: false, home: 0.4, inFlight: 0, betrayed: false },
+      { traitor: false, home: 0.6, inFlight: 0, betrayed: false },
+      { traitor: true, home: 0.6, inFlight: 0, betrayed: true }, // b
+      { traitor: true, home: 1.25, inFlight: 0, betrayed: false },
+    ];
+    for (const c of cases) {
+      const { w, troops } = alliedStrongNation({ others: 1 });
+      if (c.traitor) {
+        // other0 (x 30-31) borders neither us (x 10-19) nor the nation.
+        allyUsWith(w, w.others[0]);
+        breakWith(w, w.others[0]);
+      }
+      expect(w.us.isTraitor()).toBe(c.traitor);
+      w.nation.setTroops(troops);
+      const home = Math.floor(c.home * troops);
+      const inFlight = Math.floor(c.inFlight * troops);
+      w.us.setTroops(home + inFlight);
+      const relation = relationValue(w.nation, w.us);
+      toEveOfDecision(w);
+      if (inFlight > 0) {
+        send(w, { type: "attack", targetID: null, troops: inFlight });
+      }
+      tick(w);
+      expect(w.us.troops()).toBe(home);
+      expect(w.us.outgoingAttacks().reduce((s, a) => s + a.troops(), 0)).toBe(
+        inFlight,
+      );
+      tick(w); // its decision, before our attack's first tick
+      expect(isDecisionTick(w, w.game.ticks() - 1)).toBe(true);
+      expect(w.us.isAlliedWith(w.nation)).toBe(!c.betrayed);
       const onUs = w.nation
         .outgoingAttacks()
         .filter((a) => a.target() === w.us);
-      expect(onUs).toHaveLength(betrayed ? 1 : 0);
+      expect(onUs).toHaveLength(c.betrayed ? 1 : 0);
+      // betray() is player.breakAlliance (:493-497): the nation turns
+      // traitor unless we are one (GameImpl.ts:887); no relation changes.
+      expect(w.nation.isTraitor()).toBe(c.betrayed && !c.traitor);
+      expect(relationValue(w.nation, w.us)).toBe(relation);
+    }
+  });
+
+  test("with a second bordering player it betrays us only if we, its non-allied neighbours and its other allies hold < 0.33x its troops (isSafeToBetray)", () => {
+    // Rule c needs exactly one bordering player, so only a applies: threats
+    // = [us, other0] (NationAllianceBehavior.ts:473-491). other0 is kept out
+    // of findVeryWeakEnemy (< 0.15x its own cap, AiAttackBehavior.ts:
+    // 655-666), which the Impossible list tries before betray.
+    for (const [sum, betrayed] of [
+      [0.3, true],
+      [0.36, false],
+    ] as const) {
+      const { w, troops } = alliedStrongNation({ others: 1 });
+      const other = w.others[0];
+      other.conquer(w.game.ref(10, 19));
+      w.nation.setTroops(troops);
+      const otherTroops = Math.ceil(0.15 * w.config.maxTroops(other));
+      other.setTroops(otherTroops);
+      w.us.setTroops(Math.floor(sum * troops) - otherTroops);
+      // We alone are under 1/3 of it either way.
+      expect(w.us.troops() * 3).toBeLessThan(troops);
+      expect(otherTroops).toBeLessThan(0.75 * troops);
+      const bordering = w.nation.nearby().filter((p) => p.isPlayer());
+      expect(bordering).toHaveLength(2);
+      // A decision can end early (a 1-in-10 boat roll, :146-150).
+      for (
+        let i = 0;
+        i < 8 &&
+        w.us.isAlliedWith(w.nation) &&
+        w.nation.outgoingAttacks().length === 0;
+        i++
+      ) {
+        throughNextDecision(w);
+      }
+      expect(w.us.isAlliedWith(w.nation)).toBe(!betrayed);
+      // Not betrayed, it attacks other0 instead (juicy, AiAttackBehavior.ts:
+      // 669-674, <= 0.75x its troops).
+      expect(w.nation.outgoingAttacks().map((a) => a.target())).toEqual([
+        betrayed ? w.us : other,
+      ]);
     }
   });
 });

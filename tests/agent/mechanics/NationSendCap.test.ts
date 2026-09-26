@@ -59,28 +59,55 @@
  * - Retaliation: retaliate answers the largest incoming non-bot attacker with
  *   force (:313-319, findIncomingAttackPlayer :458-479, nations ignore tribe
  *   attackers :462-466).
+ * - Target filters (FFA) on players it does not border: the random boat
+ *   skips players with more troops than it (findRandomBoatTarget :243-250),
+ *   island skips >= its troops (findNearestIslandEnemy :695-700), hated
+ *   skips > 3x (:369-378); retaliate (:313-319) and assist (:540-567) have
+ *   none. The other strategies pick only from borderingEnemies, which is
+ *   the 4-neighbours of its border plus nearby() (:104-133).
+ * - Grudges: any attack on a player makes the target's relation to the
+ *   attacker -100 on Impossible (AttackExecution.init, AttackExecution.ts:
+ *   190-209; clamped to [-100, 100], PlayerImpl.updateRelation :969-976);
+ *   it decays 0.05 per tick towards 0 (decayRelations :978-988, run by
+ *   PlayerExecution.tick, PlayerExecution.ts:57), and Hostile is < -50
+ *   (relationFromValue :946-957).
  *
- * VERDICT: TRUE, every part as stated, with refinements an agent needs:
- * - The land line is exact: an adjacent nation with home troops T attacks us
- *   iff T - ceil(0.9 H) >= 0.2 H (H = our home troops; the send is also
- *   bounded by its reserve surplus), i.e. H <= H* ~ T / 1.1 = 0.909 T. For
- *   T = 172,823, H* = 157,111: attacked at H*, never at H* + 1 in five minutes
- *   although it picks us as a target at most decisions. A live game with
- *   income on both sides obeys the prediction at every decision.
- * - "Under attack" is any incoming attack, a tribe's included: a tribe
- *   poking the nation lifts the 20% floor for its attacks on us too, and
- *   the cap becomes max(cap, sum of all incoming attacks).
- * - At H >= T / 0.9 (1.111x) the cap is 0: a poke of ours is answered with
- *   exactly its size; the nation cannot even attack a weak tribe, and its
- *   free-land sends shrink to ceil(5%) of its troops per decision.
- * - Boats: the line is exactly T when we are not nearby (no cap; the target
- *   filters skip stronger players before sizing). Across a river of <= 4
- *   tiles we are nearby, and the 0.909 line applies to boats as well.
- * - A stronger non-bot player nearby the nation shields a weak us completely
- *   (cap 0); a stronger tribe does not count.
- * - The free-land gate held at every decision while free land bordered it
- *   (7 here); at the next decision after the land ran out, it attacked us.
- *   The opening troops/2 at free land is uncapped.
+ * VERDICT: PARTIAL. The land line is exact for a nation that is not under
+ * attack; the boat line and the free-land clause hold only with conditions:
+ * - Land: an adjacent nation with home troops T attacks us iff
+ *   T - ceil(0.9 Hmax) >= 0.2 H (and >= 1), H our home troops, Hmax the most
+ *   home troops of any nearby non-friendly non-bot player (Hmax >= H when we
+ *   are nearby); the send is also bounded by its reserve surplus. So H > H*,
+ *   H* ~ T / 1.1 = 0.909 T, is safe whatever else is nearby, while no attack
+ *   is incoming on the nation. For T = 172,823, H* = 157,111: attacked at H*,
+ *   never at H* + 1 in five minutes. A live game obeys it at every decision.
+ * - Under attack (any incoming attack, a tribe's included) the 20% floor is
+ *   gone and the cap is max(cap, sum of incoming). At H >= T / 0.9 (1.111x)
+ *   a nation we are nearby answers a poke with exactly its size; a nation we
+ *   are NOT nearby has no cap from us at all (Infinity, or set by others).
+ * - Boats, when we are not nearby: while no attack is incoming on it, H > T
+ *   is safe (every strategy's boat is troops/5 < 0.2 H). Under attack only
+ *   the target filters protect us: the random boat skips H > T (:243-250),
+ *   island H >= T (:695-700), hated only H > 3T (:369-378); retaliate and
+ *   assist filter nothing. Any attack of ours leaves it Hostile to us
+ *   (-100) for 1,001 ticks, so a tribe poking it then draws a troops/5 boat
+ *   on us at up to 3T. Across a river of <= 4 tiles we are nearby, and the
+ *   0.909 line applies to boats as well.
+ * - A third player nearby the nation shields us only if
+ *   T - ceil(0.9 R) < max(1, 0.2 H): "stronger than the nation" is not
+ *   enough (at H = 0.1 T it takes R >= 1.089 T); R >= T / 0.9 shields
+ *   anyone (cap 0). A tribe never counts.
+ * - Free land: the gate returns only when the free-land send succeeds, i.e.
+ *   (4-adjacent free land) T - expandRatio x maxTroops >= 1. Below that it
+ *   falls through to the random boat, which boats a not-nearby us (H <= T)
+ *   with troops/5; player land attacks stay blocked there by the reserve
+ *   gate. Above it, every decision went to free land only (7 in the first
+ *   free-land test); at the next decision after the land ran out, it
+ *   attacked us. The opening troops/2 at free land is uncapped.
+ * - At cap 0 it is not frozen: it still sends ceil(5%) of its troops at free
+ *   land per decision and its territory grows.
+ * - Below its reserve ratio it still random-boats and still attacks a tribe
+ *   that owns a structure (before the reserve gate, :285-290).
  * - With equal land, both at cap, we hold 1/1.25 = 0.8x and are attacked;
  *   being out of reach at cap takes 1.26x-1.6x its land (no cities).
  * - Its decision ticks and ratios follow from (gameID, nation id) alone.
@@ -94,11 +121,12 @@
  * tile is owned unless a test adds free land. The NationExecution is the
  * real one, seeded as in a game (gameID + nation id). Except in the live
  * test, no PlayerExecution runs, so troops and gold stay where the test puts
- * them (no income, no structures); the test sets troops before a decision,
- * never during one. A scripted setup leaves hasSpawned() false and
- * largestClusterBoundingBox unset: the first is read only by the spawn-phase
- * branch (NationExecution.ts:127, :184), the second only for an island
- * target's centre, which falls back to the border's box (:758-763).
+ * them (no income; no structures unless a test builds one); the test sets
+ * troops before a decision, never during one. A scripted setup leaves
+ * hasSpawned() false and largestClusterBoundingBox unset: the first is read
+ * only by the spawn-phase branch (NationExecution.ts:127, :184), the second
+ * only for an island target's centre, which falls back to the border's box
+ * (:758-763).
  * Our attacks go through IntentSchema and Executor.createExec, the path of
  * ctx.send. Every attack or boat is recorded as it is constructed, i.e. the
  * decision, before AttackExecution.init adjusts it.
@@ -123,6 +151,7 @@ import {
   PlayerID,
   PlayerInfo,
   PlayerType,
+  Relation,
   TerraNullius,
   UnitType,
 } from "../../../src/core/game/Game";
@@ -995,7 +1024,7 @@ describe("H4 NationSendCap: the under-attack exception", () => {
 });
 
 describe("H4 NationSendCap: third parties next to the nation", () => {
-  it("a stronger nearby nation shields a weak us: cap 0, nobody is attacked", () => {
+  const withRival = () => {
     const w = world({
       width: 60,
       height: 20,
@@ -1003,7 +1032,11 @@ describe("H4 NationSendCap: third parties next to the nation", () => {
       seat: (x) => (x < 20 ? "us" : x < 40 ? "nation" : "third"),
     });
     start(w);
-    const tn = nationAt80(w);
+    return { w, tn: nationAt80(w) };
+  };
+
+  it("a nearby rival at >= T / 0.9 shields a weak us: cap 0, nobody is attacked", () => {
+    const { w, tn } = withRival();
     w.us.setTroops(Math.round(0.5 * tn));
     w.third!.setTroops(Math.round(1.2 * tn));
     expect(w.n.attackBehavior.troopSendCap()).toBe(0);
@@ -1011,6 +1044,59 @@ describe("H4 NationSendCap: third parties next to the nation", () => {
     expect(runWindow(w, WINDOW).sends).toEqual([]);
     // It picks us (juicy: <= 0.75x, :669-674) and the cap refuses.
     expect(attempts()).toBeGreaterThan(0);
+  });
+
+  it("a rival merely stronger than the nation does not shield us; the shield line is exact", () => {
+    // Refutes the first report's "a stronger human or nation next to a
+    // nation shields us from it completely": a rival R shields us (home H)
+    // only if T - ceil(0.9 R) < max(1, 0.2 H), i.e. R > (T - 0.2 H) / 0.9.
+    const h = (tn: number) => Math.round(0.1 * tn);
+    const shields = (tn: number, r: number) => {
+      const cap = Math.max(0, tn - Math.ceil(r * RETAIN));
+      return cap < 1 || cap < h(tn) * FLOOR;
+    };
+
+    // A rival at 1.05 T: cap 9,505 against a floor of 3,456.
+    const weak = withRival();
+    weak.w.us.setTroops(h(weak.tn));
+    weak.w.third!.setTroops(Math.round(1.05 * weak.tn));
+    expect(weak.w.third!.troops()).toBeGreaterThan(weak.w.nation.troops());
+    expect(weak.w.n.attackBehavior.troopSendCap()).toBe(9_505);
+    const hit = firstSend(weak.w, () =>
+      predictSend(weak.w, "land", weak.w.us, weak.w.third!.troops()),
+    );
+    expect(hit.predicted).toBe(9_505);
+    expect(hit.sends).toEqual([
+      expect.objectContaining({ kind: "land", to: AGENT_ID, troops: 9_505 }),
+    ]);
+
+    // The line R*: attacked with a rival at R* - 1, not at R*.
+    let line = Math.floor((weak.tn - h(weak.tn) * FLOOR) / RETAIN) - 10;
+    while (!shields(weak.tn, line)) line++;
+    expect(line / weak.tn).toBeCloseTo((1 - 0.1 * 0.2) / 0.9, 4);
+    for (const r of [line - 1, line]) {
+      const { w, tn } = withRival();
+      w.us.setTroops(h(tn));
+      w.third!.setTroops(r);
+      if (r < line) {
+        const { sends, predicted } = firstSend(w, () =>
+          predictSend(w, "land", w.us, r),
+        );
+        expect(predicted).toBe(tn - Math.ceil(r * RETAIN));
+        expect(sends).toEqual([
+          expect.objectContaining({
+            kind: "land",
+            to: AGENT_ID,
+            troops: predicted,
+          }),
+        ]);
+      } else {
+        const attempts = attemptsOn(w, w.us);
+        expect(runWindow(w, WINDOW).sends).toEqual([]);
+        // veryWeak (< 15% of our cap, :655-667) picks us; the cap refuses.
+        expect(attempts()).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("a stronger tribe does not shield us", () => {
@@ -1069,6 +1155,18 @@ describe("H4 NationSendCap: third parties next to the nation", () => {
   });
 });
 
+/** Unowned, un-nuked land 4-adjacent to the nation's border (maybeAttack :107-118). */
+function bordersFreeLand(w: World): boolean {
+  const map = w.game.map();
+  let found = false;
+  w.nation.borderTiles().forEach((t) =>
+    map.forEachNeighbor(t, (n) => {
+      if (map.isLand(n) && !map.hasOwner(n) && !map.hasFallout(n)) found = true;
+    }),
+  );
+  return found;
+}
+
 describe("H4 NationSendCap: free land", () => {
   it("while it borders free land it attacks only free land; once that is gone, us", () => {
     // us | nation | 160 columns of free land
@@ -1087,17 +1185,6 @@ describe("H4 NationSendCap: free land", () => {
       expect.objectContaining({ kind: "land", to: null, troops: tn0 / 2 }),
     ]);
 
-    const map = w.game.map();
-    const bordersFreeLand = () => {
-      let found = false;
-      w.nation.borderTiles().forEach((t) =>
-        map.forEachNeighbor(t, (n) => {
-          if (map.isLand(n) && !map.hasOwner(n) && !map.hasFallout(n))
-            found = true;
-        }),
-      );
-      return found;
-    };
     // Before each decision: the nation at 80% of its (growing) cap, us at
     // half of that, so that without free land it would attack us.
     const hold = () => {
@@ -1110,7 +1197,7 @@ describe("H4 NationSendCap: free land", () => {
     for (;;) {
       toDecision(w);
       hold();
-      if (!bordersFreeLand()) break;
+      if (!bordersFreeLand(w)) break;
       const cap = predictCap(w, w.us.troops());
       expect(cap).toBeGreaterThan(0);
       const expected = Math.min(
@@ -1142,7 +1229,7 @@ describe("H4 NationSendCap: free land", () => {
     ]);
   });
 
-  it("a neighbour at >= 1.11x throttles its free-land sends to ceil(5%) of its troops", () => {
+  it("a neighbour at >= 1.11x throttles its free-land sends to ceil(5%) of its troops; it still grows", () => {
     const w = world({
       width: 200,
       height: 20,
@@ -1153,9 +1240,15 @@ describe("H4 NationSendCap: free land", () => {
       w.nation.setTroops(tn);
       w.us.setTroops(Math.round(1.2 * tn));
     };
-    hold();
+    // A tiny opening (troops/2 = 10), over before the capped decisions start.
+    w.nation.setTroops(20);
     w.game.addExecution(w.exec);
     tick(w, 2);
+    expect(nationSends(w)).toEqual([
+      expect.objectContaining({ kind: "land", to: null, troops: 10 }),
+    ]);
+    while (w.nation.outgoingAttacks().length > 0) tick(w);
+    const tilesBefore = w.nation.numTilesOwned();
     for (let d = 0; d < 3; d++) {
       toDecision(w);
       hold();
@@ -1166,6 +1259,118 @@ describe("H4 NationSendCap: free land", () => {
         expect.objectContaining({ kind: "land", to: null, troops: expected }),
       ]);
     }
+    tick(w, 20);
+    // Refutes the first report's "out-troop it by 11% and it stops
+    // growing": cap 0 throttles its expansion, it does not freeze it.
+    expect(w.nation.numTilesOwned()).toBeGreaterThan(tilesBefore);
+  });
+
+  // An island (x 2-17) with a lake of free land inside (x 6-13, y 6-17), and
+  // our island (x 32-47) 14 tiles of ocean away: we are not nearby, and the
+  // free land is not reachable by boat.
+  const lake: Spec = {
+    width: 50,
+    height: 24,
+    seat: (x, y) => {
+      if (y < 2 || y > 21) return "water";
+      if (x >= 2 && x <= 17) {
+        return x >= 6 && x <= 13 && y >= 6 && y <= 17 ? "free" : "nation";
+      }
+      return x >= 32 && x <= 47 ? "us" : "water";
+    },
+  };
+
+  /** The free-land send is refused iff troops - expandRatio x maxTroops < 1. */
+  const expandLine = (w: World) => {
+    const reserve = w.config.maxTroops(w.nation) * w.n.expandRatio;
+    let t = Math.floor(reserve);
+    while (t - reserve < 1) t++;
+    return t;
+  };
+
+  /** The nation's sendAttack calls on terra nullius and what they returned. */
+  const freeLandTries = (w: World) => {
+    const spy = vi.spyOn(
+      w.n.attackBehavior as unknown as {
+        sendAttack(t: Player | TerraNullius, force?: boolean): boolean;
+      },
+      "sendAttack",
+    );
+    return () =>
+      spy.mock.calls.flatMap((c, i) =>
+        c[0].isPlayer() ? [] : [spy.mock.results[i].value as boolean],
+      );
+  };
+
+  it("the gate needs troops - expandRatio x maxTroops >= 1: one troop below, the free-land send fails", () => {
+    const w = world(lake);
+    w.nation.setTroops(20);
+    w.game.addExecution(w.exec);
+    tick(w, 3);
+    expect(w.n.behaviorsInitialized).toBe(true);
+    const tries = freeLandTries(w);
+    for (const below of [false, true]) {
+      toDecision(w);
+      const line = expandLine(w);
+      w.nation.setTroops(below ? line - 1 : line);
+      w.us.setTroops(Math.round(0.5 * w.nation.troops()));
+      expect(bordersFreeLand(w)).toBe(true);
+      const n = tries().length;
+      const reserve = w.config.maxTroops(w.nation) * w.n.expandRatio;
+      const sends = decide(w);
+      // The gate is the first thing maybeAttack tries (:135-141).
+      expect(tries().slice(n)).toEqual([!below]);
+      const toFree = sends.filter((s) => s.to === null);
+      if (below) {
+        expect(toFree).toEqual([]);
+      } else {
+        // No non-bot player is nearby: the cap is Infinity (:1016-1018).
+        expect(toFree).toEqual([
+          expect.objectContaining({ kind: "land", troops: line - reserve }),
+        ]);
+        expect(sends).toHaveLength(1);
+      }
+    }
+  });
+
+  it("below that line it falls through to the random boat and boats a not-nearby us with troops/5", () => {
+    // Refutes "while it borders free land it launches no other ... boat
+    // attack" for a nation below its expand ratio (10-19% of its cap).
+    const w = world(lake);
+    w.nation.setTroops(20);
+    w.game.addExecution(w.exec);
+    tick(w, 3);
+    expect(w.nation.nearby().some((p) => p.isPlayer())).toBe(false);
+    const tries = freeLandTries(w);
+    let hit: Sent | null = null;
+    let decisions = 0;
+    while (hit === null) {
+      expect(++decisions).toBeLessThanOrEqual(60);
+      toDecision(w);
+      const tn = Math.round(0.05 * w.config.maxTroops(w.nation));
+      w.nation.setTroops(tn);
+      w.us.setTroops(Math.round(0.5 * tn));
+      expect(tn).toBeLessThan(expandLine(w));
+      expect(tn / w.config.maxTroops(w.nation)).toBeLessThan(w.n.reserveRatio);
+      expect(bordersFreeLand(w)).toBe(true);
+      const n = tries().length;
+      const sends = decide(w);
+      expect(tries().slice(n)).toEqual([false]);
+      // Only random boats (:143-146), no land attack (reserve gate, :290).
+      for (const s of sends) {
+        expect(s).toEqual(
+          expect.objectContaining({
+            kind: "boat",
+            to: AGENT_ID,
+            troops: tn / 5,
+          }),
+        );
+      }
+      if (sends.length > 0) hit = sends[0];
+    }
+    // This seed: the 7th decision.
+    expect(decisions).toBe(7);
+    expect(w.nation.units(UnitType.TransportShip).length).toBeGreaterThan(0);
   });
 });
 
@@ -1278,5 +1483,156 @@ describe("H4 NationSendCap: boats", () => {
         troops: tn2 / 5,
       }),
     ]);
+  });
+});
+
+describe("H4 NationSendCap: grudges, and boats while the nation is under attack", () => {
+  it("any attack of ours leaves the nation Hostile to us (-100) for 1,001 ticks", () => {
+    const w = world({ width: 40, height: 20, seat: halves });
+    start(w, w.config.nationSpawnImmunityDuration());
+    nationAt80(w);
+    w.us.setTroops(50_000);
+    expect(w.nation.relation(w.us)).toBe(Relation.Neutral);
+    ourAttack(w, w.nation, 100);
+    tick(w);
+    const value = (w.nation as unknown as { relations: Map<Player, number> })
+      .relations;
+    expect(value.get(w.us)).toBe(-100);
+    expect(w.nation.relation(w.us)).toBe(Relation.Hostile);
+    // PlayerExecution.tick decays every relation once per tick (:57).
+    let ticks = 0;
+    while (w.nation.relation(w.us) === Relation.Hostile) {
+      w.nation.decayRelations();
+      ticks++;
+    }
+    // 50 / 0.05 = 1,000 steps, plus one: the float sum after 1,000 steps is
+    // a hair below -50, still Hostile (< -50).
+    expect(ticks).toBe(1_001);
+  });
+
+  // Two islands 14 tiles of ocean apart. The nation (x 2-9) shares its
+  // island with a tribe (x 10-17) far too strong to eat: attackBots gives
+  // up (it needs 2x the tribe, :1149-1166). We (x 32-47) are not nearby.
+  const islandsTribe: Spec = {
+    width: 50,
+    height: 24,
+    third: PlayerType.Bot,
+    seat: (x, y) =>
+      y < 2 || y > 21
+        ? "water"
+        : x >= 2 && x <= 9
+          ? "nation"
+          : x >= 10 && x <= 17
+            ? "third"
+            : x >= 32 && x <= 47
+              ? "us"
+              : "water",
+  };
+
+  const make = (grudge: boolean) => {
+    const w = world(islandsTribe);
+    start(w);
+    const tn = nationAt80(w);
+    w.third!.setTroops(5 * tn);
+    // What any attack of ours leaves (the test above).
+    if (grudge) w.nation.updateRelation(w.us, -100);
+    expect(w.nation.nearby()).toEqual([w.third]);
+    // No non-bot player is nearby: the cap is Infinity (:1004-1018).
+    expect(w.n.attackBehavior.troopSendCap()).toBe(Infinity);
+    return { w, tn };
+  };
+
+  /** Up to `max` decisions, each with a fresh 1,000-troop tribe attack on the nation. */
+  const underTribeAttack = (w: World, tn: number, h: number, max = 10) => {
+    const i = w.sent.length;
+    for (let d = 1; d <= max; d++) {
+      toEveOfDecision(w);
+      w.nation.setTroops(tn);
+      w.us.setTroops(h);
+      w.game.addExecution(new AttackExecution(1_000, w.third!, NATION_ID));
+      tick(w);
+      expect(w.nation.incomingAttacks().length).toBeGreaterThan(0);
+      const onUs = decide(w).filter((s) => s.to === AGENT_ID);
+      if (onUs.length > 0) return { onUs, decisions: d };
+    }
+    expect(nationSends(w, i).filter((s) => s.to === AGENT_ID)).toEqual([]);
+    return { onUs: [], decisions: max };
+  };
+
+  it("with a grudge and no attack incoming, H > T is safe: hated picks us, the floor refuses", () => {
+    const { w, tn } = make(true);
+    const h = Math.round(1.5 * tn);
+    w.us.setTroops(h);
+    const attempts = attemptsOn(w, w.us);
+    expect(runWindow(w, 600).sends.filter((s) => s.to === AGENT_ID)).toEqual(
+      [],
+    );
+    expect(attempts()).toBeGreaterThan(0);
+    expect(predictSend(w, "boat", w.us, 0)).toBeNull();
+  });
+
+  it("with a grudge and a tribe's attack incoming, it boats us with troops/5 at H = 1.5T and 3T, not above 3T", () => {
+    // Refutes "by boat ... while [our home troops] exceed its troops" and
+    // "at 1.11x even a nation under attack is capped at the size of the
+    // attack it faces" for a nation we are not nearby: the floor is lifted
+    // (:966), the cap max(Infinity, 1,000) stays Infinity (:1024-1029), and
+    // hated skips only players above 3x its troops (:374).
+    for (const k of [1.5, 3]) {
+      const { w, tn } = make(true);
+      const h = Math.round(k * tn);
+      const { onUs } = underTribeAttack(w, tn, h);
+      expect(onUs).toEqual([
+        expect.objectContaining({ kind: "boat", to: AGENT_ID, troops: tn / 5 }),
+      ]);
+      // 28x the attack it faces.
+      expect(onUs[0].troops).toBeGreaterThan(20 * 1_000);
+      expect(w.nation.units(UnitType.TransportShip).length).toBe(1);
+    }
+    const { w, tn } = make(true);
+    const attempts = attemptsOn(w, w.us);
+    expect(underTribeAttack(w, tn, 3 * tn + 1).onUs).toEqual([]);
+    expect(attempts()).toBe(0);
+  });
+
+  it("without a grudge the same tribe attack draws no boat on us at 1.5T (the filters of random boat and island)", () => {
+    const { w, tn } = make(false);
+    const attempts = attemptsOn(w, w.us);
+    expect(underTribeAttack(w, tn, Math.round(1.5 * tn)).onUs).toEqual([]);
+    expect(attempts()).toBe(0);
+  });
+});
+
+describe("H4 NationSendCap: below its reserve ratio", () => {
+  it("it still attacks a tribe that owns a structure (before the reserve gate); without one, nothing", () => {
+    // us | nation | tribe. attackBestTarget runs attackBots first when a
+    // nearby tribe owns a structure (:285-287); that send keeps only the
+    // expand ratio (calculateAttackTroops :1046-1054) and is 4x the tribe
+    // (calculateBotAttackTroops :1149-1166). Then the reserve gate (:290).
+    const make = (city: boolean) => {
+      const w = world({
+        width: 60,
+        height: 20,
+        third: PlayerType.Bot,
+        seat: (x) => (x < 20 ? "us" : x < 40 ? "nation" : "third"),
+      });
+      start(w);
+      w.third!.setTroops(1_000);
+      if (city) w.third!.buildUnit(UnitType.City, w.game.ref(50, 10), {});
+      const max = w.config.maxTroops(w.nation);
+      const tn = Math.round(((w.n.expandRatio + w.n.reserveRatio) / 2) * max);
+      w.nation.setTroops(tn);
+      w.us.setTroops(Math.round(0.5 * tn));
+      expect(tn / max).toBeLessThan(w.n.reserveRatio);
+      expect(tn / max).toBeGreaterThan(w.n.expandRatio);
+      return w;
+    };
+
+    const withCity = make(true);
+    const { sends } = firstSend(withCity, () => null);
+    expect(sends).toEqual([
+      expect.objectContaining({ kind: "land", to: THIRD_ID, troops: 4_000 }),
+    ]);
+
+    expect(runWindow(make(false), WINDOW).sends).toEqual([]);
   });
 });

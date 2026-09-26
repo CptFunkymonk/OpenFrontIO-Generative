@@ -12,50 +12,72 @@
  * VERDICT PARTIAL. The rules (the code is the spec):
  *
  * - 400 tribes: TRUE. The arena and the solo modal default to 400, the schema
- *   maximum (Arena.ts:289, SinglePlayerModal.ts:99, Schemas.ts:534).
- *   GameRunner.init adds TribeSpawner.spawnTribes(config.bots())
- *   (GameRunner.ts:180-184, TribeSpawner.ts:32-87). Each tribe lands in tick
- *   1 on a full 52-tile disc (clipped at the map edge) at a random free tile
- *   (SpawnExecution.getSpawn, SpawnExecution.ts:150-197, requireAllValid) and
- *   gets a PlayerExecution and a TribeExecution (SpawnExecution.ts:112-117).
- *   A tribe that finds no site in 1,000 tries gets neither (:102-106); not
- *   seen on World or Pangaea. Start: 10,000 troops, 0 gold
+ *   maximum (Arena.ts:399 and its --bots help :83, SinglePlayerModal.ts:99,
+ *   Schemas.ts:534). GameRunner.init adds TribeSpawner.spawnTribes(
+ *   config.bots()) (GameRunner.ts:180-184, TribeSpawner.ts:32-87). Each tribe
+ *   lands in tick 1 on a full 52-tile disc (clipped at the map edge) at a
+ *   random free tile >= 30 (Manhattan) from every earlier spawn, relaxed
+ *   after 750 tries (SpawnExecution.getSpawn :139-197, :166-184,
+ *   minDistanceBetweenPlayers Config.ts:823-825), and gets a PlayerExecution
+ *   and a TribeExecution (SpawnExecution.ts:112-117); one that finds no site
+ *   gets neither (:102-106). Start: 10,000 troops, 0 gold
  *   (Config.startManpower :1003-1006, startingGold :439-444).
  * - A third of the cap: TRUE. maxTroops divides the shared base
- *   2 * (tiles^0.6 * 1000 + 50,000) + cities by 3 for a Bot
- *   (Config.ts:1024-1038), so a tribe has 1/3 of our cap and 1/3.75 of an
- *   Impossible nation's at equal tiles (40,470 at 52 tiles).
+ *   2 x (tiles^0.6 x 1000 + 50,000) + cities by 3 for a Bot
+ *   (Config.ts:1024-1038): 1/3 of ours, 1/3.75 of an Impossible nation's.
  * - Half the regrowth: PARTIAL. troopIncreaseRate multiplies
- *   (10 + T^0.73/4) * (1 - T/max) by 0.5 (Config.ts:1058-1068), but max is
- *   the tribe's own, a third of ours. In effect a tribe regrows 0.41x our rate
- *   at equal troops and tiles, and its peak (at ~41% of its cap) is
- *   0.226-0.228x ours and 0.183-0.185x an Impossible nation's. It is applied
- *   every tick, floored (PlayerExecution.ts:97-98, PlayerImpl.ts:1369-1375),
- *   with 50 gold a tick against our 100 (Config.ts:1092-1101).
+ *   (10 + T^0.73/4) x (1 - T/max) by 0.5 (Config.ts:1058-1068), but max is
+ *   the tribe's own cap, a third of ours (M). At equal troops T and tiles the
+ *   ratio to our rate is 0.5 (1 - 3T/M) / (1 - T/M): 0.5 at T = 0, 0.41 at
+ *   a fresh tribe's 10,000 on 52 tiles, 0 at the tribe's cap. Peak to peak
+ *   (at ~41% of each cap) it is 0.226-0.228x ours, 0.183-0.185x an
+ *   Impossible nation's. Applied every tick, floored (PlayerExecution.ts:
+ *   97-98, PlayerImpl.ts:1369-1375), with 50 gold a tick against our 100
+ *   (Config.ts:1092-1101).
  * - x0.7 losses: TRUE, narrowly. attackLogic scales mag by
  *   BOT_DEFENDER_LOSS_MULT = 0.7 only when the attacker is Human or Nation and
- *   the defender a Bot (Config.ts:135, 914-921). It cuts the attacker's loss
- *   only: speed (tickFraction) and the tribe's own loss are unchanged, and a
- *   tribe attacking anyone (a tribe included) gets nothing.
+ *   the defender a Bot (Config.ts:135, 914-921): the attacker's loss only,
+ *   not the speed nor the tribe's loss. A tribe attacking a player (a tribe
+ *   included) gets nothing, but on free land it pays mag/10 a tile against
+ *   mag/5 for everyone else (Config.ts:896-900): 8 against our 16 on plains.
+ *   With a stack >= the tribe's troops / 0.6 (the ratio clamp, :947) a tile
+ *   of a tribe costs K x (0.463 x bonuses + 0.0039 x its density), K = mag x
+ *   0.7 x 0.6 = 33.6 / 42 / 50.4 on plains / highland / mountain (mag
+ *   80/100/120, terrainAttackBase :172-188).
  * - Up to 100 tribes once free land runs out: PARTIAL. The cap is 100 at
  *   Impossible, 3 at Hard (getBotAttackMaxParallelism,
  *   AiAttackBehavior.ts:522-538), taken from the bordering tribes sorted by
  *   density (attackBots, :484-520). But:
- *   (a) "free land runs out" is per nation, not global: maybeAttack sends the
- *       free-land attack and returns while the nation's own border (or a
- *       <= 4-tile river, PlayerImpl.ts:626-690) touches free land
- *       (AiAttackBehavior.ts:135-141). In the Pangaea game below the first
- *       nation->tribe land attack came at tick 217 with 1.5% of the map
- *       still free (16% on World when this harness was run there), and none
- *       of 630 came from a nation that saw free land.
- *   (b) The troop budget binds, not the 100: each tribe gets 4x its troops,
- *       or all that is left if that is >= 2x, else it is skipped, out of
- *       troops - reserveRatio (30-39%) x cap (calculateAttackTroops :1041-1096,
- *       calculateBotAttackTroops :1149-1166). A nation at its trigger has
- *       (trigger - reserve) x cap, ~20% of its cap: two attacks on fresh
- *       10,000-troop tribes (pinned below), none on a 35,000-troop tribe
- *       until its cap passes 350k. The most tribes one nation attacked at
- *       once in the real game was 11 (9 on World).
+ *   (a) "Free land runs out" is per nation: maybeAttack sends the free-land
+ *       attack and returns while the nation's border, or the far bank of a
+ *       <= 4-tile river (PlayerImpl.ts:605-695), shows free land, and only if
+ *       that send succeeds (:135-141). Across a river it is a boat
+ *       (sendBoatAttackToNearbyTerraNullius :879-930); if no boat can go
+ *       (boat cap, no shore in range, boats disabled) it falls through to
+ *       attackBots although free land is in sight (pinned).
+ *   (b) The size of each tribe attack (calculateAttackTroops :1041-1096):
+ *         min(calculateBotAttackTroops(tribe, troops - reserveRatio x cap -
+ *             sentSoFar), troopSendCap()),
+ *       dropped below 1 troop, or below 0.2x the tribe's troops unless the
+ *       nation is under attack (isAttackTooWeak :961-973, applied
+ *       :1081-1083). calculateBotAttackTroops (:1149-1166) gives 4x the
+ *       tribe's troops, or all that is left if that is >= 2x, else 0.
+ *       troopSendCap (:986-1032) is troops - ceil(0.9 x the most troops of
+ *       any nearby non-friendly non-Bot player), >= 0, Infinity with none;
+ *       it reads home troops, which fall only when the attacks init at the
+ *       end of the tick, so every attack of one pass may take the whole cap.
+ *       Under attack (by anyone, a tribe included) it is at least the sum of
+ *       the incoming attacks and the 0.2x floor is off (:966, :1024-1029).
+ *       So: with no non-bot neighbour a nation at a 50% trigger with a 30%
+ *       reserve funds two attacks on fresh tribes (40,000 and 32,818); next
+ *       to a rival (us included) at 0.96x / 1.04x / 1.09x its troops the same
+ *       budget becomes 3 / 5 / 16 smaller attacks, and at ~1.1x (cap under
+ *       0.2x a fresh tribe) or more it sends no tribe attack at all, nor any
+ *       other player attack, until something attacks it. In the real game
+ *       below, the cap cut 449 of 669 nation sends on tribes (67%), 311 were
+ *       under 2x the tribe's troops, only 132 (20%) were the full 4x, and the
+ *       cap or the floor killed another 623 sends the budget allowed. The
+ *       most tribes one nation attacked at once was 11 (9 on World).
  *   (c) It runs only past the reserve and trigger gates (the trigger is
  *       skipped 10% of the time) and after `retaliate`, which answers
  *       non-tribe attackers first (attackBestTarget :278-304, order :428);
@@ -63,39 +85,51 @@
  *       Tribes across water get boat attacks (sendAttack :822-840).
  *
  * What tribes do (TribeExecution.ts:51-137, AiAttackBehavior):
- * - They decide every attackRate = 40-79 ticks (TribeExecution.ts:36-37, 52),
- *   at ticks and with ratios drawn from PseudoRandom(simpleHash(id)) alone
- *   (:35-40), so an agent can replay them from the tribe's id.
- *   The first decision always tries a free-land attack (:60-73). Then, while
- *   any free land is nearby, every decision is a free-land attack
- *   (:128-134; once a decision finds none the tribe never looks again),
- *   sized troops - expandRatio (10-19%) x cap (AiAttackBehavior.ts:
- *   1052-1053). docs/06 §6.6's "attackAmount = troops/20" only fills in a
- *   null troop count (AttackExecution.ts:130-132); tribes always pass their
- *   own. So tribes expand first and do not attack us while they border free
- *   land (a traitor neighbour aside, 1/3 chance, :113-126).
- * - With no free land nearby they attack, but only at >= triggerRatio
- *   (50-59%) x cap (attackRandomTarget, AiAttackBehavior.ts:765-798): first
- *   they answer the largest incoming attack, ours included (a tribe does not
- *   skip humans, :463-467), then a traitor (1/3), then a shuffled neighbour,
- *   skipping each Human or Nation with chance 1/2 but never a tribe
- *   (:784-797). They send troops - reserveRatio (30-39%) x cap; there is no
- *   send cap and no "too weak" check for tribes (:962, 987). Their answer to
- *   our attack cancels it 1:1 at init (AttackExecution.ts:157-170). Tribes
- *   ignore our spawn immunity; we can attack them from the first tick, they
- *   are never immune (PlayerImpl.ts:1907-1926).
- * - Not in the claim, and the biggest lever found: a player with fewer than
- *   100 tiles after losing a tile is conquered whole (handleDeadDefender,
- *   AttackExecution.ts:448-482): every tile touching the attacker chains
- *   over (the rest goes to its other neighbours), the attack stops paying
- *   and refunds its stack, and the attacker takes all of a tribe's gold
- *   (GameImpl.conquerPlayer, Config.conquerGoldAmount :735-744). A fresh
- *   52-tile tribe falls to one tile's losses (~136 troops with a 5,000
- *   stack, ~41 once the stack is >= 1/0.6 of its troops). On Pangaea a spawn
- *   touching a fresh tribe plus an attack on the first tick doubles our land
- *   to 104 tiles two ticks after the spawn phase ends. The rule cuts both
- *   ways: the idle 52-tile human in the real game died the tick after the
- *   first attack reached it.
+ * - They decide at the ticks t with t % attackRate === attackTick, attackRate
+ *   40-79 and attackTick 0..attackRate-1, drawn with the three ratios from
+ *   PseudoRandom(simpleHash(id)) alone (TribeExecution.ts:35-40, 52), and
+ *   only once the spawn phase is over (activeDuringSpawnPhase :43-45). So an
+ *   agent can replay every tribe's schedule from its id, and its first
+ *   decision comes 0 to attackRate - 1 ticks after the phase ends (measured
+ *   0-76, median 31), not "after 40-79 ticks".
+ * - Expansion first. The first decision builds the behaviour and sends a
+ *   free-land attack (:60-73); while free land is nearby every later decision
+ *   does the same (:128-134), sized troops - expandRatio (10-19%) x cap
+ *   (AiAttackBehavior.ts:1052-1053; docs/06 §6.6's "attackAmount =
+ *   troops/20" only fills in a null troop count, AttackExecution.ts:130-132).
+ *   The first decision that finds no free land latches neighborsTerraNullius
+ *   off for good (:131-132): free land that opens later is never taken. A
+ *   traitor neighbour (1/3 chance, :113-126) comes before all of this.
+ * - With no free land they attack, but only at >= triggerRatio (50-59%) x
+ *   cap (attackRandomTarget, AiAttackBehavior.ts:765-798): first the largest
+ *   incoming attack, ours included (a tribe does not skip humans, :458-479,
+ *   :769-773), then a traitor (1/3), then a shuffled neighbour, skipping
+ *   each Human or Nation with chance 1/2 (16 of 40 tribe ids attacked us at
+ *   the first chance) but never a tribe (40 of 40) (:784-797). They send
+ *   troops - reserveRatio (30-39%) x cap, with no send cap and no 0.2x floor
+ *   (:962, :987). Their answer to our attack cancels it 1:1 at init
+ *   (AttackExecution.ts:157-170). Only human attackers respect spawn
+ *   immunity, and tribes are never immune (PlayerImpl.ts:1907-1926).
+ * - Not in the claim, and the biggest lever found: one troop takes a player
+ *   of up to 100 tiles. AttackExecution.tick checks troopCount < 1 only
+ *   before each tile (:296-300), so any attack of >= 1 troop that shares a
+ *   border takes its first tile; if that leaves the target under 100 tiles
+ *   (:449), handleDeadDefender (:448-482) conquers it whole (the tiles
+ *   touching the attacker chain over, the rest go to its other neighbours)
+ *   and the attacker gets all of a tribe's gold (GameImpl.conquerPlayer,
+ *   Config.conquerGoldAmount :735-744). The cost is min(stack, that tile's
+ *   loss): a stack left under 1 troop is deleted, nothing refunded
+ *   (:296-300); a bigger one finds nothing left and retreats with the rest
+ *   (:302-306). So 1 troop takes a fresh 52-tile tribe, or a 100-tile one
+ *   (not a 101-tile one); a 5,000 stack pays 136, a 20,000 one 41. Stacks
+ *   leave home at init (:133-140), before any refund: from 25,000, three
+ *   16,667 attacks start at 16,667 / 8,333 / 0 and the third tribe survives,
+ *   while three 1-troop attacks take all three. The window: a tribe passes
+ *   100 tiles 7-84 ticks after the phase ends (median 37), 5-67 ticks after
+ *   its own first decision (median 6). On a real map a spawn disc touches at
+ *   most one fresh tribe (two need centres <= 22 apart; tribes spawn >= 30
+ *   apart). The rule cuts both ways: the idle 52-tile human in the real game
+ *   died the tick after the first attack (a tribe's) reached it.
  * - How fast nations eat them (Pangaea, 29 nations, fixed seed): 298 of 400
  *   tribes alive at minute 1 holding 64% of the land (nations 35%, free
  *   0.6%); 26 alive (4.6%) at minute 2; 6 (1.1%) at minute 3 (nations 99%).
@@ -104,13 +138,16 @@
  *
  * Setting: the real Config everywhere (not TestConfig). The pure tests call
  * Config as createGameRunner builds it (GameRunner.ts:46). The synthetic
- * scenarios build an all-plains field the way setup() builds a game
- * (createGame, endSpawnPhase) and run the real AiAttackBehavior and
- * TribeExecution; they set troops and tiles, which only tests may do. The
- * real game is built exactly as the arena builds it (arenaGameStart into
+ * scenarios build a plains field the way setup() builds a game (createGame,
+ * endSpawnPhase) and run the real AiAttackBehavior and TribeExecution; they
+ * set troops and tiles, which only tests may do. Per-id behaviour (coin
+ * flips, retaliation) is sampled over 40 tribe ids, not one seed. The real
+ * game is built exactly as the arena builds it (arenaGameStart into
  * createGameRunner, NodeMapLoader on resources/maps), FFA singleplayer,
  * Impossible, default nations, 400 tribes, Normal size, with one idle human
- * that spawns on a fixed free site and then sends nothing.
+ * that spawns on a fixed free site and then sends nothing; it observes the
+ * nations' sizing by wrapping AiAttackBehavior's private methods (calling
+ * through, restored afterwards), which changes nothing in the game.
  */
 import path from "path";
 import {
@@ -142,6 +179,7 @@ import {
   PlayerInfo,
   PlayerType,
   TerrainType,
+  TerraNullius,
   UnitType,
 } from "../../../src/core/game/Game";
 import { createGame, GameImpl } from "../../../src/core/game/GameImpl";
@@ -158,7 +196,7 @@ const TRIBES = 400;
 /** 10 ticks a second (ArenaGame.ts: nowMs = ticks * 100, gameMinutes = ticks / 600). */
 const MINUTE = 600;
 
-/** The arena's setting (Arena.ts:284-292, ArenaGame.arenaGameStart). */
+/** The arena's setting (Arena.ts:392-400, ArenaGame.arenaGameStart). */
 const GAME_CONFIG: GameConfig = {
   gameMap: GameMapType.World,
   gameMapSize: GameMapSize.Normal,
@@ -191,35 +229,74 @@ function stub(type: PlayerType, tiles: number, troops = 0): Player {
 
 const relErr = (a: number, b: number) => Math.abs(a / b - 1);
 
-// ---------------------------------------------------------------------------
-// Synthetic fields: all plains, built as setup() builds a game but with the
-// real Config (TestConfig overrides the troop and attack rules,
-// tests/util/TestConfig.ts).
+/** A fixed list of tribe ids, so per-id coin flips are sampled, not one seed. */
+const TRIBE_IDS = Array.from(
+  { length: 40 },
+  (_, i) => `TRIBE${String(i + 1).padStart(3, "0")}`,
+);
 
-/** Land bit 0x80 (GameMap.ts:127) + magnitude 5 = plains (GameMap.ts:397-407). */
+// ---------------------------------------------------------------------------
+// Synthetic fields: all plains (plus water where asked), built as setup()
+// builds a game but with the real Config (TestConfig overrides the troop and
+// attack rules, tests/util/TestConfig.ts).
+
+// Terrain bytes (GameMap.ts:127-130: bit 7 land, bit 6 shoreline, bit 5
+// ocean, bits 0-4 magnitude; land magnitude < 10 is Plains, :397-407).
 const PLAINS_BYTE = 0x80 | 5;
+const OCEAN = 0x20;
+const SHORELINE = 0x40;
+
+type Water = (x: number, y: number) => boolean;
+
+/** A map and its half-size minimap, shoreline set on both sides of a coast. */
+async function terrain(w: number, h: number, water: Water) {
+  const t = new Uint8Array(w * h);
+  let land = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      t[y * w + x] = water(x, y) ? OCEAN : PLAINS_BYTE;
+      if (!water(x, y)) land++;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      for (const [nx, ny] of [
+        [x - 1, y],
+        [x + 1, y],
+        [x, y - 1],
+        [x, y + 1],
+      ]) {
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        if (water(nx, ny) !== water(x, y)) {
+          t[y * w + x] |= SHORELINE;
+          break;
+        }
+      }
+    }
+  }
+  return genTerrainFromBin({ width: w, height: h, num_land_tiles: land }, t);
+}
 
 async function plainsGame(
   width: number,
   height: number,
   difficulty: Difficulty = Difficulty.Impossible,
   humans: PlayerInfo[] = [],
+  opts: { water?: Water; disabledUnits?: UnitType[] } = {},
 ): Promise<Game> {
-  const land = (w: number, h: number) =>
-    genTerrainFromBin(
-      { width: w, height: h, num_land_tiles: w * h },
-      new Uint8Array(w * h).fill(PLAINS_BYTE),
-    );
+  const water = opts.water ?? (() => false);
   const config = new Config(
-    { ...GAME_CONFIG, difficulty },
+    { ...GAME_CONFIG, difficulty, disabledUnits: opts.disabledUnits },
     new UserSettings(),
     false,
   );
   const game = createGame(
     humans,
     [],
-    await land(width, height),
-    await land(Math.ceil(width / 2), Math.ceil(height / 2)),
+    await terrain(width, height, water),
+    await terrain(Math.ceil(width / 2), Math.ceil(height / 2), (x, y) =>
+      [0, 1].some((dy) => [0, 1].some((dx) => water(2 * x + dx, 2 * y + dy))),
+    ),
     config,
   );
   game.endSpawnPhase();
@@ -251,6 +328,19 @@ interface TribeKnobs {
   expandRatio: number;
 }
 
+/** The same knobs replayed from the tribe's public id (TribeExecution.ts:35-40). */
+function replayKnobs(id: string): TribeKnobs {
+  const r = new PseudoRandom(simpleHash(id));
+  const attackRate = r.nextInt(40, 80);
+  return {
+    attackRate,
+    attackTick: r.nextInt(0, attackRate),
+    triggerRatio: r.nextInt(50, 60) / 100,
+    reserveRatio: r.nextInt(30, 40) / 100,
+    expandRatio: r.nextInt(10, 20) / 100,
+  };
+}
+
 /** A tribe run by its real TribeExecution (as SpawnExecution.ts:112-117 adds it). */
 function runTribe(game: Game, tribe: Player): TribeKnobs {
   const exec = new TribeExecution(tribe);
@@ -267,6 +357,45 @@ function toDecision(game: Game, k: TribeKnobs, ahead = 0) {
   while ((game.ticks() + ahead) % k.attackRate !== k.attackTick) {
     game.executeNextTick();
   }
+}
+
+/** Runs the tribe's next decision tick. */
+function decide(game: Game, k: TribeKnobs) {
+  toDecision(game, k);
+  game.executeNextTick();
+}
+
+/**
+ * A nation's tribe attacks of one attackBots pass, replayed from
+ * calculateAttackTroops (AiAttackBehavior.ts:1041-1096): the reserve budget
+ * troops - reserveRatio x cap - sentSoFar, sized by calculateBotAttackTroops
+ * (:1149-1166: 4x the tribe's troops, or the rest if that is >= 2x, else 0),
+ * then min() with troopSendCap (:1071-1074), dropped below 1 troop (:1076)
+ * or below 0.2x the tribe's troops unless under attack (isAttackTooWeak,
+ * :961-973, :1081-1083). The attack holds the floor (removeTroops,
+ * PlayerImpl.ts:1376-1383); the budget counts the unfloored send (:1091-1093).
+ */
+function replayTribeSends(
+  troops: number,
+  maxTroops: number,
+  reserveRatio: number,
+  byDensity: Player[],
+  sendCap = Infinity,
+  underAttack = false,
+): { target: Player; troops: number }[] {
+  const out: { target: Player; troops: number }[] = [];
+  let sent = 0;
+  for (const t of byDensity.slice(0, 100)) {
+    const left = troops - reserveRatio * maxTroops - sent;
+    let s = 4 * t.troops();
+    if (s > left) s = left < 2 * t.troops() ? 0 : left;
+    s = Math.min(s, sendCap);
+    if (s < 1) continue;
+    if (!underAttack && s < 0.2 * t.troops()) continue;
+    out.push({ target: t, troops: Math.floor(s) });
+    sent += s;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +419,22 @@ interface Standing {
   minTribeGold: bigint;
 }
 
+/** Every calculateAttackTroops call a nation made on a tribe, classified. */
+interface NationTribeSends {
+  /** Calls where the reserve budget and the 2x rule allowed a send. */
+  eligible: number;
+  /** Of those, troopSendCap was below that amount. */
+  capped: number;
+  /** Of those, nothing was sent (cap < 1 or < 20% of the tribe's troops). */
+  blocked: number;
+  sent: number;
+  /** Sent, but cut by troopSendCap. */
+  sentCapped: number;
+  sent4x: number;
+  sentBelow2x: number;
+  sentBelow1x: number;
+}
+
 interface RealGame {
   game: Game;
   me: Player;
@@ -298,6 +443,14 @@ interface RealGame {
   tribes: Player[];
   start: { tiles: number; disc: number; troops: number; gold: bigint }[];
   tribeExecs: number;
+  /** TribeExecutions whose private knobs equal replayKnobs(tribe id). */
+  knobsReplayed: number;
+  /** Per tribe: its first decision (replayed from its id) - spawnEnd. */
+  firstDecision: number[];
+  /** Per tribe: the tick its first attack or boat was sent - spawnEnd (-1 never). */
+  firstLaunch: number[];
+  /** Per tribe: ticks after spawnEnd when it first held > 100 tiles (-1 never). */
+  over100: number[];
   standings: Standing[];
   /** Attack launches by "ATTACKER->TARGET" type (a new attack id each). */
   launches: Map<string, number>;
@@ -306,6 +459,7 @@ interface RealGame {
     whileBorderingFreeLand: number;
     unscheduled: number;
   };
+  nationSends: NationTribeSends;
   firstNationBotTick: number;
   freeShareAtFirstNationBot: number;
   peakNationBotParallel: number;
@@ -410,6 +564,69 @@ async function arenaSim(map: GameMapType): Promise<ArenaSim> {
   };
 }
 
+/** AiAttackBehavior's private sizing methods (AiAttackBehavior.ts:986-1166). */
+interface SendSizing {
+  player: Player;
+  calculateAttackTroops(
+    target: Player | TerraNullius,
+    nonBotTroops: (targetTroops: number) => number,
+  ): number | null;
+  calculateBotAttackTroops(target: Player, maxTroops: number): number;
+  troopSendCap(): number;
+}
+
+/**
+ * Observes (calls through, changes nothing) every calculateAttackTroops a
+ * nation makes on a tribe, with the calculateBotAttackTroops and troopSendCap
+ * values it combined. Returns the function that restores the prototype.
+ */
+function observeNationTribeSends(out: NationTribeSends): () => void {
+  const proto = AiAttackBehavior.prototype as unknown as SendSizing;
+  const orig = {
+    calculateAttackTroops: proto.calculateAttackTroops,
+    calculateBotAttackTroops: proto.calculateBotAttackTroops,
+    troopSendCap: proto.troopSendCap,
+  };
+  let bot = NaN;
+  let cap = NaN;
+  proto.calculateBotAttackTroops = function (this: SendSizing, t, m) {
+    bot = orig.calculateBotAttackTroops.call(this, t, m);
+    return bot;
+  };
+  proto.troopSendCap = function (this: SendSizing) {
+    cap = orig.troopSendCap.call(this);
+    return cap;
+  };
+  proto.calculateAttackTroops = function (this: SendSizing, target, nonBot) {
+    bot = NaN;
+    cap = NaN;
+    const r = orig.calculateAttackTroops.call(this, target, nonBot);
+    if (
+      this.player.type() === PlayerType.Nation &&
+      target.isPlayer() &&
+      target.type() === PlayerType.Bot &&
+      bot >= 1
+    ) {
+      const t = target.troops();
+      out.eligible++;
+      if (cap < bot) out.capped++;
+      if (r === null) {
+        out.blocked++;
+      } else {
+        out.sent++;
+        if (cap < bot) out.sentCapped++;
+        if (r === 4 * t) out.sent4x++;
+        if (r < 2 * t) out.sentBelow2x++;
+        if (r < t) out.sentBelow1x++;
+      }
+    }
+    return r;
+  };
+  return () => {
+    Object.assign(proto, orig);
+  };
+}
+
 async function playRealGame(map: GameMapType): Promise<RealGame> {
   const { game, me, step } = await arenaSim(map);
   const config = game.config();
@@ -432,6 +649,14 @@ async function playRealGame(map: GameMapType): Promise<RealGame> {
   const nationKnobs = execs
     .filter((e) => e instanceof NationExecution)
     .map((e) => e as unknown as NationKnobs);
+  const tribeExecs = execs.filter((e) => e instanceof TribeExecution);
+  const actualKnobs = new Map(
+    tribeExecs.map((e) => {
+      const k = e as unknown as TribeKnobs & { tribe: Player };
+      return [k.tribe, k] as const;
+    }),
+  );
+  const knobs = tribes.map((t) => replayKnobs(t.id()));
 
   const result: RealGame = {
     game,
@@ -445,10 +670,42 @@ async function playRealGame(map: GameMapType): Promise<RealGame> {
       troops: t.troops(),
       gold: t.gold(),
     })),
-    tribeExecs: execs.filter((e) => e instanceof TribeExecution).length,
+    tribeExecs: tribeExecs.length,
+    knobsReplayed: tribes.filter((t, i) => {
+      const a = actualKnobs.get(t);
+      const k = knobs[i];
+      return (
+        a !== undefined &&
+        a.attackRate === k.attackRate &&
+        a.attackTick === k.attackTick &&
+        a.triggerRatio === k.triggerRatio &&
+        a.reserveRatio === k.reserveRatio &&
+        a.expandRatio === k.expandRatio
+      );
+    }).length,
+    // TribeExecution ticks from spawnEnd on (activeDuringSpawnPhase false,
+    // TribeExecution.ts:43-45; GameImpl.executeNextTick :529-536) and decides
+    // when ticks % attackRate === attackTick (:52).
+    firstDecision: knobs.map((k) => {
+      let t = spawnEnd;
+      while (t % k.attackRate !== k.attackTick) t++;
+      return t - spawnEnd;
+    }),
+    firstLaunch: tribes.map(() => -1),
+    over100: tribes.map(() => -1),
     standings: [],
     launches: new Map(),
     nationBotLand: { total: 0, whileBorderingFreeLand: 0, unscheduled: 0 },
+    nationSends: {
+      eligible: 0,
+      capped: 0,
+      blocked: 0,
+      sent: 0,
+      sentCapped: 0,
+      sent4x: 0,
+      sentBelow2x: 0,
+      sentBelow1x: 0,
+    },
     firstNationBotTick: -1,
     freeShareAtFirstNationBot: -1,
     peakNationBotParallel: 0,
@@ -468,110 +725,136 @@ async function playRealGame(map: GameMapType): Promise<RealGame> {
     p.outgoingAttacks().length + p.incomingAttacks().length > 0 ||
     p.units(UnitType.TransportShip).length > 0;
 
-  while (game.ticks() < spawnEnd + 3 * MINUTE) {
-    const tick = game.ticks();
-    // Nations whose maybeAttack runs this tick (NationExecution.ts:200, 226),
-    // and whether it sees free land (AiAttackBehavior.ts:135-141): nearby()
-    // lists TerraNullius exactly when a border tile, or the far bank of a
-    // <= 4-tile river, is unowned non-fallout land (PlayerImpl.ts:626-690).
-    // NationExecutions tick before any attack does, so this is the state the
-    // nation decides on.
-    const bordersFree = new Map<Player, boolean>();
-    for (const k of nationKnobs) {
-      if (k.player === null || !k.player.isAlive()) continue;
-      if (tick % k.attackRate !== k.attackTick) continue;
-      bordersFree.set(
-        k.player,
-        k.player.nearby().some((n) => !n.isPlayer()),
-      );
-    }
-    const quiet =
-      tick % 50 === 0
-        ? tribes
-            .filter((t) => t.isAlive() && !busy(t))
-            .map((t) => ({
-              t,
-              troops: t.troops(),
-              gold: t.gold(),
-              tiles: t.numTilesOwned(),
-              rate: config.troopIncreaseRate(t),
-              income: config.goldAdditionRate(t),
-            }))
-        : [];
-
-    step();
-
-    for (const q of quiet) {
-      if (!q.t.isAlive() || busy(q.t) || q.t.numTilesOwned() !== q.tiles) {
-        continue;
+  const restore = observeNationTribeSends(result.nationSends);
+  try {
+    while (game.ticks() < spawnEnd + 3 * MINUTE) {
+      const tick = game.ticks();
+      // Nations whose maybeAttack runs this tick (NationExecution.ts:200,
+      // 226), and whether it sees free land (AiAttackBehavior.ts:135-141):
+      // nearby() lists TerraNullius exactly when a border tile, or the far
+      // bank of a <= 4-tile river, is unowned non-fallout land
+      // (PlayerImpl.ts:626-690). NationExecutions tick before any attack
+      // does, so this is the state the nation decides on.
+      const bordersFree = new Map<Player, boolean>();
+      for (const k of nationKnobs) {
+        if (k.player === null || !k.player.isAlive()) continue;
+        if (tick % k.attackRate !== k.attackTick) continue;
+        bordersFree.set(
+          k.player,
+          k.player.nearby().some((n) => !n.isPlayer()),
+        );
       }
-      result.quiet.samples++;
-      if (q.t.troops() - q.troops === Math.floor(q.rate)) result.quiet.troops++;
-      if (q.t.gold() - q.gold === q.income) result.quiet.gold++;
-    }
+      const quiet =
+        tick % 50 === 0
+          ? tribes
+              .filter((t) => t.isAlive() && !busy(t))
+              .map((t) => ({
+                t,
+                troops: t.troops(),
+                gold: t.gold(),
+                tiles: t.numTilesOwned(),
+                rate: config.troopIncreaseRate(t),
+                income: config.goldAdditionRate(t),
+              }))
+          : [];
 
-    for (const p of game.allPlayers()) {
-      let onTribes = 0;
-      for (const a of p.outgoingAttacks()) {
-        const target = a.target();
-        const boat = a.sourceTile() !== null;
-        const toTribe =
-          target.isPlayer() && (target as Player).type() === PlayerType.Bot;
-        if (p.type() === PlayerType.Nation && toTribe) onTribes++;
-        if (seen.has(a.id())) continue;
-        seen.add(a.id());
-        const key = `${p.type()}->${kind(target)}${boat ? " (boat)" : ""}`;
-        result.launches.set(key, (result.launches.get(key) ?? 0) + 1);
-        if (target === me && result.meFirstHit === null) {
-          result.meFirstHit = {
-            tick: game.ticks(),
-            by: p.type(),
-            troops: a.troops(),
-          };
+      step();
+
+      for (const q of quiet) {
+        if (!q.t.isAlive() || busy(q.t) || q.t.numTilesOwned() !== q.tiles) {
+          continue;
         }
-        if (p.type() === PlayerType.Nation && toTribe && !boat) {
-          result.nationBotLand.total++;
-          const free = bordersFree.get(p);
-          if (free === undefined) result.nationBotLand.unscheduled++;
-          else if (free) result.nationBotLand.whileBorderingFreeLand++;
-          if (result.firstNationBotTick < 0) {
-            result.firstNationBotTick = game.ticks();
-            result.freeShareAtFirstNationBot = freeShare();
+        result.quiet.samples++;
+        if (q.t.troops() - q.troops === Math.floor(q.rate)) {
+          result.quiet.troops++;
+        }
+        if (q.t.gold() - q.gold === q.income) result.quiet.gold++;
+      }
+
+      const elapsed = game.ticks() - spawnEnd;
+      if (elapsed <= 200) {
+        tribes.forEach((t, i) => {
+          if (
+            result.firstLaunch[i] < 0 &&
+            (t.outgoingAttacks().length > 0 ||
+              t.units(UnitType.TransportShip).length > 0)
+          ) {
+            result.firstLaunch[i] = tick - spawnEnd;
+          }
+          if (result.over100[i] < 0 && t.numTilesOwned() > 100) {
+            result.over100[i] = elapsed;
+          }
+        });
+      }
+
+      for (const p of game.allPlayers()) {
+        let onTribes = 0;
+        for (const a of p.outgoingAttacks()) {
+          const target = a.target();
+          const boat = a.sourceTile() !== null;
+          const toTribe =
+            target.isPlayer() && (target as Player).type() === PlayerType.Bot;
+          if (p.type() === PlayerType.Nation && toTribe) onTribes++;
+          if (seen.has(a.id())) continue;
+          seen.add(a.id());
+          const key = `${p.type()}->${kind(target)}${boat ? " (boat)" : ""}`;
+          result.launches.set(key, (result.launches.get(key) ?? 0) + 1);
+          if (target === me && result.meFirstHit === null) {
+            result.meFirstHit = {
+              tick: game.ticks(),
+              by: p.type(),
+              troops: a.troops(),
+            };
+          }
+          if (p.type() === PlayerType.Nation && toTribe && !boat) {
+            result.nationBotLand.total++;
+            const free = bordersFree.get(p);
+            if (free === undefined) result.nationBotLand.unscheduled++;
+            else if (free) result.nationBotLand.whileBorderingFreeLand++;
+            if (result.firstNationBotTick < 0) {
+              result.firstNationBotTick = game.ticks();
+              result.freeShareAtFirstNationBot = freeShare();
+            }
           }
         }
+        result.peakNationBotParallel = Math.max(
+          result.peakNationBotParallel,
+          onTribes,
+        );
       }
-      result.peakNationBotParallel = Math.max(
-        result.peakNationBotParallel,
-        onTribes,
-      );
-    }
-    if (result.meDeathTick === null && !me.isAlive()) {
-      result.meDeathTick = game.ticks();
-    }
+      if (result.meDeathTick === null && !me.isAlive()) {
+        result.meDeathTick = game.ticks();
+      }
 
-    const elapsed = game.ticks() - spawnEnd;
-    if (elapsed % MINUTE === 0) {
-      const alive = tribes.filter((t) => t.isAlive());
-      result.standings.push({
-        minute: elapsed / MINUTE,
-        tribesAlive: alive.length,
-        tribeShare: share(alive),
-        nationShare: share(nations.filter((n) => n.isAlive())),
-        freeShare: freeShare(),
-        meanTribeTiles:
-          alive.length === 0 ? 0 : (share(alive) * land) / alive.length,
-        tribesAtTrigger: alive.filter(
-          (t) => t.troops() >= 0.5 * config.maxTroops(t),
-        ).length,
-        minTribeGold: alive.reduce(
-          (m, t) => (t.gold() < m ? t.gold() : m),
-          alive[0]?.gold() ?? 0n,
-        ),
-      });
+      if (elapsed % MINUTE === 0) {
+        const alive = tribes.filter((t) => t.isAlive());
+        result.standings.push({
+          minute: elapsed / MINUTE,
+          tribesAlive: alive.length,
+          tribeShare: share(alive),
+          nationShare: share(nations.filter((n) => n.isAlive())),
+          freeShare: freeShare(),
+          meanTribeTiles:
+            alive.length === 0 ? 0 : (share(alive) * land) / alive.length,
+          tribesAtTrigger: alive.filter(
+            (t) => t.troops() >= 0.5 * config.maxTroops(t),
+          ).length,
+          minTribeGold: alive.reduce(
+            (m, t) => (t.gold() < m ? t.gold() : m),
+            alive[0]?.gold() ?? 0n,
+          ),
+        });
+      }
     }
+  } finally {
+    restore();
   }
   return result;
 }
+
+const sorted = (xs: number[]) => [...xs].sort((a, b) => a - b);
+const quantile = (xs: number[], q: number) =>
+  sorted(xs)[Math.floor(q * (xs.length - 1))];
 
 // ---------------------------------------------------------------------------
 
@@ -610,7 +893,7 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(CONFIG.goldAdditionRate(stub(PlayerType.Human, 52))).toBe(100n);
     });
 
-    test("regrowth: the human formula x0.5, but on the tribe's own (a third) cap, so ~0.23x ours at the peak", () => {
+    test("regrowth: the human formula x0.5, but on the tribe's own (a third) cap: 0.5x ours at 0 troops, 0.41x at the start, 0 at its cap, ~0.23x at the peaks", () => {
       // Config.ts:1058-1090: toAdd = (10 + T^0.73 / 4) * (1 - T / max),
       // x0.5 for a Bot (:1066-1068), clamped to max.
       for (const [n, T] of [
@@ -635,7 +918,25 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       const rate = (type: PlayerType, n: number, T: number) =>
         CONFIG.troopIncreaseRate(stub(type, n, T));
       // "Half" holds only against a human with the tribe's cap. At equal
-      // troops and tiles the (1 - T/max) factor bites 3x harder: 0.41x.
+      // troops T and tiles the ratio is 0.5 (1 - 3T/M) / (1 - T/M), M our
+      // cap: 0.5 at T = 0, falling to 0 at the tribe's cap M/3. The 0.41 is
+      // one point on that curve (10,000 troops on 52 tiles).
+      for (const n of [52, 1_150]) {
+        const M = CONFIG.maxTroops(stub(PlayerType.Human, n));
+        for (const f of [0.001, 0.05, 0.1, 0.2, 0.3]) {
+          const T = f * M;
+          expect(
+            relErr(
+              rate(PlayerType.Bot, n, T) / rate(PlayerType.Human, n, T),
+              (0.5 * (1 - (3 * T) / M)) / (1 - T / M),
+            ),
+          ).toBeLessThan(1e-9);
+        }
+        expect(
+          rate(PlayerType.Bot, n, 1) / rate(PlayerType.Human, n, 1),
+        ).toBeCloseTo(0.5, 4);
+        expect(rate(PlayerType.Bot, n, M / 3)).toBeCloseTo(0, 9);
+      }
       const equal = rate(PlayerType.Bot, 52, 10_000);
       expect(equal / rate(PlayerType.Human, 52, 10_000)).toBeCloseTo(0.41, 2);
       // At the start: 82.0 a tick against our 330.3 (0.25x).
@@ -693,7 +994,7 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(refill(PlayerType.Human, 52, 25_000)).toEqual([94, 282, 506]);
     });
 
-    test("x0.7: only the attacker's losses, only for Human and Nation attackers against a Bot", () => {
+    test("x0.7: only the attacker's losses, only for Human and Nation attackers against a Bot; a tribe pays half on free land", () => {
       const input = (
         attacker: PlayerType,
         defender: PlayerType,
@@ -745,7 +1046,7 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
             expect(vsTribe.defenderTroopLoss).toBe(vsOther.defenderTroopLoss);
           }
         }
-        // A tribe gets no discount attacking anyone, a tribe included.
+        // A tribe gets no discount attacking a player, a tribe included.
         const humanVsHuman = CONFIG.attackLogic(
           input(PlayerType.Human, PlayerType.Human, o, traitor),
         );
@@ -756,12 +1057,56 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
         }
       }
 
+      // On free land it is the other way round: mag / 10 a tile for a Bot,
+      // mag / 5 for anyone else (Config.ts:896-900), mag = 80/100/120 on
+      // plains/highland/mountain (terrainAttackBase :172-188).
+      for (const [terrain, mag] of [
+        [TerrainType.Plains, 80],
+        [TerrainType.Highland, 100],
+        [TerrainType.Mountain, 120],
+      ] as const) {
+        const free = (attacker: PlayerType) =>
+          CONFIG.attackLogic({
+            ...input(attacker, PlayerType.Human),
+            terrain,
+            defender: null,
+          });
+        expect(free(PlayerType.Bot).attackerTroopLoss).toBe(mag / 10);
+        for (const other of [PlayerType.Human, PlayerType.Nation]) {
+          expect(free(other).attackerTroopLoss).toBe(mag / 5);
+          // Same speed: only the loss depends on the attacker's type.
+          expect(free(other).tickFraction).toBe(
+            free(PlayerType.Bot).tickFraction,
+          );
+        }
+
+        // Against a tribe with a stack >= its troops / 0.6 (the ratio clamp,
+        // Config.ts:947) the loss per tile is K x (0.463 x bonuses + 0.0039 x
+        // density) with K = mag x 0.7 x 0.6: 33.6 / 42 / 50.4. The report's
+        // 33.6 is plains only. K from the slope in density:
+        const at = (troops: number) =>
+          CONFIG.attackLogic({
+            ...input(PlayerType.Human, PlayerType.Bot),
+            terrain,
+            attackTroops: 10_000_000,
+            defender: {
+              type: PlayerType.Bot,
+              numTiles: 1_000,
+              troops,
+              isTraitor: false,
+              isDisconnectedTeammate: false,
+            },
+          }).attackerTroopLoss;
+        const K = (at(40_000) - at(20_000)) / (0.0039 * 20);
+        expect(K).toBeCloseTo(mag * 0.7 * 0.6, 9);
+      }
+
       // What eating a typical minute-1 tribe costs (1,150 tiles, 35,000
-      // troops, 30.4 a tile) with the 4x stack nations send
-      // (AiAttackBehavior.ts:1149-1166): 19.5 troops a tile, against 27.9
-      // for the same numbers as a Human or Nation defender and 16 on free
-      // plains. The tribe loses its density (30.4) with every tile, so its
-      // density holds while it shrinks.
+      // troops, 30.4 a tile) with a 4x stack (AiAttackBehavior.ts:
+      // 1149-1166): 19.5 troops a tile, against 27.9 for the same numbers as
+      // a Human or Nation defender and 16 on free plains. The tribe loses
+      // its density (30.4) with every tile, so its density holds while it
+      // shrinks.
       const typical = CONFIG.attackLogic(
         input(PlayerType.Human, PlayerType.Bot),
       );
@@ -771,12 +1116,6 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
         CONFIG.attackLogic(input(PlayerType.Human, PlayerType.Nation))
           .attackerTroopLoss,
       ).toBeCloseTo(27.92, 2);
-      expect(
-        CONFIG.attackLogic({
-          ...input(PlayerType.Human, PlayerType.Bot),
-          defender: null,
-        }).attackerTroopLoss,
-      ).toBe(16);
     });
   });
 
@@ -789,36 +1128,75 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
     const W = 60;
     const H = 200;
     const NX = 10;
+    /** Rows 0..RIVER-1 of the river field: water at NX..NX+3, free land after. */
+    const RIVER = 10;
+    /** An Impossible nation's cap on NX x H tiles (Config.ts:1024-1056). */
+    const NATION_CAP = CONFIG.maxTroops(stub(PlayerType.Nation, NX * H));
+    /** The reserve budget of a nation exactly at a 50% trigger. */
+    const AT_TRIGGER = Math.ceil(TRIGGER * NATION_CAP);
+    const BUDGET = AT_TRIGGER - RESERVE * NATION_CAP;
 
     /**
-     * A nation owning the strip x < NX, with 200 one-row tribes (x >= NX,
-     * 50 tiles each) along its whole border and no free land unless
-     * `freeTile`. Tribe troops are a permutation of base..base+199, so row
-     * order is not density order.
+     * A nation owning the strip x < NX, with one-row tribes (x >= NX, 50
+     * tiles each) along its whole border and no free land, unless asked:
+     * `freeTile` leaves one tile of row 0 free; `rival` gives the last row to
+     * a player of that type; `river` makes rows 0..9 water at x = NX..NX+3
+     * and free land beyond, seen across the river but not bordered.
+     * Tribe troops are a permutation of base..base+199, so row order is not
+     * density order.
      */
     async function nationAmongTribes(
       difficulty: Difficulty,
       base: number,
-      freeTile = false,
+      opts: {
+        freeTile?: boolean;
+        rival?: PlayerType.Human | PlayerType.Nation;
+        river?: boolean;
+        disabledUnits?: UnitType[];
+      } = {},
     ) {
-      const game = await plainsGame(W, H, difficulty);
+      const water: Water = (x, y) =>
+        opts.river === true && y < RIVER && x >= NX && x < NX + 4;
+      const game = await plainsGame(W, H, difficulty, [], {
+        water,
+        disabledUnits: opts.disabledUnits,
+      });
       const nation = addPlayer(game, "NATION01", PlayerType.Nation);
-      const tribes: Player[] = [];
+      const rival =
+        opts.rival === undefined
+          ? null
+          : addPlayer(game, "RIVAL001", opts.rival);
+      const rows: (Player | null)[] = [];
       for (let y = 0; y < H; y++) {
-        tribes.push(
-          addPlayer(game, `TRIBE${String(y).padStart(3, "0")}`, PlayerType.Bot),
-        );
+        if (opts.river === true && y < RIVER) rows.push(null);
+        else if (rival !== null && y === H - 1) rows.push(rival);
+        else {
+          rows.push(
+            addPlayer(
+              game,
+              `TRIBE${String(y).padStart(3, "0")}`,
+              PlayerType.Bot,
+            ),
+          );
+        }
       }
       for (let y = 0; y < H; y++) {
         for (let x = 0; x < W; x++) {
-          if (freeTile && x === NX && y === 0) continue;
-          (x < NX ? nation : tribes[y]).conquer(game.ref(x, y));
+          if (opts.freeTile === true && x === NX && y === 0) continue;
+          if (water(x, y)) continue;
+          const owner = x < NX ? nation : rows[y];
+          if (owner !== null) owner.conquer(game.ref(x, y));
         }
       }
-      tribes.forEach((t, y) => t.setTroops(base + ((y * 37) % H)));
+      const tribes: Player[] = [];
+      rows.forEach((p, y) => {
+        if (p === null || p === rival) return;
+        p.setTroops(base + ((y * 37) % H));
+        tribes.push(p);
+      });
       // One PRNG shared by the behaviours, as NationExecution does. With
       // this seed maybeAttack's 1-in-10 random boat branch
-      // (AiAttackBehavior.ts:148-151) is not taken.
+      // (AiAttackBehavior.ts:148-151), its first draw, is not taken.
       const random = new PseudoRandom(7);
       const emoji = new NationEmojiBehavior(random, game, nation);
       const alliance = new NationAllianceBehavior(random, game, nation, emoji);
@@ -839,7 +1217,10 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
         (a, b) =>
           a.troops() / a.numTilesOwned() - b.troops() / b.numTilesOwned(),
       );
-      return { game, nation, tribes, behavior, byDensity };
+      if (difficulty === Difficulty.Impossible) {
+        expect(game.config().maxTroops(nation)).toBe(NATION_CAP);
+      }
+      return { game, nation, rival, tribes, behavior, byDensity };
     }
 
     test("Impossible: one maybeAttack launches 100 tribe attacks (of 200 bordering), lowest density first, 4x each tribe's troops; Hard: 3", async () => {
@@ -873,47 +1254,169 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       }
     });
 
-    test("the troop budget binds long before 100: troops - reserve x cap, 4x per tribe, the rest if >= 2x, else skipped", async () => {
+    test("with no non-bot neighbour the reserve budget binds: 4x per tribe, the rest only if it is >= 2x, else skipped", async () => {
       // Tribes at their starting 10,000 (+0..199); the nation exactly at its
-      // trigger, so the budget is (trigger - reserve) x cap = 72.8k.
-      const { game, nation, byDensity, behavior } = await nationAmongTribes(
-        Difficulty.Impossible,
-        10_000,
-      );
-      const cap = game.config().maxTroops(nation);
-      expect(nation.numTilesOwned()).toBe(NX * H);
-      expect(Math.round(cap)).toBe(364_088);
-      const troops = Math.ceil(TRIGGER * cap);
-      nation.setTroops(troops);
-
-      // calculateAttackTroops / calculateBotAttackTroops replayed
-      // (AiAttackBehavior.ts:1041-1096, 1149-1166).
-      const expected: number[] = [];
-      let sent = 0;
-      for (const t of byDensity.slice(0, 100)) {
-        const left = troops - RESERVE * cap - sent;
-        let s = 4 * t.troops();
-        if (s > left) s = left < 2 * t.troops() ? 0 : left;
-        if (s < 1) continue;
-        expected.push(Math.floor(s));
-        sent += s;
+      // trigger, so the budget is (trigger - reserve) x cap = 72.8k: two
+      // attacks on fresh tribes.
+      {
+        const { game, nation, byDensity, behavior } = await nationAmongTribes(
+          Difficulty.Impossible,
+          10_000,
+        );
+        expect(Math.round(NATION_CAP)).toBe(364_088);
+        nation.setTroops(AT_TRIGGER);
+        const expected = replayTribeSends(
+          AT_TRIGGER,
+          NATION_CAP,
+          RESERVE,
+          byDensity,
+        );
+        expect(expected.map((e) => e.troops)).toEqual([40_000, 32_818]);
+        behavior.maybeAttack();
+        game.executeNextTick();
+        const attacks = nation.outgoingAttacks();
+        expect(attacks.map((a) => a.troops())).toEqual(
+          expected.map((e) => e.troops),
+        );
+        expect(attacks.map((a) => a.target())).toEqual(byDensity.slice(0, 2));
+        // Home falls to the reserve, not below.
+        expect(nation.troops() / NATION_CAP).toBeCloseTo(RESERVE, 4);
       }
-      expect(expected).toHaveLength(2);
 
+      // The 2x floor itself (:1157-1163): tribes sized so the rest after the
+      // first 4x attack is 2.5x the next tribe (sent) or 1.9x (skipped, and
+      // every later tribe too). A 3x floor would drop the first, 1.5x would
+      // send the second.
+      for (const [rest, count] of [
+        [2.5, 2],
+        [1.9, 1],
+      ] as const) {
+        const base = Math.floor(BUDGET / (4 + rest));
+        const { game, nation, byDensity, behavior } = await nationAmongTribes(
+          Difficulty.Impossible,
+          base,
+        );
+        nation.setTroops(AT_TRIGGER);
+        const left = BUDGET - 4 * base;
+        const next = byDensity[1].troops();
+        expect(next).toBe(base + 1);
+        if (count === 2) {
+          expect(left / next).toBeGreaterThan(2);
+          expect(left / next).toBeLessThan(3);
+        } else {
+          expect(left / next).toBeGreaterThan(1.5);
+          expect(left / next).toBeLessThan(2);
+        }
+        const expected = replayTribeSends(
+          AT_TRIGGER,
+          NATION_CAP,
+          RESERVE,
+          byDensity,
+        );
+        expect(expected).toHaveLength(count);
+        behavior.maybeAttack();
+        game.executeNextTick();
+        expect(nation.outgoingAttacks().map((a) => a.troops())).toEqual(
+          expected.map((e) => e.troops),
+        );
+        expect(nation.outgoingAttacks()[0].troops()).toBe(4 * base);
+      }
+    });
+
+    test("next to a rival (or us) troopSendCap splits the budget into small attacks, and at ~1.1x the nation's troops none are sent at all", async () => {
+      // troopSendCap (AiAttackBehavior.ts:986-1032): troops - ceil(0.9 x the
+      // most troops of a nearby non-friendly non-Bot player), >= 0. It reads
+      // home troops, which only fall when the attacks init at the end of the
+      // tick, so every attack of the pass may take the whole cap; the
+      // reserve budget and the 2x floor still count down (:1064, :1091-1093).
+      const counts: number[] = [];
+      for (const [k, type] of [
+        [0.8, PlayerType.Human],
+        [0.96, PlayerType.Human],
+        [1.04, PlayerType.Human],
+        [1.04, PlayerType.Nation],
+        [1.09, PlayerType.Human],
+        [1.1, PlayerType.Human],
+        [1.12, PlayerType.Human],
+        [1.2, PlayerType.Nation],
+      ] as const) {
+        const { game, nation, rival, byDensity, behavior } =
+          await nationAmongTribes(Difficulty.Impossible, 10_000, {
+            rival: type,
+          });
+        nation.setTroops(AT_TRIGGER);
+        rival!.setTroops(Math.round(k * AT_TRIGGER));
+        const cap = Math.max(0, AT_TRIGGER - Math.ceil(0.9 * rival!.troops()));
+        const expected = replayTribeSends(
+          AT_TRIGGER,
+          NATION_CAP,
+          RESERVE,
+          byDensity,
+          cap,
+        );
+        behavior.maybeAttack();
+        game.executeNextTick();
+        const attacks = nation.outgoingAttacks();
+        expect(attacks.map((a) => a.troops())).toEqual(
+          expected.map((e) => e.troops),
+        );
+        expect(attacks.map((a) => a.target())).toEqual(
+          expected.map((e) => e.target),
+        );
+        for (const a of attacks) expect(a.troops()).toBeLessThanOrEqual(cap);
+        // Nothing else either: every player attack goes through the same cap.
+        expect(rival!.incomingAttacks()).toHaveLength(0);
+        counts.push(attacks.length);
+      }
+      // 0.8x: the cap (51k) is above 4x a tribe, no effect. 0.96x: three of
+      // ~24.8k. 1.04x: five of 11.7k (a Nation rival is the same). 1.09x: 16
+      // of 3.5k (0.35x a tribe). 1.1x: the cap (1,820) is under 20% of a
+      // tribe, too weak. 1.12x and more: the cap is 0.
+      expect(counts).toEqual([2, 3, 5, 5, 16, 0, 0, 0]);
+    });
+
+    test("under attack the cap rises to the incoming troops and the 20% floor goes: even a tribe's attack unfreezes a capped nation", async () => {
+      const { game, nation, rival, byDensity, behavior } =
+        await nationAmongTribes(Difficulty.Impossible, 10_000, {
+          rival: PlayerType.Nation,
+        });
+      nation.setTroops(AT_TRIGGER);
+      rival!.setTroops(Math.round(1.2 * AT_TRIGGER)); // cap 0: frozen
+      // The densest tribe attacks the nation with 1,000 (below 20% of a
+      // tribe's troops); it is not among the nation's targets.
+      const attacker = byDensity[byDensity.length - 1];
+      attacker.setTroops(50_000);
+      game.addExecution(new AttackExecution(1_000, attacker, nation.id()));
+      game.executeNextTick(); // init only
+      expect(nation.incomingAttacks().map((a) => a.troops())).toEqual([1_000]);
+      // Nations ignore tribe attackers when retaliating (:462-467), so the
+      // decision goes on to attackBots, capped at max(0, 1,000) (:1024-1029)
+      // with isAttackTooWeak off (:966).
+      const expected = replayTribeSends(
+        AT_TRIGGER,
+        NATION_CAP,
+        RESERVE,
+        byDensity.slice(0, -1),
+        1_000,
+        true,
+      );
+      expect(expected.length).toBeGreaterThan(50);
       behavior.maybeAttack();
       game.executeNextTick();
-      const attacks = nation.outgoingAttacks();
-      expect(attacks.map((a) => a.troops())).toEqual(expected);
-      expect(attacks.map((a) => a.target())).toEqual(byDensity.slice(0, 2));
-      // Home falls to the reserve, not below.
-      expect(nation.troops() / cap).toBeCloseTo(RESERVE, 4);
+      const onTribes = nation
+        .outgoingAttacks()
+        .filter((a) => a.target() !== attacker);
+      expect(onTribes.map((a) => a.troops())).toEqual(
+        expected.map((e) => e.troops),
+      );
+      expect(onTribes.every((a) => a.troops() === 1_000)).toBe(true);
     });
 
     test("while the nation borders any free land it sends the free-land attack and no tribe attack", async () => {
       const { game, nation, behavior } = await nationAmongTribes(
         Difficulty.Impossible,
         100,
-        true,
+        { freeTile: true },
       );
       nation.setTroops(10_000_000);
       const cap = game.config().maxTroops(nation);
@@ -926,6 +1429,42 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(attacks).toHaveLength(1);
       expect(attacks[0].target().isPlayer()).toBe(false);
       expect(attacks[0].troops()).toBe(Math.floor(10_000_000 - EXPAND * cap));
+    });
+
+    test("free land seen only across a river: a boat that sails returns, one that cannot falls through to the tribe attacks", async () => {
+      for (const boats of [true, false]) {
+        const { game, nation, byDensity, behavior } = await nationAmongTribes(
+          Difficulty.Impossible,
+          100,
+          {
+            river: true,
+            disabledUnits: boats ? undefined : [UnitType.TransportShip],
+          },
+        );
+        nation.setTroops(10_000_000);
+        // nearby() sees the free bank 5 tiles out (PlayerImpl.ts:652-695);
+        // no border tile touches free land (hasLandBorderWithTerraNullius,
+        // AiAttackBehavior.ts:842-863), so sendAttack takes the boat path
+        // (sendBoatAttackToNearbyTerraNullius :879-930).
+        expect(nation.nearby().some((n) => !n.isPlayer())).toBe(true);
+        behavior.maybeAttack();
+        game.executeNextTick();
+        const attacks = nation.outgoingAttacks();
+        if (boats) {
+          // The boat left (TransportShipExecution) and maybeAttack returned
+          // (:139-141): no tribe attack.
+          expect(nation.units(UnitType.TransportShip)).toHaveLength(1);
+          expect(attacks).toHaveLength(0);
+        } else {
+          // sendAttack(terra nullius) failed, so maybeAttack went on to
+          // attackBots although free land is in sight.
+          expect(nation.units(UnitType.TransportShip)).toHaveLength(0);
+          expect(attacks).toHaveLength(100);
+          expect(new Set(attacks.map((a) => a.target()))).toEqual(
+            new Set(byDensity.slice(0, 100)),
+          );
+        }
+      }
     });
   });
 
@@ -941,15 +1480,7 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       // Every knob is the tribe's public id run through the constructor's
       // draws (TribeExecution.ts:35-40), so an agent can replay them and
       // know each tribe's decision ticks and ratios without reading state.
-      const r = new PseudoRandom(simpleHash(tribe.id()));
-      const attackRate = r.nextInt(40, 80);
-      expect(k).toMatchObject({
-        attackRate,
-        attackTick: r.nextInt(0, attackRate),
-        triggerRatio: r.nextInt(50, 60) / 100,
-        reserveRatio: r.nextInt(30, 40) / 100,
-        expandRatio: r.nextInt(10, 20) / 100,
-      });
+      expect(k).toMatchObject(replayKnobs(tribe.id()));
 
       for (let decision = 0; decision < 3; decision++) {
         toDecision(game, k);
@@ -974,159 +1505,199 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       }
     });
 
-    test("with no free land they attack us: only at >= triggerRatio x cap, each decision a coin flip for a human neighbour, sending troops - reserveRatio x cap", async () => {
-      const game = await plainsGame(100, 50);
-      const tribe = addPlayer(game, "TRIBE001", PlayerType.Bot);
-      const human = addPlayer(game, "HUMANID1", PlayerType.Human);
-      fill(game, tribe, 0, 50, 0, 50);
-      fill(game, human, 50, 100, 0, 50);
-      human.setTroops(50_000);
-      const k = runTribe(game, tribe);
-      const cap = game.config().maxTroops(tribe);
-
-      // Below the trigger: nothing, ever (AiAttackBehavior.ts:765-767).
-      tribe.setTroops(Math.floor(k.triggerRatio * cap) - 1);
-      for (let d = 0; d < 6; d++) {
-        toDecision(game, k);
-        game.executeNextTick();
-        expect(tribe.outgoingAttacks()).toHaveLength(0);
-      }
-
-      // At the cap: the shuffled neighbour list skips a Human or Nation
-      // with chance 1/2 per decision (:784-797), so it may take a few.
-      tribe.setTroops(Math.floor(cap));
-      let decisions = 0;
-      while (tribe.outgoingAttacks().length === 0 && decisions < 20) {
-        toDecision(game, k);
-        game.executeNextTick();
-        decisions++;
-      }
-      const attacks = tribe.outgoingAttacks();
-      expect(attacks).toHaveLength(1);
-      expect(attacks[0].target()).toBe(human);
-      expect(attacks[0].sourceTile()).toBeNull();
-      expect(attacks[0].troops()).toBe(
-        Math.floor(Math.floor(cap) - k.reserveRatio * cap),
-      );
-    });
-
-    test("a tribe neighbour is never skipped: the first decision after the free-land check attacks it", async () => {
+    test("once a decision finds no free land the tribe never expands again: free land that opens later is ignored", async () => {
       const game = await plainsGame(100, 50);
       const tribe = addPlayer(game, "TRIBE001", PlayerType.Bot);
       const other = addPlayer(game, "TRIBE002", PlayerType.Bot);
       fill(game, tribe, 0, 50, 0, 50);
       fill(game, other, 50, 100, 0, 50);
       const k = runTribe(game, tribe);
-      tribe.setTroops(Math.floor(game.config().maxTroops(tribe)));
-      // Decision 1 builds the behaviour; its free-land attack finds neither
-      // free land nor a shore to boat from (TribeExecution.ts:60-73).
-      toDecision(game, k);
-      game.executeNextTick();
-      expect(tribe.outgoingAttacks()).toHaveLength(0);
-      // Decision 2: attackRandomTarget, no coin flip for a tribe.
-      toDecision(game, k);
-      game.executeNextTick();
-      expect(tribe.outgoingAttacks().map((a) => a.target())).toEqual([other]);
-    });
-
-    test("they retaliate: a small attack on a tribe at >= its trigger is cancelled 1:1 by its counter-attack of troops - reserveRatio x cap", async () => {
-      const CLIENT = "AGENTCL1";
-      const game = await plainsGame(100, 50, Difficulty.Impossible, [
-        new PlayerInfo("agent", PlayerType.Human, CLIENT, "AGENTID1"),
-      ]);
-      const human = game.player("AGENTID1");
-      const tribe = addPlayer(game, "TRIBE001", PlayerType.Bot);
-      fill(game, tribe, 0, 50, 0, 50);
-      fill(game, human, 50, 100, 0, 50);
-      human.setTroops(50_000);
-      const k = runTribe(game, tribe);
       const cap = game.config().maxTroops(tribe);
-      tribe.setTroops(Math.floor(cap));
-      toDecision(game, k);
-      game.executeNextTick(); // decision 1 builds the behaviour only
+      tribe.setTroops(Math.floor(k.triggerRatio * cap) - 1);
+      decide(game, k); // builds the behaviour; its free-land attack fails
+      // No free land nearby: neighborsTerraNullius latches false
+      // (TribeExecution.ts:128-134); below the trigger nothing is sent.
+      decide(game, k);
       expect(tribe.outgoingAttacks()).toHaveLength(0);
-
-      // Our attack, sent through the agent's path (IntentSchema, then
-      // Executor.createExec), inits the tick before the tribe's decision.
-      toDecision(game, k, 1);
-      const intent = {
-        type: "attack" as const,
-        targetID: tribe.id(),
-        troops: 1_000,
-      };
-      expect(IntentSchema.safeParse(intent).success).toBe(true);
-      game.addExecution(
-        new Executor(game, "game", undefined).createExec({
-          ...intent,
-          clientID: CLIENT,
-        }),
-      );
-      game.executeNextTick();
-      expect(human.outgoingAttacks()).toHaveLength(1);
-      expect(human.troops()).toBe(49_000);
-      const R = Math.floor(tribe.troops() - k.reserveRatio * cap);
-
-      // The decision tick. The tribe decides first: findIncomingAttackPlayer
-      // does not skip humans for a tribe (AiAttackBehavior.ts:458-479) and
-      // sendAttack(.., force) sizes the answer troops - reserve x cap. Our
-      // attack then takes its first tile, paying `loss`. At the end of the
-      // tick the answer inits and cancels ours (AttackExecution.ts:157-170).
-      const loss = CONFIG.attackLogic({
-        terrain: TerrainType.Plains,
-        attackTroops: 1_000,
-        attacker: { type: PlayerType.Human, numTiles: 2_500 },
-        defender: {
-          type: PlayerType.Bot,
-          numTiles: 2_500,
-          troops: Math.floor(cap),
-          isTraitor: false,
-          isDisconnectedTeammate: false,
-        },
-        defenderHasDefensePost: false,
-        falloutRatio: null,
-        borderSize: 50,
-      }).attackerTroopLoss;
-      game.executeNextTick();
-      expect(human.numTilesOwned()).toBe(2_501);
-      expect(human.outgoingAttacks()).toHaveLength(0);
-      const counter = tribe.outgoingAttacks();
-      expect(counter).toHaveLength(1);
-      expect(counter[0].target()).toBe(human);
-      expect(counter[0].troops()).toBeCloseTo(R - (1_000 - loss), 6);
-      expect(human.incomingAttacks()).toEqual(counter);
-      expect(human.troops()).toBe(49_000); // nothing comes back
+      // Free land opens next to the tribe, and it is full.
+      tribe.relinquish(game.ref(0, 0));
+      tribe.setTroops(Math.floor(game.config().maxTroops(tribe)));
+      expect(tribe.nearby().some((n) => !n.isPlayer())).toBe(true);
+      decide(game, k);
+      // attackRandomTarget (AiAttackBehavior.ts:765-798) only attacks
+      // players: the tribe neighbour, never the free tile.
+      expect(tribe.outgoingAttacks().map((a) => a.target())).toEqual([other]);
+      expect(game.hasOwner(game.ref(0, 0))).toBe(false);
     });
 
-    test("under 100 tiles a player is annexed whole: a fresh 52-tile tribe falls to one tile's losses, during our spawn immunity, and hands over all its gold", async () => {
+    test("with no free land they attack us only at >= triggerRatio x cap, each decision a fair coin flip for a human neighbour, sending troops - reserveRatio x cap", async () => {
+      let attacked = 0;
+      for (const id of TRIBE_IDS) {
+        const game = await plainsGame(100, 50);
+        const tribe = addPlayer(game, id, PlayerType.Bot);
+        const human = addPlayer(game, "HUMANID1", PlayerType.Human);
+        fill(game, tribe, 0, 50, 0, 50);
+        fill(game, human, 50, 100, 0, 50);
+        human.setTroops(50_000);
+        const k = runTribe(game, tribe);
+        const cap = game.config().maxTroops(tribe);
+
+        // Below the trigger: nothing (AiAttackBehavior.ts:765-767).
+        tribe.setTroops(Math.floor(k.triggerRatio * cap) - 1);
+        decide(game, k); // builds the behaviour
+        decide(game, k);
+        decide(game, k);
+        expect(tribe.outgoingAttacks()).toHaveLength(0);
+
+        // At the cap: the only neighbour is a Human, skipped with chance
+        // 1/2 (:784-797).
+        tribe.setTroops(Math.floor(cap));
+        decide(game, k);
+        const attacks = tribe.outgoingAttacks();
+        if (attacks.length === 0) continue;
+        attacked++;
+        expect(attacks).toHaveLength(1);
+        expect(attacks[0].target()).toBe(human);
+        expect(attacks[0].sourceTile()).toBeNull();
+        expect(attacks[0].troops()).toBe(
+          Math.floor(Math.floor(cap) - k.reserveRatio * cap),
+        );
+      }
+      // A coin flip, not a certainty either way (measured 16 of 40).
+      expect(attacked).toBeGreaterThan(TRIBE_IDS.length / 4);
+      expect(attacked).toBeLessThan((3 * TRIBE_IDS.length) / 4);
+    });
+
+    test("a tribe neighbour is never skipped: for every tribe id, the first decision after the free-land check attacks it", async () => {
+      for (const id of TRIBE_IDS) {
+        const game = await plainsGame(100, 50);
+        const tribe = addPlayer(game, id, PlayerType.Bot);
+        const other = addPlayer(game, "TRIBE999", PlayerType.Bot);
+        fill(game, tribe, 0, 50, 0, 50);
+        fill(game, other, 50, 100, 0, 50);
+        const k = runTribe(game, tribe);
+        tribe.setTroops(Math.floor(game.config().maxTroops(tribe)));
+        // Decision 1 builds the behaviour; its free-land attack finds neither
+        // free land nor a shore to boat from (TribeExecution.ts:60-73).
+        decide(game, k);
+        expect(tribe.outgoingAttacks()).toHaveLength(0);
+        // Decision 2: attackRandomTarget, no coin flip for a tribe.
+        decide(game, k);
+        expect(tribe.outgoingAttacks().map((a) => a.target())).toEqual([other]);
+      }
+    });
+
+    test("they retaliate: for every tribe id, a small attack on a tribe at >= its trigger is answered at its next decision, not its tribe neighbour attacked, and cancelled 1:1", async () => {
       const CLIENT = "AGENTCL1";
-      const game = await plainsGame(60, 60, Difficulty.Impossible, [
-        new PlayerInfo("agent", PlayerType.Human, CLIENT, "AGENTID1"),
-      ]);
-      const human = game.player("AGENTID1");
-      const tribe = addPlayer(game, "TRIBE001", PlayerType.Bot);
-      fill(game, human, 0, 20, 0, 60); // 1,200 tiles
-      fill(game, tribe, 20, 22, 0, 26); // 52 tiles, starting troops
-      expect(tribe.troops()).toBe(10_000);
-      tribe.addGold(12_345n);
-      human.setTroops(100_000);
-      // Tribes are never immune (PlayerImpl.ts:1907-1915).
-      expect(game.isSpawnImmunityActive()).toBe(true);
-      expect(tribe.isImmune()).toBe(false);
-      game.addExecution(
-        new Executor(game, "game", undefined).createExec({
-          type: "attack",
+      for (const id of TRIBE_IDS) {
+        const game = await plainsGame(150, 50, Difficulty.Impossible, [
+          new PlayerInfo("agent", PlayerType.Human, CLIENT, "AGENTID1"),
+        ]);
+        const human = game.player("AGENTID1");
+        const tribe = addPlayer(game, id, PlayerType.Bot);
+        // A second neighbour that is never skipped (see above): without
+        // retaliation the decision's random pick lands on it about half the
+        // time.
+        const other = addPlayer(game, "TRIBE999", PlayerType.Bot);
+        fill(game, other, 0, 50, 0, 50);
+        fill(game, tribe, 50, 100, 0, 50);
+        fill(game, human, 100, 150, 0, 50);
+        human.setTroops(50_000);
+        const k = runTribe(game, tribe);
+        const cap = game.config().maxTroops(tribe);
+        tribe.setTroops(Math.floor(cap));
+        decide(game, k); // decision 1 builds the behaviour only
+        expect(tribe.outgoingAttacks()).toHaveLength(0);
+
+        // Our attack, sent through the agent's path (IntentSchema, then
+        // Executor.createExec), inits the tick before the tribe's decision.
+        toDecision(game, k, 1);
+        const intent = {
+          type: "attack" as const,
           targetID: tribe.id(),
-          troops: 5_000,
-          clientID: CLIENT,
-        }),
-      );
-      game.executeNextTick(); // init: 5,000 leave home
+          troops: 1_000,
+        };
+        expect(IntentSchema.safeParse(intent).success).toBe(true);
+        game.addExecution(
+          new Executor(game, "game", undefined).createExec({
+            ...intent,
+            clientID: CLIENT,
+          }),
+        );
+        game.executeNextTick();
+        expect(human.outgoingAttacks()).toHaveLength(1);
+        expect(human.troops()).toBe(49_000);
+        const R = Math.floor(tribe.troops() - k.reserveRatio * cap);
+
+        // The decision tick. The tribe decides first: findIncomingAttackPlayer
+        // does not skip humans for a tribe (AiAttackBehavior.ts:458-479) and
+        // attackRandomTarget answers it before any random pick (:769-773),
+        // sized troops - reserve x cap. Our attack then takes its first tile,
+        // paying `loss`. At the end of the tick the answer inits and cancels
+        // ours (AttackExecution.ts:157-170).
+        const loss = CONFIG.attackLogic({
+          terrain: TerrainType.Plains,
+          attackTroops: 1_000,
+          attacker: { type: PlayerType.Human, numTiles: 2_500 },
+          defender: {
+            type: PlayerType.Bot,
+            numTiles: 2_500,
+            troops: Math.floor(cap),
+            isTraitor: false,
+            isDisconnectedTeammate: false,
+          },
+          defenderHasDefensePost: false,
+          falloutRatio: null,
+          borderSize: 50,
+        }).attackerTroopLoss;
+        game.executeNextTick();
+        expect(human.numTilesOwned()).toBe(2_501);
+        expect(human.outgoingAttacks()).toHaveLength(0);
+        const counter = tribe.outgoingAttacks();
+        expect(counter.map((a) => a.target())).toEqual([human]);
+        expect(counter[0].troops()).toBeCloseTo(R - (1_000 - loss), 6);
+        expect(human.incomingAttacks()).toEqual(counter);
+        expect(other.incomingAttacks()).toHaveLength(0);
+        expect(human.troops()).toBe(49_000); // nothing comes back
+      }
+    });
+
+    test("any attack that takes one tile ends a player left under 100 tiles: the cost is min(stack, that tile's loss)", async () => {
+      const CLIENT = "AGENTCL1";
+      /** A human (x < 20, 1,600 tiles) and tribes of these sizes along x = 20..21. */
+      async function field(sizes: number[], humanTroops: number) {
+        const game = await plainsGame(60, 80, Difficulty.Impossible, [
+          new PlayerInfo("agent", PlayerType.Human, CLIENT, "AGENTID1"),
+        ]);
+        const human = game.player("AGENTID1");
+        fill(game, human, 0, 20, 0, 80);
+        human.setTroops(humanTroops);
+        let y0 = 0;
+        const tribes = sizes.map((n, i) => {
+          const t = addPlayer(game, `TRIBE00${i + 1}`, PlayerType.Bot);
+          for (let j = 0; j < n; j++) {
+            t.conquer(game.ref(20 + (j % 2), y0 + Math.floor(j / 2)));
+          }
+          y0 += Math.ceil(n / 2);
+          return t;
+        });
+        const attack = (t: Player, troops: number) =>
+          game.addExecution(
+            new Executor(game, "game", undefined).createExec({
+              type: "attack",
+              targetID: t.id(),
+              troops,
+              clientID: CLIENT,
+            }),
+          );
+        return { game, human, tribes, attack };
+      }
       // The first tile's loss, from attackLogic on the live stack.
       const lossAt = (attackTroops: number) =>
-        game.config().attackLogic({
+        CONFIG.attackLogic({
           terrain: TerrainType.Plains,
           attackTroops,
-          attacker: { type: PlayerType.Human, numTiles: 1_200 },
+          attacker: { type: PlayerType.Human, numTiles: 1_600 },
           defender: {
             type: PlayerType.Bot,
             numTiles: 52,
@@ -1138,22 +1709,84 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
           falloutRatio: null,
           borderSize: 26,
         }).attackerTroopLoss;
-      const loss = lossAt(5_000);
-      expect(loss).toBeCloseTo(135.9, 1);
-      // With >= 10,000 / 0.6 troops the ratio clamp (Config.ts:947) makes
-      // it 40.8.
+      // 135.9 up to a stack of 5,000 (the ratio clamp at 2, Config.ts:947),
+      // 40.8 from 10,000 / 0.6 up (the clamp at 0.6).
+      expect(lossAt(1)).toBeCloseTo(135.9, 1);
+      expect(lossAt(5_000)).toBeCloseTo(135.9, 1);
       expect(lossAt(16_667)).toBeCloseTo(40.8, 1);
-      game.executeNextTick();
-      // handleDeadDefender (AttackExecution.ts:448-482): below 100 tiles the
-      // target is conquered (GameImpl.conquerPlayer: all of a tribe's gold,
-      // Config.ts:735-744) and every tile touching us chains over.
-      expect(tribe.isAlive()).toBe(false);
-      expect(human.numTilesOwned()).toBe(1_252);
-      expect(human.gold()).toBe(12_345n);
-      // The attack found nothing left, retreated and refunded the rest
-      // (AttackExecution.ts:302-306): the 52 tiles cost one tile's loss.
-      expect(human.outgoingAttacks()).toHaveLength(0);
-      expect(human.troops()).toBe(95_000 + Math.floor(5_000 - loss));
+
+      // AttackExecution.tick checks troopCount < 1 only before each tile
+      // (:296-300), so the first tile is taken whatever it costs; then
+      // handleDeadDefender (:448-482) conquers a target left under 100
+      // tiles. A stack left under 1 troop is deleted, nothing refunded
+      // (:296-300); a bigger one finds nothing left and retreats with the
+      // rest (:302-306). So the cost is the stack, up to one tile's loss.
+      for (const stack of [1, 10, 50, 100, 1_000, 5_000, 20_000]) {
+        const { game, human, tribes, attack } = await field([52], 100_000);
+        tribes[0].addGold(12_345n);
+        // Tribes are never immune (PlayerImpl.ts:1907-1915).
+        expect(game.isSpawnImmunityActive()).toBe(true);
+        expect(tribes[0].isImmune()).toBe(false);
+        expect(tribes[0].troops()).toBe(10_000);
+        attack(tribes[0], stack);
+        for (let i = 0; i < 3; i++) game.executeNextTick();
+        expect(tribes[0].isAlive()).toBe(false);
+        expect(human.numTilesOwned()).toBe(1_600 + 52);
+        // All of a tribe's gold (GameImpl.conquerPlayer, Config.ts:735-744).
+        expect(human.gold()).toBe(12_345n);
+        expect(human.outgoingAttacks()).toHaveLength(0);
+        const left = stack - lossAt(stack);
+        const cost = left >= 1 ? stack - Math.floor(left) : stack;
+        expect(human.troops()).toBe(100_000 - cost);
+        if (stack <= 100) expect(cost).toBe(stack);
+        else expect(cost).toBe(Math.ceil(lossAt(stack)));
+      }
+
+      // The threshold is < 100 after the tile: one troop takes a 100-tile
+      // tribe whole, but only one tile of a 101-tile one.
+      for (const [n, dies] of [
+        [100, true],
+        [101, false],
+      ] as const) {
+        const { game, human, tribes, attack } = await field([n], 100_000);
+        attack(tribes[0], 1);
+        for (let i = 0; i < 3; i++) game.executeNextTick();
+        expect(tribes[0].isAlive()).toBe(!dies);
+        expect(tribes[0].numTilesOwned()).toBe(dies ? 0 : 100);
+        expect(human.numTilesOwned()).toBe(1_600 + (dies ? n : 1));
+        expect(human.troops()).toBe(100_000 - 1);
+        expect(human.outgoingAttacks()).toHaveLength(0);
+      }
+
+      // Several at once: every stack is paid at init (AttackExecution.ts:
+      // 133-140), before any refund. From 25,000, three attacks of 16,667
+      // start with 16,667, 8,333 and 0, and the third tribe survives; three
+      // attacks of 1 troop take all three for 3 troops.
+      {
+        const { game, human, tribes, attack } = await field(
+          [52, 52, 52],
+          25_000,
+        );
+        for (const t of tribes) attack(t, 16_667);
+        game.executeNextTick();
+        expect(human.outgoingAttacks().map((a) => a.troops())).toEqual([
+          16_667, 8_333, 0,
+        ]);
+        for (let i = 0; i < 3; i++) game.executeNextTick();
+        expect(tribes.map((t) => t.isAlive())).toEqual([false, false, true]);
+        expect(tribes[2].numTilesOwned()).toBe(52);
+      }
+      {
+        const { game, human, tribes, attack } = await field(
+          [52, 52, 52],
+          25_000,
+        );
+        for (const t of tribes) attack(t, 1);
+        for (let i = 0; i < 3; i++) game.executeNextTick();
+        expect(tribes.every((t) => !t.isAlive())).toBe(true);
+        expect(human.numTilesOwned()).toBe(1_600 + 3 * 52);
+        expect(human.troops()).toBe(25_000 - 3);
+      }
     });
 
     test("the threshold is < 100, for anyone: a 150-tile tribe is taken tile by tile until it would drop below 100, then all at once; a 52-tile human dies to its first lost tile", async () => {
@@ -1176,7 +1809,7 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(seen.some((n) => n < 150)).toBe(true);
 
       // The same rule against us: a tribe takes one tile of our 52 and we
-      // are gone. Tribes ignore our spawn immunity (PlayerImpl.ts:1921-1924).
+      // are gone. Tribes ignore our spawn immunity (PlayerImpl.ts:1917-1926).
       const g2 = await plainsGame(60, 60);
       const t2 = addPlayer(g2, "TRIBE001", PlayerType.Bot);
       const h2 = addPlayer(g2, "HUMANID1", PlayerType.Human);
@@ -1185,11 +1818,11 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       h2.setTroops(25_000);
       t2.setTroops(30_000);
       expect(g2.isSpawnImmunityActive()).toBe(true);
-      g2.addExecution(new AttackExecution(5_000, t2, h2.id()));
-      g2.executeNextTick();
-      g2.executeNextTick();
+      g2.addExecution(new AttackExecution(1, t2, h2.id()));
+      for (let i = 0; i < 3; i++) g2.executeNextTick();
       expect(h2.isAlive()).toBe(false);
       expect(t2.numTilesOwned()).toBe(1_200 + 52);
+      expect(t2.troops()).toBe(30_000 - 1);
     });
   });
 
@@ -1213,6 +1846,45 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       }
       expect(start.filter((s) => s.tiles === 52).length).toBeGreaterThan(390);
       expect(real.meStartTiles).toBe(52);
+    });
+
+    test("each tribe's first decision replays from its id, 0 to attackRate - 1 ticks after the phase; it passes 100 tiles about 5 ticks later", () => {
+      const n = real.tribes.length;
+      // Every TribeExecution's private knobs equal the replay from the id.
+      expect(real.knobsReplayed).toBe(n);
+      real.tribes.forEach((t, i) => {
+        const k = replayKnobs(t.id());
+        expect(real.firstDecision[i]).toBeGreaterThanOrEqual(0);
+        expect(real.firstDecision[i]).toBeLessThan(k.attackRate);
+      });
+      // Measured 0..76, median 31: not "40-79 ticks".
+      expect(Math.min(...real.firstDecision)).toBe(0);
+      expect(quantile(real.firstDecision, 0.5)).toBeGreaterThan(20);
+      expect(quantile(real.firstDecision, 0.5)).toBeLessThan(45);
+
+      // No tribe launches before its predicted first decision, and all but
+      // a few launch exactly then (measured 398 of 400; one sent nothing
+      // then, one launched later).
+      const pairs = real.firstLaunch.map((l, i) => [l, real.firstDecision[i]]);
+      expect(pairs.filter(([l, d]) => l >= 0 && l < d)).toHaveLength(0);
+      expect(pairs.filter(([l, d]) => l === d).length).toBeGreaterThan(n - 5);
+
+      // The one-troop annex window (see the synthetic tests) is open while
+      // a tribe holds <= 100 tiles. Measured: 398 tribes passed 100 tiles,
+      // 7 to 84 ticks after the phase ended (10% by 14, 25% by 22, median
+      // 37), 5 to 67 ticks after their own first decision (median 6).
+      const over = real.over100.filter((v) => v >= 0);
+      expect(over.length).toBeGreaterThan(n - 10);
+      expect(Math.min(...over)).toBeGreaterThanOrEqual(5);
+      expect(quantile(over, 0.1)).toBeLessThan(20);
+      expect(quantile(over, 0.5)).toBeGreaterThan(25);
+      expect(quantile(over, 0.5)).toBeLessThan(50);
+      expect(Math.max(...over)).toBeLessThan(120);
+      const lead = real.over100
+        .map((v, i) => v - real.firstDecision[i])
+        .filter((_, i) => real.over100[i] >= 0);
+      expect(Math.min(...lead)).toBeGreaterThanOrEqual(3);
+      expect(quantile(lead, 0.5)).toBeLessThanOrEqual(8);
     });
 
     test("a quiet tribe grows floor(troopIncreaseRate) troops and 50 gold every tick", () => {
@@ -1244,10 +1916,13 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(m3.nationShare).toBeGreaterThan(0.95);
     });
 
-    test("nations attack tribes only from a border without free land, never near 100 at once", () => {
+    test("nations attack tribes only from a border without free land (observed, not a rule), never near 100 at once", () => {
       const nb = real.nationBotLand;
       expect(nb.total).toBeGreaterThan(100); // measured 630
       expect(nb.unscheduled).toBe(0);
+      // Observed 0. Not guaranteed: free land seen only across a river
+      // falls through to the tribe attacks when the boat fails (synthetic
+      // test above).
       expect(nb.whileBorderingFreeLand).toBe(0);
       // Free land still existed elsewhere when the first one came (tick 217,
       // 1.5% of the map): "free land runs out" is per nation.
@@ -1256,6 +1931,24 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       // Measured 11 tribes at once, at most, for any nation.
       expect(real.peakNationBotParallel).toBeGreaterThan(1);
       expect(real.peakNationBotParallel).toBeLessThan(25);
+    });
+
+    test("in the real game troopSendCap, not the 4x/2x rule, sizes most nation attacks on tribes", () => {
+      const s = real.nationSends;
+      // Measured: 1,292 calls where the reserve budget and the 2x rule
+      // allowed a send; the cap or the 20% floor then killed 623; of the
+      // 669 sent, the cap cut 449 (67%), 311 were under 2x the tribe's
+      // troops, 171 under 1x, and only 132 (20%) were the full 4x.
+      expect(s.sent).toBeGreaterThan(300);
+      expect(s.eligible).toBe(s.sent + s.blocked);
+      expect(s.blocked / s.eligible).toBeGreaterThan(0.3);
+      expect(s.sentCapped / s.sent).toBeGreaterThan(0.5);
+      expect(s.sentBelow2x / s.sent).toBeGreaterThan(0.3);
+      expect(s.sentBelow1x / s.sent).toBeGreaterThan(0.15);
+      expect(s.sent4x / s.sent).toBeLessThan(0.35);
+      // Every send that was not capped is the 4x/2x amount, so "under 2x"
+      // is always the cap's doing.
+      expect(s.sentBelow2x).toBeLessThanOrEqual(s.sentCapped);
     });
 
     test("tribes expand most, then fight each other and the nations; one ended our idle 52-tile spawn the tick after its attack reached it", () => {
@@ -1272,11 +1965,29 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(real.me.isAlive()).toBe(false);
     });
 
-    test("the opening lever on the real map: spawn touching a fresh tribe, attack on the first tick, and all 52 of its tiles are ours for one tile's loss", async () => {
+    test("the opening lever on the real map: spawn touching a fresh tribe, a 1-troop attack on the first tick, and all 52 of its tiles are ours for 1 troop", async () => {
       const { game, me, step } = await arenaSim(GameMapType.Pangaea);
       step();
       step();
       step(); // tribes landed in tick 1, nations in tick 2
+      // Tribes spawn >= 30 apart (Manhattan, SpawnExecution.getSpawn
+      // :166-184, minDistanceBetweenPlayers Config.ts:823-825, relaxed only
+      // after 750 tries). One spawn disc can touch two tribes only if their
+      // centres are <= 22 apart (a brute force over the 52-tile disc shape),
+      // so no spawn touches two fresh tribes here:
+      const tribes = game
+        .allPlayers()
+        .filter((p) => p.type() === PlayerType.Bot);
+      let closest = Infinity;
+      for (const a of tribes) {
+        for (const b of tribes) {
+          if (a === b) continue;
+          const d = game.manhattanDist(a.spawnTile()!, b.spawnTile()!);
+          if (d < closest) closest = d;
+        }
+      }
+      expect(closest).toBeGreaterThan(22);
+
       // The first tribe (in player order) on a full disc with free land in
       // the 8x8 box 8 tiles to its east: our disc there shares its east
       // face, the four full-width rows y-2..y+1 (GameMap.ts:715-735).
@@ -1285,19 +1996,16 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
         const t = game.ref(x, y);
         return game.isLand(t) && !game.isImpassable(t) && !game.hasOwner(t);
       };
-      const tribe = game
-        .allPlayers()
-        .filter((p) => p.type() === PlayerType.Bot)
-        .find((t) => {
-          const c = t.spawnTile()!;
-          if (t.numTilesOwned() !== 52) return false;
-          for (let dy = -4; dy < 4; dy++) {
-            for (let dx = 4; dx < 12; dx++) {
-              if (!free(game.x(c) + dx, game.y(c) + dy)) return false;
-            }
+      const tribe = tribes.find((t) => {
+        const c = t.spawnTile()!;
+        if (t.numTilesOwned() !== 52) return false;
+        for (let dy = -4; dy < 4; dy++) {
+          for (let dx = 4; dx < 12; dx++) {
+            if (!free(game.x(c) + dx, game.y(c) + dy)) return false;
           }
-          return true;
-        })!;
+        }
+        return true;
+      })!;
       expect(tribe).toBeDefined();
       const c = tribe.spawnTile()!;
       step([{ type: "spawn", tile: game.ref(game.x(c) + 8, game.y(c)) }]);
@@ -1307,14 +2015,19 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
       expect(me.sharesBorderWith(tribe)).toBe(true);
       expect(tribe.numTilesOwned()).toBe(52);
 
-      step([{ type: "attack", targetID: tribe.id(), troops: 20_000 }]);
-      expect(me.outgoingAttacks()).toHaveLength(1); // 20,000 left home
-      step(); // its first tile, then the whole tribe
+      const T0 = me.troops();
+      const regrowth = Math.floor(game.config().troopIncreaseRate(me));
+      step([{ type: "attack", targetID: tribe.id(), troops: 1 }]);
+      // One troop left home at init (AttackExecution.ts:133-140), after
+      // this tick's regrowth (PlayerExecution.ts:97-98).
+      expect(me.outgoingAttacks().map((a) => a.troops())).toEqual([1]);
+      expect(me.troops()).toBe(T0 + regrowth - 1);
+      step(); // its first tile, and with it the whole tribe
       expect(tribe.isAlive()).toBe(false);
       expect(me.numTilesOwned()).toBe(104);
-      expect(me.outgoingAttacks()).toHaveLength(0); // refunded
-      // Two ticks of regrowth (~330 each) outweigh the one tile's ~41.
-      expect(me.troops()).toBeGreaterThan(25_000);
+      step(); // the spent stack is deleted, nothing refunded
+      expect(me.outgoingAttacks()).toHaveLength(0);
+      expect(me.troops()).toBeGreaterThan(T0);
     });
   });
 });

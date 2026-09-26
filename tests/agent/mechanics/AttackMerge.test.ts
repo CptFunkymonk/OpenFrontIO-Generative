@@ -20,15 +20,40 @@
  *   - :157-170  for each incoming attack whose attacker is our target: the
  *               larger stack survives with the difference; if theirs is
  *               strictly larger ours is deleted and init returns (our troops
- *               are gone, nothing merges); otherwise theirs is deleted.
+ *               are gone, nothing merges, the relation penalty at :190-210 is
+ *               skipped, but the embargo at :113-123 and stats at :155
+ *               already happened); otherwise theirs is deleted.
  *   - :171-181  every other outgoing attack of ours on the same target
  *               (land, boat landing, even one that is retreating) is added to
  *               the new attack and deleted, but only when the NEW attack has
  *               no sourceTile. A boat landing never absorbs, and is never
  *               absorbed at its own creation.
  * AttackImpl.delete (src/core/game/AttackImpl.ts:60-73) drops the attack from
- * both lists and clears isActive, but leaves troops() untouched, which is how
- * these tests read the exact stack that was absorbed.
+ * both lists and clears isActive, but leaves troops() AND the retreated flag
+ * untouched. That is how these tests read the exact stack that was absorbed,
+ * and it is also a hole (see the retreat step below).
+ *
+ * What an absorbed (or cancelled-out) attack's own execution does next, in
+ * AttackExecution.tick (:258-283), checked in this order:
+ *   - :266-274  attack.retreated() -> retreat(): pays the owner the attack's
+ *               troops() minus the malus (malusForRetreat = 25 for a player,
+ *               0 for terra nullius, :37, :224-256) and ends.
+ *   - :276-278  attack.retreating() -> return, every tick, forever.
+ *   - :280-283  !attack.isActive() -> end, no refund.
+ * The retreated flag is set only by RetreatExecution (the cancel_attack
+ * intent, ExecutionManager.ts:72-73): init takes startTick = mg.ticks()
+ * (RetreatExecution.ts:23-26); the first tick orders the retreat, and the
+ * tick with ticks() >= startTick + cancelDelay (20, RetreatExecution.ts:11,
+ * :34-37) calls PlayerImpl.executeRetreat (PlayerImpl.ts:714-721), which
+ * sets it if the ID is still on our outgoing list. The attack's execution
+ * ticks before the RetreatExecution in that step (added earlier), and new
+ * intents init after both. So a land click (or an enemy attack on us) that
+ * inits in exactly that step finds an attack that is still listed but
+ * already retreated: it absorbs (or cancels against) the stack, and on the
+ * next tick the old execution refunds the same troops anyway. The stack
+ * exists twice. One step earlier the click is a clean rescue (the old
+ * execution is left returning at :276-278 forever); one step later the
+ * attack has already been refunded and deleted before the click inits.
  *
  * Timing (GameImpl.executeNextTick, src/core/game/GameImpl.ts:526-551):
  * running executions tick first, then new ones init, in the order added. So
@@ -43,11 +68,14 @@
  * 64-73), the path an agent's ctx.send takes. Nation and tribe attacks are
  * built as AiAttackBehavior builds them (AiAttackBehavior.ts:1108-1112), boat
  * landings as TransportShipExecution builds them (TransportShipExecution.ts:
- * 275-283). No NationExecution runs, so the enemy never acts on its own.
+ * 275-283). No NationExecution runs, so the enemy never acts on its own, and
+ * no PlayerExecution runs unless a test adds one, so home troops change only
+ * by what the attacks pay and refund.
  */
 import { Config } from "../../../src/core/configuration/Config";
 import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
+import { PlayerExecution } from "../../../src/core/execution/PlayerExecution";
 import {
   Attack,
   Difficulty,
@@ -58,6 +86,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  Relation,
   UnitType,
 } from "../../../src/core/game/Game";
 import { TileRef } from "../../../src/core/game/GameMap";
@@ -68,6 +97,12 @@ const AGENT_CLIENT = "AGENTCL1";
 const AGENT_ID = "AGENTID1";
 const NATION_ID = "NATION01";
 const TRIBE_ID = "TRIBE001";
+
+// Unexported constants, stated from source; the retreat-step tests below
+// fail if either changes. cancelDelay: RetreatExecution.ts:11.
+// malusForRetreat: AttackExecution.ts:37.
+const CANCEL_DELAY = 20;
+const MALUS_FOR_RETREAT = 25;
 
 const ARENA_CONFIG = {
   gameMode: GameMode.FFA,
@@ -207,7 +242,9 @@ describe("AttackMerge: a new land attack absorbs our earlier attacks on the same
     expect(s.agent.troops()).toBe(before - 6000);
 
     // The first two executions notice their Attack was deleted on their next
-    // tick (AttackExecution.ts:280-283) and end without refunding anything.
+    // tick (AttackExecution.ts:280-283) and end without refunding anything
+    // (their attacks were never retreated; for one that was, see the
+    // retreat-step tests).
     s.game.executeNextTick();
     expect(execs.map((e) => e.isActive())).toEqual([false, false, true]);
     expect(s.agent.troops()).toBe(before - 6000);
@@ -467,6 +504,11 @@ describe("AttackMerge: attacking a target that is attacking us cancels the stack
     // The 2000 are gone for good, and home troops are never touched.
     expect(s.agent.troops()).toBe(agentBefore - 2000);
     expect(s.nation.troops()).toBe(nationBefore - 5000);
+    // The lost click still cost the embargo, which runs before the
+    // cancellation (:113-123), but not the relation penalty, which runs after
+    // the early return (:190-210).
+    expect(s.nation.hasEmbargoAgainst(s.agent)).toBe(true);
+    expect(s.nation.relation(s.agent)).toBe(Relation.Neutral);
   });
 
   test("our stack is larger: theirs is deleted, ours carries on with the difference", async () => {
@@ -479,6 +521,8 @@ describe("AttackMerge: attacking a target that is attacking us cancels the stack
     expect(s.nation.outgoingAttacks()).toHaveLength(0);
     const ours = only(s.agent.outgoingAttacks());
     expect(ours.troops()).toBe(3000);
+    // A surviving click does reach the -100 relation penalty (:203-209).
+    expect(s.nation.relation(s.agent)).toBe(Relation.Hostile);
     run(s.game, 3);
     expect(s.nation.numTilesOwned()).toBeLessThan(800);
   });
@@ -524,9 +568,11 @@ describe("AttackMerge: attacking a target that is attacking us cancels the stack
   });
 
   test("their new attack cancels our running one the same way", async () => {
-    // Nations under attack lift their send cap to at least the incoming
-    // total (AiAttackBehavior.troopSendCap, AiAttackBehavior.ts:1024-1028),
-    // so a retaliation this size is what an Impossible nation can answer with.
+    // Sized by hand. A real nation's send is min(its surplus above reserve,
+    // troopSendCap) (AiAttackBehavior.calculateAttackTroops,
+    // AiAttackBehavior.ts:1071-1074, sendLandAttack :1098-1102);
+    // troopSendCap only raises the CAP to max(cap, total incoming from
+    // everyone) (:1024-1028). It does not force a retaliation of that size.
     const s = await plainsScenario();
     attack(s, NATION_ID, 10_000);
     run(s.game, 3);
@@ -578,8 +624,41 @@ describe("AttackMerge: attacking a target that is attacking us cancels the stack
   });
 });
 
+/** The refund a retreated attack pays: retreat(malusForRetreat) against a
+ * player, retreat() (0%) against terra nullius (AttackExecution.ts:266-271);
+ * survivors = troops - troops * malus / 100 (:229, :246), and addTroops
+ * floors (PlayerImpl.ts:1369-1375, toInt Util.ts:401-408). */
+function refundFor(targetID: string | null, troops: number): number {
+  const malus = targetID === null ? 0 : MALUS_FOR_RETREAT;
+  return Math.floor(troops - troops * (malus / 100));
+}
+
+/** Attacks `targetID`, lets it run 3 steps, then sends cancel_attack for it.
+ * cancelTick is the ticks() the RetreatExecution inits at, its startTick
+ * (RetreatExecution.init, RetreatExecution.ts:23-26). */
+function attackThenCancel(
+  s: Scenario,
+  targetID: string | null,
+  troops: number,
+) {
+  const exec = attack(s, targetID, troops);
+  run(s.game, 3);
+  const a = only(s.agent.outgoingAttacks());
+  const cancelTick = s.game.ticks();
+  send(s, { type: "cancel_attack", attackID: a.id() });
+  return { a, exec, cancelTick };
+}
+
+/** Steps until an intent added now inits in the step that runs at `tick`:
+ * executeNextTick runs with ticks() = _ticks and increments it at the end
+ * (GameImpl.ts:526-582). */
+function runUntilStep(game: Game, tick: number) {
+  expect(game.ticks()).toBeLessThanOrEqual(tick);
+  while (game.ticks() < tick) game.executeNextTick();
+}
+
 describe("AttackMerge: retreats and attack IDs", () => {
-  test("re-attacking inside the 20-tick retreat window rescues the stack without the 25% malus", async () => {
+  test("re-attacking a few steps after a cancel rescues the stack without the 25% malus", async () => {
     const rescued = await plainsScenario();
     const control = await plainsScenario();
     const frozenAt: number[] = [];
@@ -601,6 +680,8 @@ describe("AttackMerge: retreats and attack IDs", () => {
     expect(frozenAt[0]).toBe(frozenAt[1]);
     const frozen = frozenAt[0];
     const retreating = only(rescued.agent.outgoingAttacks());
+    // This click inits 3 steps after the cancel; any of 1 .. CANCEL_DELAY-1
+    // behaves the same. CANCEL_DELAY itself does not (next describe).
     attack(rescued, NATION_ID, 0);
     rescued.game.executeNextTick();
     const merged = only(rescued.agent.outgoingAttacks());
@@ -608,7 +689,7 @@ describe("AttackMerge: retreats and attack IDs", () => {
     expect(merged.retreating()).toBe(false);
     expect(merged.troops()).toBe(frozen);
 
-    // RetreatExecution finishes 20 ticks after the order
+    // RetreatExecution finishes CANCEL_DELAY ticks after the order
     // (RetreatExecution.ts:11, :34-37), but PlayerImpl.executeRetreat cannot
     // find the absorbed attack's ID (PlayerImpl.ts:714-721): no refund.
     const agentTroops = rescued.agent.troops();
@@ -625,7 +706,7 @@ describe("AttackMerge: retreats and attack IDs", () => {
     run(control.game, 25);
     expect(control.agent.outgoingAttacks()).toHaveLength(0);
     expect(control.agent.troops() - controlTroops).toBe(
-      Math.floor(frozen - frozen * (25 / 100)),
+      refundFor(NATION_ID, frozen),
     );
   });
 
@@ -643,5 +724,207 @@ describe("AttackMerge: retreats and attack IDs", () => {
     run(s.game, 25);
     expect(merged.retreating()).toBe(false);
     expect(only(s.agent.outgoingAttacks())).toBe(merged);
+  });
+
+  test("the retreated flag is set in the step CANCEL_DELAY after the cancel inits, after the attack's own tick, and paid on the next", async () => {
+    const s = await plainsScenario();
+    const { a, exec, cancelTick } = attackThenCancel(s, NATION_ID, 20_000);
+    runUntilStep(s.game, cancelTick + CANCEL_DELAY);
+    expect(a.retreating()).toBe(true);
+    expect(a.retreated()).toBe(false);
+    s.game.executeNextTick(); // the step at cancelTick + CANCEL_DELAY
+    // Set, but the attack is still on our list: its execution ticked first
+    // in that step (GameImpl.ts:529-536) and has not seen the flag yet.
+    expect(a.retreated()).toBe(true);
+    expect(a.isActive()).toBe(true);
+    expect(only(s.agent.outgoingAttacks())).toBe(a);
+    expect(exec.isActive()).toBe(true);
+    const home = s.agent.troops();
+    s.game.executeNextTick();
+    expect(exec.isActive()).toBe(false);
+    expect(s.agent.outgoingAttacks()).toHaveLength(0);
+    expect(s.agent.troops()).toBe(home + refundFor(NATION_ID, a.troops()));
+  });
+});
+
+describe.each([
+  ["a nation", NATION_ID],
+  ["terra nullius", null],
+])(
+  "AttackMerge: a 0-troop re-click timed against the retreat step, on %s",
+  (_, target) => {
+    /** Cancel, then a 0-troop land click on the same target that inits
+     * `offset` steps after the cancel did. */
+    async function reclickAt(offset: number) {
+      const s = await plainsScenario();
+      const { a, exec, cancelTick } = attackThenCancel(s, target, 20_000);
+      runUntilStep(s.game, cancelTick + offset);
+      expect(a.retreating()).toBe(true);
+      const frozen = a.troops();
+      const home = s.agent.troops();
+      const click = attack(s, target, 0);
+      s.game.executeNextTick();
+      return { s, a, exec, click, frozen, home };
+    }
+
+    test("CANCEL_DELAY - 1 steps: the last clean rescue; no refund, and the absorbed execution never ends", async () => {
+      const r = await reclickAt(CANCEL_DELAY - 1);
+      expect(r.a.retreated()).toBe(false);
+      expect(r.a.isActive()).toBe(false);
+      const merged = only(r.s.agent.outgoingAttacks());
+      expect(merged.troops()).toBe(r.frozen);
+      // The RetreatExecution fires in the next step and finds no such ID.
+      run(r.s.game, 3);
+      expect(r.s.agent.troops()).toBe(r.home);
+      expect(only(r.s.agent.outgoingAttacks())).toBe(merged);
+      // The absorbed execution returns at retreating() (:276-278) every
+      // tick: a leaked execution with no effect on the game.
+      run(r.s.game, 20);
+      expect(r.exec.isActive()).toBe(true);
+    });
+
+    test("exactly CANCEL_DELAY steps: the click absorbs an attack already retreated, which is refunded anyway: the stack exists twice", async () => {
+      const r = await reclickAt(CANCEL_DELAY);
+      expect(r.a.retreated()).toBe(true);
+      expect(r.a.isActive()).toBe(false);
+      const merged = only(r.s.agent.outgoingAttacks());
+      expect(merged.troops()).toBe(r.frozen);
+      expect(r.s.agent.troops()).toBe(r.home);
+
+      // Next step: the old execution checks retreated() before isActive()
+      // (AttackExecution.ts:266-274 vs :280-283) and pays out troops() that
+      // AttackImpl.delete left in place, while the merged attack fights on.
+      r.s.game.executeNextTick();
+      const refund = refundFor(target, r.frozen);
+      expect(r.exec.isActive()).toBe(false);
+      expect(r.s.agent.troops()).toBe(r.home + refund);
+      expect(only(r.s.agent.outgoingAttacks())).toBe(merged);
+      expect(r.click.isActive()).toBe(true);
+      // One step of fighting cost the merged stack far less than the refund
+      // created: home + stack now exceed what we had before the click.
+      expect(r.s.agent.troops() + merged.troops()).toBeGreaterThan(
+        r.home + r.frozen + refund / 2,
+      );
+    });
+
+    test("CANCEL_DELAY + 1 steps: the retreat pays out and deletes first; the 0-troop click has nothing to absorb and dies alone", async () => {
+      const r = await reclickAt(CANCEL_DELAY + 1);
+      expect(r.exec.isActive()).toBe(false);
+      expect(r.s.agent.troops()).toBe(r.home + refundFor(target, r.frozen));
+      const lone = only(r.s.agent.outgoingAttacks());
+      expect(lone).not.toBe(r.a);
+      expect(lone.troops()).toBe(0);
+      // troopCount < 1 deletes it on its first tick (:296-300).
+      r.s.game.executeNextTick();
+      expect(r.s.agent.outgoingAttacks()).toHaveLength(0);
+      expect(r.click.isActive()).toBe(false);
+    });
+  },
+);
+
+describe("AttackMerge: the retreat-step duplication, repeated and with regrowth", () => {
+  test("every cancel + re-click-at-CANCEL_DELAY cycle on terra nullius refunds the whole stack and keeps it", async () => {
+    const s = await plainsScenario();
+    attack(s, null, 20_000);
+    run(s.game, 3);
+    const home0 = s.agent.troops();
+    const stack0 = only(s.agent.outgoingAttacks()).troops();
+    let expectedHome = home0;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const a = only(s.agent.outgoingAttacks());
+      const cancelTick = s.game.ticks();
+      send(s, { type: "cancel_attack", attackID: a.id() });
+      runUntilStep(s.game, cancelTick + CANCEL_DELAY);
+      const frozen = a.troops();
+      attack(s, null, 0);
+      run(s.game, 2);
+      expectedHome += refundFor(null, frozen);
+      // No PlayerExecution runs here: home changed by exactly the refund.
+      expect(s.agent.troops()).toBe(expectedHome);
+      expect(only(s.agent.outgoingAttacks()).troops()).toBeGreaterThan(
+        0.9 * frozen,
+      );
+    }
+    const stack = only(s.agent.outgoingAttacks()).troops();
+    expect(s.agent.troops() + stack).toBeGreaterThan(home0 + stack0 * 3);
+  });
+
+  test("with the agent's PlayerExecution running, the refund lands on top of regrowth while home is under the cap", async () => {
+    const s = await plainsScenario();
+    // Added before the attack, so it ticks first in every step, as a real
+    // player's does (it is added at spawn).
+    s.game.addExecution(new PlayerExecution(s.agent));
+    const { a, exec, cancelTick } = attackThenCancel(s, NATION_ID, 20_000);
+    runUntilStep(s.game, cancelTick + CANCEL_DELAY);
+    const frozen = a.troops();
+    attack(s, NATION_ID, 0);
+    s.game.executeNextTick();
+    const merged = only(s.agent.outgoingAttacks());
+    expect(merged.troops()).toBe(frozen);
+
+    // PlayerExecution.tick adds troopIncreaseRate (PlayerExecution.ts:97-98,
+    // Config.ts:1058-1090), computed from the state at the start of the
+    // step; then the old execution pays the refund.
+    const home = s.agent.troops();
+    const growth = s.game.config().troopIncreaseRate(s.agent);
+    expect(growth).toBeGreaterThan(0);
+    s.game.executeNextTick();
+    expect(exec.isActive()).toBe(false);
+    expect(s.agent.troops()).toBe(
+      home + Math.floor(growth) + refundFor(NATION_ID, frozen),
+    );
+    // Under the cap, so regrowth keeps all of it. Above the cap the next
+    // PlayerExecution tick would cut home back to ceil(maxTroops)
+    // (troopIncreaseRate returns max - T, Config.ts:1089; pinned by
+    // tests/agent/mechanics/TroopCapClamp.test.ts), so in a real game the
+    // gain per cycle is bounded by cap headroom. The duplicated stack in
+    // the attack is not capped.
+    expect(s.agent.troops()).toBeLessThanOrEqual(
+      s.game.config().maxTroops(s.agent),
+    );
+    expect(only(s.agent.outgoingAttacks())).toBe(merged);
+  });
+});
+
+describe("AttackMerge: an enemy attack that inits in the retreat step", () => {
+  /** Cancel ours, then a nation attack on us that inits `offset` steps after
+   * the cancel. It carries ceil(our stack) troops: at least ours, so it
+   * deletes ours untouched (AttackExecution.ts:165-167), and is left with
+   * under one troop, so it dies on its first tick (:296-300) without
+   * touching our land. */
+  async function enemyAt(offset: number) {
+    const s = await plainsScenario();
+    const { a, exec, cancelTick } = attackThenCancel(s, NATION_ID, 20_000);
+    runUntilStep(s.game, cancelTick + offset);
+    const frozen = a.troops();
+    const home = s.agent.troops();
+    const tiles = s.agent.numTilesOwned();
+    const nationHome = s.nation.troops();
+    const theirs = Math.ceil(frozen);
+    s.game.addExecution(new AttackExecution(theirs, s.nation, AGENT_ID));
+    s.game.executeNextTick();
+    // Cancelled out: ours is gone from both lists, theirs holds < 1 troop.
+    expect(a.isActive()).toBe(false);
+    expect(s.agent.outgoingAttacks()).toHaveLength(0);
+    expect(only(s.agent.incomingAttacks()).troops()).toBeLessThan(1);
+    expect(s.nation.troops()).toBe(nationHome - theirs);
+    run(s.game, 3);
+    expect(s.agent.incomingAttacks()).toHaveLength(0);
+    expect(s.agent.numTilesOwned()).toBe(tiles);
+    return { s, a, exec, frozen, home };
+  }
+
+  test("CANCEL_DELAY - 1 steps: our retreating stack is spent on theirs, and nothing comes back", async () => {
+    const r = await enemyAt(CANCEL_DELAY - 1);
+    expect(r.a.retreated()).toBe(false);
+    expect(r.s.agent.troops()).toBe(r.home);
+    expect(r.exec.isActive()).toBe(true); // returns at retreating() forever
+  });
+
+  test("exactly CANCEL_DELAY steps: our retreated stack cancels theirs 1:1 AND is refunded at 75%", async () => {
+    const r = await enemyAt(CANCEL_DELAY);
+    expect(r.a.retreated()).toBe(true);
+    expect(r.exec.isActive()).toBe(false);
+    expect(r.s.agent.troops()).toBe(r.home + refundFor(NATION_ID, r.frozen));
   });
 });

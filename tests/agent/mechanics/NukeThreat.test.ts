@@ -14,11 +14,12 @@
  * intercept ordinary nukes (what range, what chance, what cost?).
  *
  * VERDICT: PARTIAL. The numbers are right, but the crown rule is the sixth
- * rung of a ladder, not a standing rule; a nation only ever nukes a
- * STRUCTURE it can reach unintercepted with clear land around it; "cities"
- * are city levels; the MIRV carrier cannot be intercepted but its warheads
- * can, one per SAM interceptor. The code is the spec (NationNukeBehavior.ts
- * unless named):
+ * rung of a ladder, not a standing rule; a nation's aimed nukes only hit a
+ * STRUCTURE it can reach unintercepted with clear land around it, and when
+ * none qualifies it throws an atom salvo at the target's SAM instead (hydro
+ * nations too, no clear-land check); "cities" are city levels; the MIRV
+ * carrier cannot be intercepted but its warheads can, one per SAM
+ * interceptor. The code is the spec (NationNukeBehavior.ts unless named):
  *
  * - Cadence: one nuke decision and one MIRV decision per nation decision
  *   tick, every 30-49 ticks at Impossible (NationExecution.ts:200-228;
@@ -27,7 +28,12 @@
  *   0 exactly two players alive (tribes count; players() is the living,
  *     GameImpl.ts:691-693): the other one, even an ally (:224-233);
  *   1 the sender of the largest SINGLE incoming attack, not an ally's or a
- *     tribe's (AiAttackBehavior.findIncomingAttackPlayer :458-479);
+ *     tribe's (AiAttackBehavior.findIncomingAttackPlayer :458-479). Attacks
+ *     are not summed, but a new LAND attack absorbs its sender's other
+ *     attacks on the same target (AttackExecution.init,
+ *     AttackExecution.ts:171-181): only a boat landing (sourceTile set)
+ *     stays a separate attack, so splitting a land attack does not dodge
+ *     retaliation;
  *   2 the richest nation by gold (:318-326), 1 decision in 2: the player
  *     with the highest structure-level density above 1/75 per tile, level
  *     sum >= 5 (:44-47, :244-253, findHighDensityTarget :328-349);
@@ -42,29 +48,47 @@
  *     with no fallback; if the nation itself leads, the runner-up at ANY
  *     margin unless allied (:367-377).
  * - WHAT (maybeSendNuke :114-220): no silo, no nuke (:115-124); a tribe or
- *   teammate target ends it (:131-137, so a tribe on a rung blocks the rest).
- *   A hydrogen bomb if gold >= its PERCEIVED price, else an atom bomb if gold
- *   >= its perceived price and the nation is not a "hydro nation"
- *   (random.chance(3), :60) or is under heavy attack (incoming troops >= its
- *   troops, :533-544) (:139-155). Perceived prices start at the real ones
- *   and grow x1.25 per hydro and x1.5 per atom launched (:814-823), unless
- *   the nation holds more than MIRV + hydro, two players remain, or it is
- *   under heavy attack (:487-531). It never falls back from hydro to atom.
+ *   teammate target ends it (:131-137, so a tribe on a rung blocks the rest;
+ *   shouldAttack at :134 only refuses humans at Easy/Medium,
+ *   AiAttackBehavior.ts:932-954). The TYPE (:139-155): a hydrogen bomb if
+ *   gold >= its PERCEIVED price, else an atom bomb if gold >= its perceived
+ *   price and the nation is not a "hydro nation" (random.chance(3), :60) or
+ *   is under heavy attack (the troops of ALL incoming attacks, tribes' and
+ *   allies' included, >= its troops, :533-544), else nothing. Perceived
+ *   prices start at the real ones and grow x1.25 per hydro and x1.5 per
+ *   atom launched (:814-823), unless the nation holds strictly more than
+ *   MIRV + hydro, two players remain, or it is under heavy attack
+ *   (:487-531). The type choice never downgrades a hydro to an atom, BUT a
+ *   chosen type (hydro included) that finds no tile scoring > 0 falls
+ *   through at Impossible to maybeDestroyEnemySam (:217-218), which fires
+ *   ATOM bombs at one of the target's SAMs whatever isHydroNation says,
+ *   with no ring or isValidNukeTile check (sendNuke(targetTile, AtomBomb)
+ *   :1045-1051): it can blast the nation's own land. Its gates: atoms
+ *   enabled (:837), none of its atoms in flight (:842-845), the target has
+ *   a SAM (:848-851), a finished silo (:853-858), enough unblocked silo
+ *   slots landing within SAMCooldown/2 = 45 ticks (:945-999), the REAL atom
+ *   price x bombs fired (:1037-1041). The salvo is (sum of the levels of
+ *   the enemy SAMs covering that SAM + 1) atoms plus 1 per 5 (:878-952);
+ *   lacking slots it upgrades a silo instead (:1056-1060, :1093-1155).
  * - WHERE: 30 random tiles of the target plus its structures (:158-169); a
  *   tile qualifies at Impossible only if (a) both square rings
  *   (boundingBoxTiles, perimeter only, Util.ts:165-201) at the outer radius
- *   (atom 30, hydro 100) and half of it hold only the target's land or
- *   unowned tiles (:175-184, isValidNukeTile :686-704): the nation's own
- *   land and any third player's disqualify; (b) no enemy SAM can reach the
- *   trajectory (:197-204, :603-684). The best must score > 0 (:212-216):
- *   within the outer radius cities 25k per level, silos 50k, ports and
- *   factories 15k, defense posts 5k, plus 100k x level for a SAM below level
- *   5 that a hydro outranges; minus 30 per tile to its nearest silo, keeping
- *   20%; minus 1M near its targets of the last 600 ticks (:706-804). So a
- *   player without structures is never nuked. If nothing qualifies it tries
- *   to kill a target SAM with (covering SAM levels + 1) + 1 per 5 atoms timed
- *   to land within 45 ticks, if its ready silo slots and gold allow, else
- *   upgrades a silo (maybeDestroyEnemySam :836-1061).
+ *   (atom 30, hydro 100) and half of it (15, 50) hold only the target's
+ *   land or unowned tiles (:175-184, isValidNukeTile :686-704): the
+ *   nation's own land and any third player's disqualify, land strictly
+ *   between the rings does not; (b) canBuild(type, tile) finds a ready
+ *   silo: finished, not on cooldown, spawn immunity over (:185-186,
+ *   PlayerImpl.nukeSpawn :1625-1675); (c) no enemy SAM can reach the
+ *   trajectory (:197-204, :603-684). The best must score > 0 (:212-216;
+ *   nukeTileScore :706-804): structures within the outer radius (<=) score
+ *   per level cities 25k, silos 50k, ports and factories 15k, defense posts
+ *   5k; for a hydro, every SAM within 100 tiles below level 5 that it
+ *   outranges (distance > samRange) adds 100k x level, whoever owns it
+ *   (game.nearbyUnits, UnitGrid.ts:166-233); minus 30 per tile to the
+ *   nearest silo, keeping 20%; minus 1M per recent aim point (sent in the
+ *   last 600 ticks, :546-555) within that nuke's inner radius (atom 12,
+ *   hydro 80). So a player without structures is never nuked by the tile
+ *   search; only its SAMs draw the salvo above.
  * - MIRV (NationMIRVBehavior.considerMIRV :133-168): MIRVs enabled, a silo
  *   (:138), gold >= the price (:141), then 1 in 16 hesitates (:145, :66-80).
  *   Targets in order: (a) the largest player with a MIRV in flight at the
@@ -104,11 +128,13 @@
  * puts them. The nation's behaviours are the ones
  * NationExecution.initializeBehaviors wires, seeded as in a game, and their
  * decisions are called directly; incoming attacks are "phantoms" (the Attack
- * object AttackExecution.init creates, alone). In a dry run the nukes and
+ * object AttackExecution.init creates, alone), except in the merge test,
+ * which runs real AttackExecutions. In a dry run the nukes and
  * MIRVs a decision creates are recorded, not run; elsewhere bombs, SAMs and
  * MIRVs fly in the real simulation.
  */
 import { Config } from "../../../src/core/configuration/Config";
+import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { MirvExecution } from "../../../src/core/execution/MIRVExecution";
 import { NationExecution } from "../../../src/core/execution/NationExecution";
 import { NukeExecution } from "../../../src/core/execution/NukeExecution";
@@ -129,11 +155,14 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  Relation,
+  Structures,
   Unit,
   UnitType,
 } from "../../../src/core/game/Game";
 import { createGame } from "../../../src/core/game/GameImpl";
 import { GameMapImpl, TileRef } from "../../../src/core/game/GameMap";
+import { PseudoRandom } from "../../../src/core/PseudoRandom";
 import { GameConfig } from "../../../src/core/Schemas";
 
 const GAME_ID = "nuke-threat";
@@ -311,6 +340,13 @@ interface NukeBrain {
   findFFACrownTarget(): Player | null;
   maybeSendNuke(): void;
   isValidNukeTile(t: TileRef, target: Player | null): boolean;
+  nukeTileScore(
+    tile: TileRef,
+    silos: Unit[],
+    targets: Unit[],
+    type: UnitType,
+  ): number;
+  removeOldNukeEvents(): void;
   isHydroNation: boolean;
   atomBombPerceivedCost: bigint;
   hydrogenBombPerceivedCost: bigint;
@@ -439,7 +475,56 @@ describe("H8 who a nation nukes: NationNukeBehavior.findBestNukeTarget", () => {
     expect(nuke.findBestNukeTarget()).toBe(A);
   });
 
-  it("then: a crown above 50% of non-fallout land, an ally's target, the most hostile player that is not much weaker, and only then findFFACrownTarget", () => {
+  it("with real AttackExecutions a second LAND attack absorbs the first (AttackExecution.ts:171-181), so splitting does not dodge retaliation; only a boat landing stays separate", () => {
+    // Row-major stripes: A borders N, N borders B.
+    const make = () => {
+      const w = world(
+        SIDE,
+        SIDE,
+        { A: PlayerType.Human, N: PlayerType.Nation, B: PlayerType.Human },
+        runs(SIDE, [
+          ["A", 3000],
+          ["N", 3000],
+          ["B", 3000],
+        ]),
+      );
+      w.p.A.addTroops(100_000);
+      w.p.B.addTroops(100_000);
+      pastImmunity(w);
+      return w;
+    };
+    const fromA = (w: World) =>
+      w.p.N.incomingAttacks()
+        .filter((a) => a.attacker() === w.p.A)
+        .map((a) => a.troops());
+    // Two land clicks by A in one tick: one attack of 4,000 beats B's 3,000.
+    let w = make();
+    const nId = w.p.N.id();
+    w.game.addExecution(
+      new AttackExecution(2000, w.p.A, nId),
+      new AttackExecution(2000, w.p.A, nId),
+      new AttackExecution(3000, w.p.B, nId),
+    );
+    tick(w); // init only: new executions tick from the next step
+    expect(fromA(w)).toEqual([4000]);
+    expect(brain(w, "N").nuke.findBestNukeTarget()).toBe(w.p.A);
+    // A land attack then a boat landing (sourceTile = the landing tile,
+    // removeTroops false, as TransportShipExecution.ts:275-283 creates it):
+    // the landing does not absorb, so A's 2,000 + 2,000 lose to B's single
+    // 3,000. (A later land click would absorb the landing too.)
+    w = make();
+    const landing = [...w.p.A.tiles()][2950]; // A's last row, next to N
+    w.game.addExecution(
+      new AttackExecution(2000, w.p.A, nId),
+      new AttackExecution(2000, w.p.A, nId, landing, false),
+      new AttackExecution(3000, w.p.B, nId),
+    );
+    tick(w);
+    expect(fromA(w)).toEqual([2000, 2000]);
+    expect(brain(w, "N").nuke.findBestNukeTarget()).toBe(w.p.B);
+  });
+
+  it("then, in this order with every lower rung live: a crown above 50% of non-fallout land, an ally's target, the most hostile player that is not much weaker, and only then findFFACrownTarget", () => {
     const w = world(
       SIDE,
       SIDE,
@@ -470,21 +555,24 @@ describe("H8 who a nation nukes: NationNukeBehavior.findBestNukeTarget", () => {
       2 * w.config.maxTroops(W),
     );
     expect(w.config.maxTroops(N)).toBeLessThan(2 * w.config.maxTroops(H));
+    // Rung 4 is live too: an ally's current target (:277-287); the ally must
+    // be at relation >= Friendly (>= 50, PlayerImpl.ts:946-957).
+    ally(N, C);
+    N.updateRelation(C, 100);
+    expect(N.relation(C)).toBeGreaterThanOrEqual(Relation.Friendly);
+    C.target(A);
     // Rung 3: L holds 50.01% > 50% (NationNukeBehavior.ts:256-274), ahead
-    // of the hated H.
+    // of the ally's target A, the hated H and the crown rule.
     expect(nuke.findBestNukeTarget()).toBe(L);
     // At exactly 50% the rung is skipped: the test is strict.
     shed(L, 1);
     expect(L.numTilesOwned()).toBe(5000);
-    // Rung 4: an ally's current target (:277-287); the ally must be at
-    // relation >= Friendly (>= 50, PlayerImpl.ts:946-957).
-    ally(N, C);
-    N.updateRelation(C, 100);
-    C.target(A);
+    // Rung 4 now answers, ahead of the hated H (rung 5) and L (rung 6).
     expect(nuke.findBestNukeTarget()).toBe(A);
     N.updateRelation(C, -60); // 40: Neutral, the ally rung is skipped
+    expect(N.relation(C)).toBeLessThan(Relation.Friendly);
     // Rung 5: relations from the most hostile (:291-301): W is skipped as
-    // much weaker (:297-298), H is the target.
+    // much weaker (:297-298), H is the target, ahead of L (rung 6).
     expect(nuke.findBestNukeTarget()).toBe(H);
     // Rung 6: with nobody hostile, findFFACrownTarget: L leads N by 40 points.
     N.updateRelation(H, 90);
@@ -507,7 +595,7 @@ describe("H8 who a nation nukes: NationNukeBehavior.findBestNukeTarget", () => {
     expect(brain(w, "N").nuke.findBestNukeTarget()).toBe(w.p.A);
   });
 
-  it("the richest nation, 1 decision in 2, hunts a player whose structure levels sum to >= 5 and exceed 1/75 per tile, ahead of even a > 50% crown", () => {
+  it("the richest nation, 1 decision in 2, hunts the player with the densest structures, level sum >= 5 and strictly above 1/75 per tile, ahead of even a > 50% crown", () => {
     const w = world(
       SIDE,
       SIDE,
@@ -522,21 +610,30 @@ describe("H8 who a nation nukes: NationNukeBehavior.findBestNukeTarget", () => {
         ["L", 5001],
         ["N", 1000],
         ["Q", 1000],
-        ["D", 300],
-        ["E", 400],
+        ["D", 100],
+        ["E", 375],
       ]),
     );
-    const { N, Q, L, D } = w.p;
-    const city = (p: Player, n: number) => {
+    const { N, Q, L, D, E } = w.p;
+    // One level-1 city on every 10th tile of p, from its `from`-th city on.
+    const city = (p: Player, n: number, from = 0) => {
       const tiles = [...p.tiles()];
-      for (let i = 0; i < n; i++) p.buildUnit(UnitType.City, tiles[i * 20], {});
+      for (let i = from; i < from + n; i++)
+        p.buildUnit(UnitType.City, tiles[i * 10], {});
     };
     const dense = () =>
       (brain(w, "N").nuke as unknown as DensityBrain).findHighDensityTarget();
-    city(D, 4); // 4 levels: below the minimum of 5 (:47, :341)
-    city(w.p.E, 5); // 5 / 400 = 0.0125, not > 1/75 = 0.01333 (:44, :343)
+    // D: 4 levels on 100 tiles, density 0.04 >> 1/75, but the level sum is
+    // below the minimum of 5 (MIN_LEVEL_SUM_FOR_HIGH_DENSITY_NUKE :47, :341).
+    city(D, 4);
+    // E: 5 levels on 375 tiles, density EXACTLY 1/75 (both sides round to
+    // the same double): the strict > at :343 rejects it.
+    city(E, 5);
+    expect(5 / 375).toBe(1 / 75);
     expect(dense()).toBeNull();
-    city(D, 1); // 5 / 300 = 0.0167 > 1/75
+    shed(E, 1); // 5 / 374 > 1/75
+    expect(dense()).toBe(E);
+    city(D, 1, 4); // 5 / 100 = 0.05: the densest wins (:342-346)
     expect(dense()).toBe(D);
     // random.chance(2) per decision (:244-253), before the crown (:256).
     const picks = (): Record<string, number> => {
@@ -749,7 +846,7 @@ function strikeWorld(
 }
 
 describe("H8 where and with what an Impossible nation nukes: maybeSendNuke", () => {
-  it("fires only at a tile scoring > 0, i.e. with a City, Port, Factory, Silo or Defense Post in the blast: a player without structures is never nuked", () => {
+  it("an AIMED nuke fires only at a tile scoring > 0, i.e. with a City, Port, Factory, Silo or Defense Post in the blast: a player without structures is never nuked", () => {
     const w = strikeWorld();
     const { N, H } = w.p;
     w.dryRun = true;
@@ -770,7 +867,7 @@ describe("H8 where and with what an Impossible nation nukes: maybeSendNuke", () 
     );
   });
 
-  it("throws a hydrogen bomb whenever it can pay the PERCEIVED price, which rises 25% per hydro (50% per atom) to save for a MIRV, unless it already holds MIRV + hydro", () => {
+  it("throws a hydrogen bomb whenever it can pay the PERCEIVED price, which rises 25% per hydro (50% per atom) to save for a MIRV; holding STRICTLY more than MIRV + hydro, the real price applies", () => {
     const w = strikeWorld();
     const { N, H } = w.p;
     w.dryRun = true;
@@ -797,17 +894,30 @@ describe("H8 where and with what an Impossible nation nukes: maybeSendNuke", () 
       UnitType.AtomBomb,
     ]);
     expect(nuke.atomBombPerceivedCost).toBe((atom * 150n) / 100n);
-    // Holding more than MIRV + hydro, the real price applies (:507-513).
-    setGold(
-      N,
-      cost(w, UnitType.MIRV, N) + cost(w, UnitType.HydrogenBomb, N) + 1n,
-    );
-    nuke.maybeSendNuke();
-    expect(nukes(w)[nukes(w).length - 1].type).toBe(UnitType.HydrogenBomb);
+    // Holding STRICTLY more than MIRV + hydro, the real price applies
+    // (:507-513). To see it the perceived price must exceed that sum: after
+    // 9 hydros it is 5M x 1.25^9 = 37.25M > 30M. A fresh brain (same seed,
+    // no recent aim points) is given that state.
+    let after9 = hydro;
+    for (let i = 0; i < 9; i++) after9 = (after9 * 125n) / 100n;
+    const both = cost(w, UnitType.MIRV, N) + hydro;
+    expect(after9).toBeGreaterThan(both + 1n);
+    const fresh = () => {
+      const b = brainWith(w, "N", false).nuke;
+      b.hydrogenBombPerceivedCost = after9;
+      w.log.length = 0;
+      return b;
+    };
+    setGold(N, both); // not > MIRV + hydro: the 37M perceived price holds
+    fresh().maybeSendNuke();
+    expect(nukes(w).map((n) => n.type)).toEqual([UnitType.AtomBomb]);
+    setGold(N, both + 1n);
+    fresh().maybeSendNuke();
+    expect(nukes(w).map((n) => n.type)).toEqual([UnitType.HydrogenBomb]);
   });
 
-  it("a 'hydro nation' (isHydroNation, 1 in 3) throws no atom bombs unless the incoming troops reach its own", () => {
-    const w = strikeWorld();
+  it("a 'hydro nation' (isHydroNation, 1 in 3) with only atom money throws no aimed atom bomb unless the incoming troops reach its own (>=, all attacks summed)", () => {
+    const w = strikeWorld(); // H already attacks N with 1,000
     const { N, H } = w.p;
     w.dryRun = true;
     H.buildUnit(UnitType.City, w.game.ref(220, 150), {});
@@ -815,18 +925,25 @@ describe("H8 where and with what an Impossible nation nukes: maybeSendNuke", () 
     setGold(N, 1_000_000n);
     nuke.maybeSendNuke();
     expect(nukes(w)).toHaveLength(0);
-    attack(H, N, N.troops()); // isUnderHeavyAttack: incoming >= own (:533-544)
+    // isUnderHeavyAttack sums every incoming attack and compares with >=
+    // (:533-544): 1,000 + (troops - 1,001) is one short ...
+    const short = attack(H, N, N.troops() - 1001);
+    nuke.maybeSendNuke();
+    expect(nukes(w)).toHaveLength(0);
+    short.delete();
+    // ... and 1,000 + (troops - 1,000) is exactly N's troops.
+    attack(H, N, N.troops() - 1000);
     nuke.maybeSendNuke();
     expect(nukes(w).map((n) => n.type)).toEqual([UnitType.AtomBomb]);
-    // The draw is random.chance(3) per nation and game.
+    // The draw is random.chance(3) per nation and game (94 of 300 here).
     let hydroNations = 0;
     for (let g = 0; g < 300; g++)
       if (brain(w, "N", `seed-${g}`).nuke.isHydroNation) hydroNations++;
-    expect(hydroNations).toBeGreaterThan(70);
-    expect(hydroNations).toBeLessThan(130);
+    expect(hydroNations).toBeGreaterThan(80);
+    expect(hydroNations).toBeLessThan(120);
   });
 
-  it("a hydro needs both square rings (Chebyshev 100 and 50) around the aim point free of every other player's land, the nation's own included; a nation that can afford a hydro does not fall back to an atom", () => {
+  it("a hydro needs its square rings (Chebyshev 100 and 50) around the aim point free of every other player's land, the nation's own included; at a target WITHOUT SAMs a nation that can afford a hydro then fires nothing (no fallback to an aimed atom)", () => {
     // H is a 100-wide strip between N (x < 40) and Z (x >= 140): every
     // ring of radius 100 around an H tile touches N or Z.
     const w = strikeWorld({ sandwich: true });
@@ -854,6 +971,209 @@ describe("H8 where and with what an Impossible nation nukes: maybeSendNuke", () 
       valid(20, 150),
       valid(200, 150),
     ]).toEqual([true, true, false, false]);
+  });
+
+  it("the rings are perimeters at BOTH radii (atom: Chebyshev 30 and 15): a third player's land on either ring blocks the aim, land strictly between them does not, and is blasted", () => {
+    const { outer } = new Config(arenaConfig(), null, false).nukeMagnitudes(
+      UnitType.AtomBomb,
+    );
+    const half = Math.floor(outer / 2); // :179
+    expect([outer, half]).toEqual([30, 15]);
+    // H: a 5 x 5 patch around C = (120, 100) in unowned land, so every
+    // candidate tile is within Chebyshev 2 of C and the city on C is in
+    // every blast. Z: a one-tile square ring at Chebyshev `ring` from C, and
+    // a far corner that keeps three players alive in every case.
+    const C = { x: 120, y: 100 };
+    const enclave = (ring: number | null) => {
+      const w = world(
+        200,
+        200,
+        { N: PlayerType.Nation, H: PlayerType.Human, Z: PlayerType.Human },
+        (x, y) => {
+          if (x < 30) return "N";
+          const d = Math.max(Math.abs(x - C.x), Math.abs(y - C.y));
+          if (d <= 2) return "H";
+          if (d === ring) return "Z";
+          if (x >= 190 && y >= 190) return "Z";
+          return null;
+        },
+      );
+      const { N, H } = w.p;
+      N.buildUnit(UnitType.MissileSilo, w.game.ref(15, 100), {});
+      N.addTroops(1_000_000);
+      attack(H, N, 1000); // H is N's target (retaliation)
+      H.buildUnit(UnitType.City, w.game.ref(C.x, C.y), {});
+      ready(w);
+      const { nuke } = brainWith(w, "N", false);
+      setGold(N, 1_000_000n); // atom money only
+      return { w, nuke };
+    };
+    const fired = (ring: number | null) => {
+      const { w, nuke } = enclave(ring);
+      w.dryRun = true;
+      nuke.maybeSendNuke();
+      return nukes(w).map((n) => n.type);
+    };
+    expect(fired(null)).toEqual([UnitType.AtomBomb]); // control
+    expect(fired(outer)).toEqual([]); // the outer ring (:177)
+    expect(fired(half)).toEqual([]); // the half ring (:179)
+    expect(fired(20)).toEqual([UnitType.AtomBomb]); // between: unchecked
+    // For real: the atom lands in the patch and takes some of Z's ring.
+    const { w, nuke } = enclave(20);
+    const zTiles = w.p.Z.numTilesOwned();
+    nuke.maybeSendNuke();
+    settle(w);
+    expect(w.p.Z.numTilesOwned()).toBeLessThan(zTiles);
+  });
+
+  it("but a chosen type that finds no aim tile falls through to maybeDestroyEnemySam (:217-218): with hydro money at a ring-blocked target that owns a SAM, a hydro nation too fires an ATOM salvo at the SAM, with no ring check, even onto its own land", () => {
+    const salvo = (hydroNation: boolean, samX: number, gold: bigint) => {
+      const w = strikeWorld({ sandwich: true, silos: 2 });
+      const { N, H } = w.p;
+      H.buildUnit(UnitType.City, w.game.ref(90, 150), {});
+      const sam = samAt(w, H, samX, 150);
+      tick(w, 2);
+      const { nuke } = brainWith(w, "N", hydroNation);
+      setGold(N, gold);
+      return { w, sam, nuke };
+    };
+    for (const hydroNation of [false, true]) {
+      const { w, sam, nuke } = salvo(hydroNation, 95, 10_000_000n);
+      w.dryRun = true;
+      // Not under heavy attack: H's 1,000 against N's ~1M troops.
+      expect(w.p.N.troops()).toBeGreaterThan(1000);
+      nuke.maybeSendNuke();
+      // (level 1 + 1) atoms at the SAM's own tile (:878-883, :1045-1051).
+      expect(nukes(w).map((n) => [n.type, n.dst])).toEqual([
+        [UnitType.AtomBomb, sam.tile()],
+        [UnitType.AtomBomb, sam.tile()],
+      ]);
+    }
+    // A hydro nation with only atom money stops at the type choice
+    // (:153-155), before any salvo.
+    {
+      const { w, nuke } = salvo(true, 95, 1_000_000n);
+      w.dryRun = true;
+      nuke.maybeSendNuke();
+      expect(nukes(w)).toHaveLength(0);
+    }
+    // The SAM 10 tiles from N's border (x < 40): the salvo still flies and
+    // the blast takes some of N's own land.
+    const { w, sam, nuke } = salvo(true, 50, 10_000_000n);
+    const own = w.p.N.numTilesOwned();
+    nuke.maybeSendNuke();
+    expect(nukes(w).map((n) => n.type)).toEqual([
+      UnitType.AtomBomb,
+      UnitType.AtomBomb,
+    ]);
+    settle(w);
+    expect(samMissiles(w)).toHaveLength(1);
+    expect(sam.isActive()).toBe(false);
+    expect(w.p.N.numTilesOwned()).toBeLessThan(own);
+  });
+
+  it("the tile score (nukeTileScore :706-804): structure levels within the outer radius, a hydro's bonus for each outranged SAM of any owner, the silo-distance penalty with its 20% floor, and -1M near a recent aim point for 600 ticks", () => {
+    const w = strikeWorld();
+    const { N, H } = w.p;
+    w.dryRun = true;
+    const nuke = brainWith(w, "N", false).nuke;
+    const silos = N.units(UnitType.MissileSilo);
+    expect(silos.map((u) => u.tile())).toEqual([w.game.ref(20, 150)]);
+    const at = (x: number, y: number) => w.game.ref(x, y);
+    const put = (
+      owner: Player,
+      type: UnitType,
+      x: number,
+      y: number,
+      level = 1,
+    ) => {
+      const u = owner.buildUnit(type, at(x, y), {});
+      for (let l = 1; l < level; l++) u.increaseLevel();
+      return u;
+    };
+    const score = (
+      tile: TileRef,
+      targets: Unit[],
+      type: UnitType = UnitType.AtomBomb,
+    ) => nuke.nukeTileScore(tile, silos, targets, type);
+    // P is 100 tiles from the silo: a penalty of 100 x 30 = 3,000 (:780-789).
+    const P = at(120, 150);
+    const pen = 100 * 30;
+    expect(score(P, [])).toBe(0);
+    const priced: [UnitType, number, number][] = [
+      [UnitType.City, 1, 25_000],
+      [UnitType.City, 3, 75_000],
+      [UnitType.MissileSilo, 1, 50_000],
+      [UnitType.MissileSilo, 2, 100_000],
+      [UnitType.Port, 1, 15_000],
+      [UnitType.Factory, 1, 15_000],
+      [UnitType.DefensePost, 1, 5_000],
+      [UnitType.SAMLauncher, 1, 0],
+    ];
+    for (const [type, level, value] of priced) {
+      const u = put(H, type, 125, 150, level);
+      expect(score(P, [u])).toBe(Math.max(value * 0.2, value - pen));
+      u.delete(false);
+    }
+    // The outer radius is inclusive (euclDistFN <=, GameMap.ts:715-723).
+    expect(score(P, [put(H, UnitType.City, 150, 150)])).toBe(25_000 - pen);
+    expect(score(P, [put(H, UnitType.City, 151, 150)])).toBe(0);
+    // The 20% floor: a defense post 150 tiles out, 5,000 - 4,500 < 1,000.
+    const far = at(170, 150);
+    expect(score(far, [put(H, UnitType.DefensePost, 170, 150)])).toBe(1_000);
+    // Hydro only: +100k x level for every SAM within 100 tiles, below level
+    // 5, farther than its range (:749-778). Q is 200 from the silo.
+    const Q = at(220, 150);
+    const qpen = 200 * 30;
+    const withSam = (
+      owner: Player,
+      x: number,
+      y: number,
+      level: number,
+      tile = Q,
+      type: UnitType = UnitType.HydrogenBomb,
+    ) => {
+      const s = put(owner, UnitType.SAMLauncher, x, y, level);
+      const v = score(tile, [], type);
+      s.delete(false);
+      return v;
+    };
+    expect(withSam(H, 220, 210, 1)).toBe(0); // 60 <= 70: not outranged
+    expect(w.config.samRange(1)).toBe(70);
+    expect(withSam(H, 220, 220, 1)).toBe(0); // exactly 70: > is strict
+    expect(withSam(H, 220, 230, 1)).toBe(100_000 - qpen); // 80 > 70
+    expect(withSam(H, 220, 230, 1, Q, UnitType.AtomBomb)).toBe(0);
+    expect(withSam(H, 220, 235, 2)).toBe(200_000 - qpen); // 85 > 81.4
+    expect(withSam(H, 220, 249, 4)).toBe(400_000 - qpen); // 99 > 96.7
+    expect(withSam(H, 220, 250, 5)).toBe(0); // level 5: never
+    expect(withSam(H, 220, 251, 1)).toBe(0); // 101: not searched
+    // Whoever owns it: N's own SAM on its land, 80 from (110, 150), 90 from
+    // the silo.
+    expect(withSam(N, 30, 150, 1, at(110, 150))).toBe(100_000 - 90 * 30);
+    // Recent aim points: after an atom, every tile within its inner radius
+    // (12) of the aim point loses 1M (:791-801); kept while sent + 600 >=
+    // now (:546-555).
+    const clean = brainWith(w, "N", false).nuke; // same seed, no history
+    setGold(N, 1_000_000n);
+    nuke.maybeSendNuke();
+    expect(nukes(w).map((n) => n.type)).toEqual([UnitType.AtomBomb]);
+    const dst = nukes(w)[0].dst!;
+    const targets = H.units(Structures.types);
+    const loss = (t: TileRef) =>
+      clean.nukeTileScore(t, silos, targets, UnitType.AtomBomb) -
+      nuke.nukeTileScore(t, silos, targets, UnitType.AtomBomb);
+    const inner = w.config.nukeMagnitudes(UnitType.AtomBomb).inner;
+    const edge = at(w.game.x(dst), w.game.y(dst) + inner);
+    const beyond = at(w.game.x(dst), w.game.y(dst) + inner + 1);
+    expect([loss(dst), loss(edge), loss(beyond)]).toEqual([
+      1_000_000, 1_000_000, 0,
+    ]);
+    tick(w, 600);
+    nuke.removeOldNukeEvents();
+    expect(loss(dst)).toBe(1_000_000);
+    tick(w, 1);
+    nuke.removeOldNukeEvents();
+    expect(loss(dst)).toBe(0);
   });
 
   it("a level-1 SAM on the city: a hydro is aimed where it outranges the SAM (> 70, within 100) and kills it unopposed", () => {
@@ -939,6 +1259,7 @@ describe("H8 SAMs against ordinary nukes: SAMLauncherExecution, SAMMissileExecut
       102,
     ]);
     expect(c.maxSamRange()).toBe(150);
+    expect(c.defaultNukeTargetableRange()).toBe(150); // Config.ts:1136-1138
     expect(c.SAMCooldown()).toBe(90);
     expect(c.defaultSamMissileSpeed()).toBe(12);
     expect(c.nukeSpeed(UnitType.AtomBomb)).toBe(10);
@@ -1168,6 +1489,14 @@ describe("H8 MIRVs: NationMIRVBehavior", () => {
     expect(case_([3, 3, 3], "R", [])).toBe(true); // 3 cities, 9 levels
     expect(case_(ones(9), "N", ones(8))).toBe(false); // the nation 2nd
     expect(case_(ones(9), "T", ones(8))).toBe(false); // a tribe 2nd
+    // The multiplier is 1.15 with >= (:102-116, :247-249): 20 x 1.15 is
+    // exactly 23 in floating point, and 23 levels vs 20 triggers; 57 vs 50
+    // (1.14) does not. So the factor lies in (1.14, 1.15] and >= is pinned.
+    expect(20 * 1.15).toBe(23);
+    expect(case_([10, 10, 3], "R", [10, 10])).toBe(true);
+    expect(case_([10, 10, 10, 10, 10, 7], "R", [10, 10, 10, 10, 10])).toBe(
+      false,
+    );
   });
 
   it("gates: a silo and gold >= the price; then 1 decision in 16 hesitates; the aim is calculateTerritoryCenter(target)", () => {
@@ -1192,12 +1521,19 @@ describe("H8 MIRVs: NationMIRVBehavior", () => {
     N.buildUnit(UnitType.MissileSilo, [...N.tiles()][500], {});
     setGold(N, price);
     w.log.length = 0;
-    // random.chance(16) per decision (:145-147, hesitationOdds :66-80).
+    // random.chance(16) per decision (:145-147, hesitationOdds :66-80), the
+    // first draw of considerMIRV: a copy of the nation's PRNG taken just
+    // before predicts every decision exactly.
     let launched = 0;
     const trials = 160;
     for (let g = 0; g < trials; g++) {
       w.game.nationMirvTargets().clear();
-      if (brain(w, "N", `mirv-${g}`).mirv.considerMIRV()) launched++;
+      const b = brain(w, "N", `mirv-${g}`).mirv;
+      const rnd = (b as unknown as { random: PseudoRandom }).random;
+      const hesitates = PseudoRandom.fromState(rnd.getState()).chance(16);
+      const fired = b.considerMIRV();
+      expect(fired).toBe(!hesitates);
+      if (fired) launched++;
     }
     expect(mirvs(w)).toHaveLength(launched);
     expect(trials - launched).toBeGreaterThan(3); // ~1/16 of 160 = 10

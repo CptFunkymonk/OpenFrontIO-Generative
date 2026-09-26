@@ -1,4 +1,4 @@
-import { Agent, AgentContext } from "../../Agent";
+import { Agent, AgentContext, AgentOutcome } from "../../Agent";
 import { ApexOptions, parseApexOptions } from "./options";
 import { ApexPolicy } from "./policy";
 import { createState } from "./state";
@@ -23,5 +23,10 @@ export class ApexAgent implements Agent {
 
   tick(ctx: AgentContext): void {
     this.policy.tick(ctx);
+  }
+
+  /** Logs the Scheduler's totals (sent, refused, rate limited). */
+  gameOver(ctx: AgentContext, outcome: AgentOutcome): void {
+    this.policy.gameOver(ctx, outcome);
   }
 }

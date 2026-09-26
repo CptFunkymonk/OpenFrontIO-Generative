@@ -2,6 +2,7 @@ import { Game, Player, PlayerID, PlayerType } from "../../../core/game/Game";
 import {
   AgentContext,
   AgentIntent,
+  AgentOutcome,
   IntentBudgetRemaining,
   SendResult,
 } from "../../Agent";
@@ -27,7 +28,7 @@ import { SpawnController } from "./controllers/SpawnController";
 import { StrikeController } from "./controllers/StrikeController";
 import { homeFloors, NO_FLOORS } from "./HomeTarget";
 import { ApexOptions, BooleanOption } from "./options";
-import { ApexState } from "./state";
+import { ApexState, stateLog } from "./state";
 
 // The apex policy (spec §2.10, §3.0): runs the controllers over one View per
 // tick. Pure given (game, state): controllers never read ctx.random,
@@ -61,6 +62,9 @@ export interface View {
   forRollout: (() => RolloutPolicy) | null;
   /** Null inside rollouts. */
   live: AgentContext | null;
+  /** Not in spec §2.10's View: appends to ApexState.log and, live, to
+   *  ctx.log (the arena keeps it per game). Never read by decisions. */
+  log?: (line: string) => void;
 }
 
 export interface Controller {
@@ -109,11 +113,24 @@ const DECIDE_ORDER: readonly ControllerName[] = [
   "defense",
 ];
 
+/** Ticks between two status lines in the host log. */
+const STATUS_EVERY = 300;
+
 /** OwnerGrid refresh cadence in ticks (§3.0 cadence table). */
 export const OWNER_GRID_EVERY = 100;
 /** Tiles the OwnerGrid samples per refresh (stride √(W·H/40,000),
  *  model-first §4.6). */
 const OWNER_GRID_SAMPLES = 40_000;
+
+/** Home troops a spend can use: me.troops(), at most ceil(cap). Troops
+ *  above the cap are cut by the next turn's regrowth step before an intent
+ *  sent now executes, and the attack takes min(asked, home) [PIN
+ *  TroopCapClamp]. `floors.cap` is the decision's cap (0 before the first
+ *  decision: no bound). */
+export function homeAvailable(me: Player, floors: HomeFloors): number {
+  const home = me.troops();
+  return floors.cap > 0 ? Math.min(home, Math.ceil(floors.cap)) : home;
+}
 
 /** Whether an enabled feature forks outside rollouts, so the live policy
  *  needs a Lookahead. */
@@ -137,6 +154,8 @@ interface Env {
   budget(): IntentBudgetRemaining;
   send(i: AgentIntent): SendResult;
   live: AgentContext | null;
+  /** ctx.log, live only. */
+  log: ((line: string) => void) | null;
 }
 
 /** The objects built over one game. Rebuilt when the game changes (a
@@ -155,15 +174,20 @@ interface Runtime {
   floors: HomeFloors;
   /** Nations refreshed round-robin (§3.0 step 5), set each decision. */
   refreshList: PlayerID[];
+  /** Where the round-robin continues in refreshList. */
+  refreshCursor: number;
 }
 
 export class ApexPolicy {
   private readonly spawn = new SpawnController();
+  private readonly expansion = new ExpansionController();
   private readonly onTicks: Controller[];
   private readonly decides: Controller[];
   private readonly rolloutFactory = () => this.forRollout();
   private rt: Runtime | null = null;
   private inRollout = false;
+  /** Tick of the last status line (logs only). */
+  private lastStatus = -Infinity;
   /** The live policy's race grid, handed to rollouts: its terrain arrays
    *  never change, and building one costs up to 0.6 s. */
   private sharedRace: RaceGrid | null = null;
@@ -171,7 +195,7 @@ export class ApexPolicy {
    *  so the copy keeps the live decision cadence (no extra decision at its
    *  first step) and the same scan, floors and refresh order. */
   private carry: Partial<
-    Pick<Runtime, "wm" | "floors" | "owners" | "refreshList">
+    Pick<Runtime, "wm" | "floors" | "owners" | "refreshList" | "refreshCursor">
   > | null = null;
 
   constructor(
@@ -183,7 +207,7 @@ export class ApexPolicy {
       diplomacy: new DiplomacyController(),
       endgame: new EndgameController(),
       strike: new StrikeController(),
-      expansion: new ExpansionController(),
+      expansion: this.expansion,
       naval: new NavalController(),
       economy: new EconomyController(),
     };
@@ -217,6 +241,7 @@ export class ApexPolicy {
       budget: () => ctx.budget(),
       send: (i) => ctx.send(i),
       live: ctx,
+      log: (line) => ctx.log(line),
     });
   }
 
@@ -234,6 +259,7 @@ export class ApexPolicy {
         floors: rt.floors,
         owners: rt.owners,
         refreshList: rt.refreshList,
+        refreshCursor: rt.refreshCursor,
       });
     }
     return { step: (v) => copy.step(v) };
@@ -256,6 +282,7 @@ export class ApexPolicy {
         return "ok";
       },
       live: null,
+      log: null,
     });
     return sent;
   }
@@ -279,6 +306,7 @@ export class ApexPolicy {
       rt.scheduler.begin(t, env.budget(), purse);
       this.spawn.onTick(this.view(env, rt, wm, purse), s);
       rt.scheduler.flush(env.send, rt.ledger, t);
+      this.drainLogs(env, rt);
       return;
     }
     s.spawn.endTick ??= t;
@@ -300,13 +328,12 @@ export class ApexPolicy {
       wm = scanWorld(env.game, env.me, rt.wm);
       rt.wm = wm;
       this.refreshGrids(env, rt);
-      rt.refreshList = this.refreshList(wm);
       rt.floors = homeFloors(
         { tick: t, o, me: env.me, models: rt.models, nm: rt.nm },
         s,
       );
     }
-    const purse = createPurse(env.me.troops(), rt.floors);
+    const purse = createPurse(homeAvailable(env.me, rt.floors), rt.floors);
     rt.scheduler.begin(t, env.budget(), purse);
     const v = this.view(env, rt, wm, purse);
 
@@ -315,11 +342,50 @@ export class ApexPolicy {
     // Step 4: decisions.
     if (decision) {
       for (const c of this.decides) c.decide?.(v, s);
+      // After Diplomacy's plan, which sets the web's lists.
+      rt.refreshList = this.refreshList(env.game, wm);
+      if (env.log !== null && t - this.lastStatus >= STATUS_EVERY) {
+        this.lastStatus = t;
+        this.status(v, rt);
+      }
     }
-    // Step 5: full nation refreshes, round-robin.
-    this.refreshNations(rt, t);
+    // Step 5: full nation refreshes, round-robin (fewer on decision ticks,
+    // see refreshNations).
+    this.refreshNations(rt, t, decision);
     // Step 6.
     rt.scheduler.flush(env.send, rt.ledger, t);
+    this.drainLogs(env, rt);
+  }
+
+  /** A status line for the host log (never read by decisions). */
+  private status(v: View, rt: Runtime): void {
+    const kinds: Record<string, number> = {};
+    for (const p of rt.ledger.allPlans()) {
+      kinds[p.kind] = (kinds[p.kind] ?? 0) + 1;
+    }
+    const f = rt.floors;
+    const k = (x: number) => `${Math.round(x / 1000)}k`;
+    v.log?.(
+      `status t=${v.tick} tiles=${v.wm.tiles} home=${k(v.wm.home)} ` +
+        `cap=${k(f.cap)} H=${k(f.H)} tn=${k(f.tn)} vw=${k(f.vw)} ` +
+        `free=${v.wm.freeFrontier} tribes=${v.wm.tribes.length} ` +
+        `nations=${v.wm.nations.length} plans=${JSON.stringify(kinds)} ` +
+        `stall=${this.s.stall.since ?? "-"} refresh=${rt.refreshList.length}`,
+    );
+  }
+
+  /** A one-line summary for the end of the game (host logs only). */
+  gameOver(ctx: AgentContext, outcome: AgentOutcome): void {
+    const rt = this.rt;
+    if (rt === null) return;
+    const st = rt.scheduler.stats;
+    const line =
+      `apex ${outcome.result} at ${ctx.tick}: offered ${st.offered}, ` +
+      `accepted ${st.accepted}, sent ${st.sent}, rate-limited ${st.rateLimited}, ` +
+      `invalid ${st.invalid}; refused ${JSON.stringify(st.refused)}; ` +
+      `relation mismatches ${rt.nm.log.length}`;
+    stateLog(this.s, line);
+    ctx.log(line);
   }
 
   private runtime(env: Env): Runtime {
@@ -335,7 +401,7 @@ export class ApexPolicy {
       models,
       nm,
       ledger: Ledger.fromData(s.ledger),
-      scheduler: new Scheduler(o),
+      scheduler: new Scheduler(o, env.game.config().msPerTick()),
       lookahead:
         !this.inRollout && usesLookahead(o)
           ? new Lookahead({
@@ -348,6 +414,7 @@ export class ApexPolicy {
       wm: null,
       floors: NO_FLOORS,
       refreshList: [],
+      refreshCursor: 0,
       ...this.carry,
     };
     this.carry = null;
@@ -372,6 +439,10 @@ export class ApexPolicy {
       lookahead: rt.lookahead,
       forRollout: this.inRollout ? null : this.rolloutFactory,
       live: env.live,
+      log: (line) => {
+        stateLog(this.s, line);
+        env.log?.(line);
+      },
     };
   }
 
@@ -393,24 +464,59 @@ export class ApexPolicy {
     }
   }
 
-  /** Bordering nations, then the web's reachable ones (§3.0 step 5). */
-  private refreshList(wm: WorldModel): PlayerID[] {
+  /** Bordering nations, the web's reachable ones, then the nations next
+   *  to our tribes (the allocator's contest and buffer weights, §3.6.4);
+   *  living ones only (§3.0 step 5). */
+  private refreshList(game: Game, wm: WorldModel): PlayerID[] {
     const ids = new Set<PlayerID>();
     for (const n of wm.nations) {
       if (n.type === PlayerType.Nation) ids.add(n.id);
     }
     for (const id of this.s.web.allySet) ids.add(id);
     for (const id of this.s.web.food) ids.add(id);
-    return [...ids];
+    if (this.o.expansion) {
+      for (const id of this.expansion.nationsNearTribes()) ids.add(id);
+    }
+    const out: PlayerID[] = [];
+    for (const id of ids) {
+      if (!game.hasPlayer(id)) continue;
+      const p = game.player(id);
+      if (p.isAlive() && p.type() === PlayerType.Nation) out.push(id);
+    }
+    return out;
   }
 
-  private refreshNations(rt: Runtime, tick: number): void {
+  /**
+   * §3.0 step 5: nationRefreshPerTick full refreshes per tick, round-robin.
+   * Think-time budget: a decision tick already carries the scan and the
+   * allocator, so it does half of them (rounded down) and the ticks between
+   * decisions make up the rest, keeping thinkEvery·nationRefreshPerTick per
+   * decision cycle (thinkEvery ≥ 2).
+   */
+  private refreshNations(rt: Runtime, tick: number, decision: boolean): void {
     const list = rt.refreshList;
-    const k = Math.min(this.o.nationRefreshPerTick, list.length);
+    if (list.length === 0) return;
+    const per = this.o.nationRefreshPerTick;
+    const te = Math.max(1, this.o.thinkEvery);
+    let k = per;
+    if (te >= 2) {
+      const onDecision = Math.floor(per / 2);
+      k = decision ? onDecision : Math.ceil((per * te - onDecision) / (te - 1));
+    }
+    k = Math.min(k, list.length);
     if (k <= 0) return;
-    const start = (tick * k) % list.length;
+    const start = rt.refreshCursor % list.length;
     for (let i = 0; i < k; i++) {
       rt.nm.refresh(list[(start + i) % list.length], "full");
+    }
+    rt.refreshCursor = (start + k) % list.length;
+  }
+
+  /** The Scheduler's rate-limit and invalid notes into the logs. */
+  private drainLogs(env: Env, rt: Runtime): void {
+    for (const line of rt.scheduler.takeLog()) {
+      stateLog(this.s, line);
+      env.log?.(line);
     }
   }
 

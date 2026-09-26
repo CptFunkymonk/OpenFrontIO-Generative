@@ -24,8 +24,10 @@
  *   diplomacy compares absolute ticks with that 100 (alliance requests
  *   created by tick 101 are rejected, NationAllianceBehavior.ts:67;
  *   Impossible's early-game acceptance ends at tick 700,
- *   NationAllianceBehavior.ts:218-245). Win and overtime clocks
- *   (elapsedGameSeconds, GameImpl.ts:966-983) start at the phase end.
+ *   NationAllianceBehavior.ts:218-245), and the arena's tick cap counts
+ *   absolute ticks too (ArenaGame.ts:363; maxTicks = maxMinutes * 600,
+ *   Arena.ts:626, 60 minutes by default, Arena.ts:401). Win and overtime
+ *   clocks (elapsedGameSeconds, GameImpl.ts:966-983) start at the phase end.
  * - TRUE, nothing grows. PlayerExecution, TribeExecution and AttackExecution
  *   return false from activeDuringSpawnPhase (PlayerExecution.ts:44,
  *   TribeExecution.ts:43, AttackExecution.ts:71), and executeNextTick neither
@@ -33,7 +35,21 @@
  * - PARTIAL, "tribes are placed on the first tick": tick 0 only init()s the
  *   tribes' SpawnExecutions; they land in tick 1. Nations pick a tile in
  *   tick 1 (NationExecution.tick, NationExecution.ts:126-180), before the
- *   tribes exist, and land in tick 2, so a tribe can cut their disc.
+ *   tribes exist, and their first SpawnExecution lands in tick 2, so a tribe
+ *   can cut their disc.
+ * - Who lands first (added after review): a spawn intent in turn 1, the
+ *   earliest turn an arena agent reaches (it first acts after tick 0 and
+ *   deliver() queues for turn executed - 1 + latency, ArenaGame.ts:268-273,
+ *   latency 1 by default, Arena.ts:402), is queued ahead of the nations'
+ *   first SpawnExecutions, which NationExecution.tick adds only during
+ *   tick 1 (GameRunner.executeNextTick adds the turn's executions before the
+ *   tick, GameRunner.ts:209-211; GameImpl.ts:537-551 init()s and appends
+ *   them in queue order). So we land in tick 2 ahead of every nation and end
+ *   the phase there; the nations then land (internal spawns skip the gate,
+ *   SpawnExecution.ts:87-89) on their tick-1 picks, frozen, taking only what
+ *   we left. A nation whose free disc we cover entirely is never placed and
+ *   never retries (NationExecution.ts:183-186). From turn 2 on, the nations
+ *   are on the map first. Tribes land in tick 1 and can never be pre-empted.
  * - PARTIAL, "±25 tiles of the manifest position": randomSpawnLand draws
  *   nextInt(c - 25, c + 25), which is half-open (PseudoRandom.ts:61-65), so
  *   the spawn tile is in [c-25, c+24] on each axis
@@ -51,15 +67,25 @@
  *   execution/Util.ts:140-159; SpawnExecution.getSpawn, :139-148). Neither
  *   the centre's owner nor its terrain is checked. A disc with no free land
  *   fails silently and leaves the phase open (SpawnExecution.ts:102-106).
+ *   Two spawn intents in the same turn both pass the gate; the second gives
+ *   the first disc back and the last one wins (SpawnExecution.ts:96-97).
  */
 import fs from "fs";
 import path from "path";
+import type {
+  Agent,
+  AgentContext,
+  AgentIntent,
+  SendResult,
+} from "../../../src/agent/Agent";
+import { AgentHost } from "../../../src/agent/AgentHost";
 import {
   arenaGameStart,
   seatClientID,
   type ArenaGameSpec,
 } from "../../../src/agent/arena/ArenaGame";
 import { NodeMapLoader } from "../../../src/agent/arena/NodeMapLoader";
+import { TerrainSource } from "../../../src/agent/Fork";
 import { SpawnTimerExecution } from "../../../src/core/execution/SpawnTimerExecution";
 import {
   Difficulty,
@@ -79,7 +105,7 @@ import {
   SpawnPhaseEndUpdate,
 } from "../../../src/core/game/GameUpdates";
 import { createGameRunner, GameRunner } from "../../../src/core/GameRunner";
-import { Intent } from "../../../src/core/Schemas";
+import { GameStartInfo, Intent } from "../../../src/core/Schemas";
 
 const MAPS = path.join(__dirname, "../../../resources/maps");
 const MAP = GameMapType.World;
@@ -91,6 +117,8 @@ interface Sim {
   runner: GameRunner;
   game: Game;
   me: Player;
+  gameStart: GameStartInfo;
+  loader: NodeMapLoader;
   /** Runs the next turn (= the next tick) with these intents from us. */
   step(intents?: Intent[]): GameUpdateViewData;
 }
@@ -119,15 +147,12 @@ async function newSim(gameID = "SPAWNPIN"): Promise<Sim> {
     seats: [{ agent: "baseline" }],
   };
   let last: GameUpdateViewData | null = null;
-  const runner = await createGameRunner(
-    arenaGameStart(spec as ArenaGameSpec),
-    undefined,
-    new NodeMapLoader(MAPS),
-    (gu) => {
-      if ("errMsg" in gu) throw new Error(gu.errMsg);
-      last = gu;
-    },
-  );
+  const gameStart = arenaGameStart(spec as ArenaGameSpec);
+  const loader = new NodeMapLoader(MAPS);
+  const runner = await createGameRunner(gameStart, undefined, loader, (gu) => {
+    if ("errMsg" in gu) throw new Error(gu.errMsg);
+    last = gu;
+  });
   const game = runner.game;
   const me = game.playerByClientID(ME);
   if (me === null) throw new Error("no seat player");
@@ -135,6 +160,8 @@ async function newSim(gameID = "SPAWNPIN"): Promise<Sim> {
     runner,
     game,
     me,
+    gameStart,
+    loader,
     step(intents: Intent[] = []) {
       runner.addTurn({
         turnNumber: game.ticks(),
@@ -221,6 +248,106 @@ const manifestNations = (
   ) as { nations: ManifestNation[] }
 ).nations;
 
+interface Placed {
+  spawn: TileRef;
+  tiles: TileRef[];
+}
+/** Each player's spawn tile and tiles, by player id. */
+const placements = (game: Game, type: PlayerType) =>
+  new Map<string, Placed>(
+    byType(game, type).map((p) => [
+      p.id(),
+      { spawn: p.spawnTile()!, tiles: sorted(p.tiles()) },
+    ]),
+  );
+
+/**
+ * The game with nobody spawning, after tick 2: tribes and nations placed on
+ * their first picks. The simulation is deterministic, so this is what any
+ * game with this gameID looks like before our spawn lands.
+ */
+let oracleSim: Promise<Sim> | null = null;
+async function oracle(): Promise<Sim> {
+  oracleSim ??= newSim().then((sim) => {
+    sim.step();
+    sim.step();
+    sim.step();
+    return sim;
+  });
+  return oracleSim;
+}
+
+/** The first nation, in player order, that holds its full 52-tile disc. */
+const fullNation = (game: Game) =>
+  byType(game, PlayerType.Nation).find((n) => n.numTilesOwned() === 52)!;
+
+/**
+ * The arena's loop around one agent: a real AgentHost that acts after every
+ * tick and delivers into the turn runArenaGame would (ArenaGame.ts:262-277,
+ * 316-337: turn executed - 1 + max(1, latency), latency 1 by default,
+ * Arena.ts:402).
+ */
+async function newArena(agent: Agent) {
+  const sim = await newSim();
+  const terrain = await TerrainSource.load(sim.loader, MAP, GameMapSize.Normal);
+  const LATENCY = 1;
+  const queue = new Map<number, AgentIntent[]>();
+  let executed = 0;
+  const host = new AgentHost({
+    agent,
+    clientID: ME,
+    gameStart: sim.gameStart,
+    runner: sim.runner,
+    terrain,
+    deliver: (intent) => {
+      const turn = executed - 1 + Math.max(1, LATENCY);
+      queue.set(turn, [...(queue.get(turn) ?? []), intent]);
+    },
+    nowMs: () => sim.game.ticks() * 100,
+    strict: true,
+  });
+  return {
+    ...sim,
+    queue,
+    /** Runs the next turn, then lets the agent act, as runArenaGame does. */
+    turn(): GameUpdateViewData {
+      const intents = queue.get(executed) ?? [];
+      queue.delete(executed);
+      const u = sim.step(intents);
+      executed++;
+      host.tick();
+      return u;
+    },
+  };
+}
+
+/**
+ * Spawns at its first chance, on the first nation that holds a full disc in
+ * a fork run two ticks ahead: the tick-1 picks, seen before they land.
+ */
+class NationSpawnCamper implements Agent {
+  readonly name = "nation-spawn-camper";
+  firstTick = -1;
+  sent: SendResult | null = null;
+  target: string | null = null;
+  center: TileRef | null = null;
+  seenNations = new Map<string, Placed>();
+  seenTribes = new Map<string, Placed>();
+
+  tick(ctx: AgentContext): void {
+    if (this.firstTick >= 0) return;
+    this.firstTick = ctx.tick;
+    const fork = ctx.fork();
+    fork.advance(2); // ticks 1 and 2 with nobody else acting
+    this.seenNations = placements(fork.game, PlayerType.Nation);
+    this.seenTribes = placements(fork.game, PlayerType.Bot);
+    const n = fullNation(fork.game);
+    this.target = n.id();
+    this.center = n.spawnTile()!;
+    this.sent = ctx.send({ type: "spawn", tile: this.center });
+  }
+}
+
 describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribes)", () => {
   beforeAll(() => {
     console.debug = () => {};
@@ -277,7 +404,7 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
   );
 
   test(
-    "placement order: tribes land in tick 1 on full discs, nations in tick 2 and may be cut by tribes",
+    "placement order when nobody spawns in turn 1: tribes land in tick 1 on full discs, nations in tick 2, some cut by tribes",
     async () => {
       const sim = await newSim();
       const { game } = sim;
@@ -332,15 +459,37 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
         for (const t of n.tiles()) expect(d.has(t)).toBe(true);
         expect(n.troops()).toBe(31_250);
       }
-      // The tile was picked before the tribes existed, so some nations lose
-      // part of their disc to a tribe, and a few are centred on tribe land.
-      const cut = nations.filter((n) => n.numTilesOwned() < 52);
-      expect(cut.length).toBeGreaterThan(0);
-      const onTribe = nations.filter((n) => {
-        const o = game.owner(n.spawnTile()!);
+      // Why a nation holds fewer than 52 tiles, tile by tile. Every disc tile
+      // it lacks is tribe land or not takeable terrain (water, impassable);
+      // the map edge clipped no nation disc here, and on this seed no nation
+      // took a tile another nation needed. The tile was picked before the
+      // tribes existed, so tribes cut some discs, and a few nations are
+      // centred on tribe land. Counts are for this gameID and this tick;
+      // they drift as nations hop.
+      const tribeOwned = (t: TileRef) => {
+        const o = game.owner(t);
         return o.isPlayer() && o.type() === PlayerType.Bot;
-      });
-      expect(onTribe.length).toBeGreaterThan(0);
+      };
+      let short = 0;
+      let byTribe = 0;
+      let byTerrainOnly = 0;
+      for (const n of nations) {
+        const d = disc(game, n.spawnTile()!);
+        expect(d.length).toBe(52);
+        const missing = d.filter((t) => game.owner(t) !== n);
+        if (missing.length === 0) continue;
+        short++;
+        for (const t of missing) {
+          expect(tribeOwned(t) || !game.isLand(t) || game.isImpassable(t)).toBe(
+            true,
+          );
+        }
+        if (missing.some(tribeOwned)) byTribe++;
+        else byTerrainOnly++;
+      }
+      expect([short, byTribe, byTerrainOnly]).toEqual([19, 9, 10]);
+      const onTribe = nations.filter((n) => tribeOwned(n.spawnTile()!));
+      expect(onTribe.length).toBe(3);
     },
     TIMEOUT,
   );
@@ -363,6 +512,7 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
       );
       const lastSpawn = new Map(nations.map((n) => [n, n.spawnTile()!]));
       const hops = new Map<Player, number[]>(nations.map((n) => [n, []]));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       const TICKS = 1_000; // 10x numSpawnPhaseTurns(), 5x the multiplayer 200
       for (let i = 0; i < TICKS; i++) {
@@ -408,7 +558,15 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
 
       // Every nation hops on a fixed period: ticks % attackRate === attackTick,
       // attackRate = nextInt(30, 50) at Impossible (NationExecution.ts:102-103,
-      // 127-134). Seen here as equal gaps between spawn-tile changes.
+      // 127-134). Seen here as equal gaps between spawn-tile changes. That
+      // holds only while randomSpawnLand finds a tile: when its 50 tries all
+      // fail the hop is skipped with a warning (NationExecution.ts:169-174)
+      // and the gap doubles. None failed on World; a coastal or island nation
+      // on another map can. (A hop that failed in SpawnExecution itself would
+      // warn "SpawnExecution: cannot spawn" and keep the old disc.)
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("cannot spawn"),
+      );
       for (const n of nations) {
         const h = hops.get(n)!;
         expect(h.length).toBeGreaterThanOrEqual(Math.floor(TICKS / 50));
@@ -428,17 +586,24 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
       const sim = await newSim();
       const { game, me } = sim;
       const config = game.config();
+      // An attack sent in any turn up to the landing turn waits, un-init()ed,
+      // until the phase ends (AttackExecution.activeDuringSpawnPhase,
+      // AttackExecution.ts:71; GameImpl.ts:539-546), then all of them are
+      // init()ed together and merge into one attack on the same target
+      // (AttackExecution.init, AttackExecution.ts:171-180). Here: one long
+      // before the spawn, one with it, one in the landing turn.
+      const attack = (troops: number): Intent => ({
+        type: "attack",
+        targetID: null,
+        troops,
+      });
+      sim.step([attack(3_000)]); // turn 0
       for (let i = 0; i < 300; i++) sim.step(); // waiting costs nothing
       const site = freeInlandSite(game);
       const other = freeInlandSite(game, [site]);
 
       const turn = game.ticks();
-      // Our first attack can ride in the same turn as the spawn: it waits,
-      // un-init()ed, until the phase ends (AttackExecution.ts:71).
-      sim.step([
-        spawnAt(site),
-        { type: "attack", targetID: null, troops: 5_000 },
-      ]);
+      sim.step([spawnAt(site), attack(5_000)]);
       expect(me.hasSpawned()).toBe(false); // init()ed only
       expect(game.inSpawnPhase()).toBe(true);
       const expected = disc(game, site).filter((t) => takeable(game, t));
@@ -447,7 +612,7 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
       // Tick turn + 1: we land. A second spawn intent issued in this very
       // turn is init()ed after the phase ended in this tick's tick() loop, so
       // it is dropped (SpawnExecution.ts:57, 78-89, queuedDuringSpawnPhase).
-      const u = sim.step([spawnAt(other)]);
+      const u = sim.step([spawnAt(other), attack(2_000)]);
       expect(me.hasSpawned()).toBe(true);
       expect(me.spawnTile()).toBe(site);
       expect(sorted(me.tiles())).toEqual(sorted(expected));
@@ -456,10 +621,12 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
         GameUpdateType.SpawnPhaseEnd
       ] as SpawnPhaseEndUpdate[];
       expect(end.map((e) => e.startTick)).toEqual([turn + 1]);
-      // Our attack was init()ed at the end of this tick; nobody grew yet.
+      // Our three attacks were init()ed at the end of this tick and merged;
+      // nobody grew yet.
       expect(me.outgoingAttacks().length).toBe(1);
       expect(me.outgoingAttacks()[0].target().isPlayer()).toBe(false);
-      expect(me.troops()).toBe(config.startManpower(me.info()) - 5_000);
+      expect(me.outgoingAttacks()[0].troops()).toBe(10_000);
+      expect(me.troops()).toBe(config.startManpower(me.info()) - 10_000);
       const nations = byType(game, PlayerType.Nation);
       for (const n of nations) {
         expect(n.troops()).toBe(31_250);
@@ -476,7 +643,7 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
       // Growth has started (PlayerExecution is init()ed at the end of the
       // tick the phase ended in).
       expect(me.troops()).toBeGreaterThan(
-        config.startManpower(me.info()) - 5_000,
+        config.startManpower(me.info()) - 10_000,
       );
       // Every nation opens with forceSendAttack(terraNullius) at half its
       // troops, one tick after our spawn (NationExecution.ts:194-196,
@@ -724,6 +891,208 @@ describe("H1: the singleplayer spawn phase (World, Normal, Impossible, 400 tribe
           lateMovers.includes(n) ? [move] : [],
         );
       }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "turn 1 beats the nations: a spawn on a nation's first pick, seen in a fork, erases that nation; the rest land frozen on their picks",
+    async () => {
+      const agent = new NationSpawnCamper();
+      const sim = await newArena(agent);
+      const { game, me } = sim;
+      const config = game.config();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      // Tick 0, then the agent's first call (Agent.tick: "starting with the
+      // first spawn-phase tick"). It forks, looks two ticks ahead, and sends;
+      // deliver() queues the intent for turn 1, the earliest it can reach.
+      sim.turn();
+      expect(agent.firstTick).toBe(1);
+      expect(agent.sent).toBe("ok");
+      expect([...sim.queue.keys()]).toEqual([1]);
+      // The fork is a separate game: the real one still has no tribes.
+      expect(byType(game, PlayerType.Bot).length).toBe(0);
+      const target = game.player(agent.target!);
+      const center = agent.center!;
+      const seen = agent.seenNations;
+      expect(seen.get(target.id())!.tiles.length).toBe(52);
+
+      // Tick 1: turn 1's spawn is queued first; the tribes land exactly
+      // where the fork showed; the nations only pick, queuing their first
+      // SpawnExecution behind ours (NationExecution.ts:168-179).
+      sim.turn();
+      expect(placements(game, PlayerType.Bot)).toEqual(agent.seenTribes);
+      expect(byType(game, PlayerType.Nation).some((n) => n.hasSpawned())).toBe(
+        false,
+      );
+      expect(me.hasSpawned()).toBe(false);
+      expect(game.inSpawnPhase()).toBe(true);
+
+      // Tick 2: ours runs first, takes the nation's whole disc and ends the
+      // phase; then each nation's internal spawn runs on its tick-1 pick.
+      const u = sim.turn();
+      const end = u.updates[
+        GameUpdateType.SpawnPhaseEnd
+      ] as SpawnPhaseEndUpdate[];
+      expect(end.map((e) => e.startTick)).toEqual([2]);
+      expect(me.spawnTile()).toBe(center);
+      expect(sorted(me.tiles())).toEqual(seen.get(target.id())!.tiles);
+      // Its disc had no free tile left: getSpawn returns undefined and the
+      // SpawnExecution gives up (SpawnExecution.ts:102-106).
+      expect(warn).toHaveBeenCalledWith(
+        `SpawnExecution: cannot spawn ${target.info().name}`,
+      );
+      expect(target.hasSpawned()).toBe(false);
+      expect(target.numTilesOwned()).toBe(0);
+      expect(target.isAlive()).toBe(false);
+      // Every other nation landed exactly as the fork showed: our 52 tiles
+      // were the target's in the fork, so nobody else lost a tile.
+      const others = byType(game, PlayerType.Nation).filter(
+        (n) => n !== target,
+      );
+      expect(others.length).toBe(manifestNations.length - 1);
+      for (const n of others) {
+        expect(n.spawnTile()).toBe(seen.get(n.id())!.spawn);
+        expect(sorted(n.tiles())).toEqual(seen.get(n.id())!.tiles);
+      }
+
+      // Tick 3: every placed nation opens (NationExecution.ts:194-196); the
+      // erased one has nothing to open with.
+      sim.turn();
+      for (const n of others) {
+        expect(n.outgoingAttacks().length).toBe(1);
+        expect(n.outgoingAttacks()[0].troops()).toBe(
+          config.startManpower(n.info()) / 2,
+        );
+      }
+      expect(target.outgoingAttacks().length).toBe(0);
+
+      // It never retries: after the phase, NationExecution.tick returns at
+      // "spawnExecAdded && !hasSpawned()" forever (NationExecution.ts:
+      // 183-186), and no nation hops outside the phase (:126).
+      for (let i = 0; i < 100; i++) sim.turn();
+      expect(target.hasSpawned()).toBe(false);
+      expect(target.numTilesOwned()).toBe(0);
+      for (const n of others) {
+        expect(n.spawnTile()).toBe(seen.get(n.id())!.spawn);
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "turn 1 beside a nation: we take our whole disc, the nation lands on its pick with the remainder, its spawn tile ours",
+    async () => {
+      const og = (await oracle()).game;
+      const seen = placements(og, PlayerType.Nation);
+      // A nation on a full disc whose neighbour disc 3 tiles east is its own
+      // land or free land, nobody else's.
+      const nation = byType(og, PlayerType.Nation).find((n) => {
+        if (n.numTilesOwned() !== 52) return false;
+        const c = n.spawnTile()!;
+        if (!og.isValidCoord(og.x(c) + 3, og.y(c))) return false;
+        const site = og.ref(og.x(c) + 3, og.y(c));
+        return disc(og, site).every(
+          (t) => og.owner(t) === n || takeable(og, t),
+        );
+      })!;
+      expect(nation).toBeDefined();
+      const center = nation.spawnTile()!;
+      const site = og.ref(og.x(center) + 3, og.y(center));
+      const ours = sorted(disc(og, site));
+      const oursSet = new Set(ours);
+      const overlap = seen
+        .get(nation.id())!
+        .tiles.filter((t) => oursSet.has(t));
+      expect(overlap.length).toBe(28);
+
+      const sim = await newSim();
+      const { game, me } = sim;
+      sim.step(); // tick 0
+      sim.step([spawnAt(site)]); // turn 1
+      sim.step(); // tick 2: we land, then the nations
+      const n = game.player(nation.id());
+      expect(sorted(me.tiles())).toEqual(ours);
+      expect(me.tiles().size).toBe(52);
+      expect(n.hasSpawned()).toBe(true);
+      expect(n.spawnTile()).toBe(center);
+      // Its centre is inside our disc: its spawn tile is a tile we own.
+      expect(game.owner(center)).toBe(me);
+      expect(sorted(n.tiles())).toEqual(
+        seen.get(nation.id())!.tiles.filter((t) => !oursSet.has(t)),
+      );
+      expect(n.numTilesOwned()).toBe(52 - 28);
+      for (const other of byType(game, PlayerType.Nation)) {
+        if (other === n) continue;
+        expect(sorted(other.tiles())).toEqual(seen.get(other.id())!.tiles);
+      }
+      // It still opens with half its troops, from 24 tiles against our border.
+      sim.step();
+      expect(n.outgoingAttacks().length).toBe(1);
+      expect(n.outgoingAttacks()[0].troops()).toBe(
+        game.config().startManpower(n.info()) / 2,
+      );
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "turn 2 is too late to pre-empt: the nation lands in tick 2 and our spawn on its pick fails",
+    async () => {
+      const og = (await oracle()).game;
+      const nation = fullNation(og);
+      const center = nation.spawnTile()!;
+      const sim = await newSim();
+      const { game, me } = sim;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      sim.step(); // tick 0
+      sim.step(); // tick 1
+      sim.step([spawnAt(center)]); // turn 2: the nations land in this tick
+      const n = game.player(nation.id());
+      expect(n.spawnTile()).toBe(center);
+      expect(sorted(n.tiles())).toEqual(sorted(nation.tiles()));
+      expect(me.hasSpawned()).toBe(false);
+      sim.step(); // tick 3: our spawn finds no free tile in the disc
+      expect(warn).toHaveBeenCalledWith(
+        `SpawnExecution: cannot spawn ${me.info().name}`,
+      );
+      expect(me.hasSpawned()).toBe(false);
+      expect(game.inSpawnPhase()).toBe(true);
+      expect(sorted(n.tiles())).toEqual(sorted(nation.tiles()));
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "two spawn intents in one turn both run and the last one wins, giving the first disc back",
+    async () => {
+      const og = (await oracle()).game;
+      const nation = fullNation(og);
+      const center = nation.spawnTile()!;
+      const free = freeInlandSite(og, [center]);
+      const sim = await newSim();
+      const { game, me } = sim;
+      sim.step(); // tick 0
+      // Both are init()ed during the phase (queuedDuringSpawnPhase), so both
+      // pass the gate in tick 2 (SpawnExecution.ts:57, 87-89), although the
+      // first one already ended the phase.
+      sim.step([spawnAt(center), spawnAt(free)]);
+      const u = sim.step(); // tick 2
+      // endSpawnPhase is idempotent (GameImpl.ts:511-520): one update.
+      const end = u.updates[
+        GameUpdateType.SpawnPhaseEnd
+      ] as SpawnPhaseEndUpdate[];
+      expect(end.map((e) => e.startTick)).toEqual([2]);
+      // The second relinquished the first disc (SpawnExecution.ts:96-97)
+      // and took its own; the nation, landing after both, got its whole
+      // disc back.
+      expect(me.spawnTile()).toBe(free);
+      expect(sorted(me.tiles())).toEqual(sorted(disc(game, free)));
+      const n = game.player(nation.id());
+      expect(n.spawnTile()).toBe(center);
+      expect(sorted(n.tiles())).toEqual(sorted(nation.tiles()));
+      expect(me.troops()).toBe(game.config().startManpower(me.info()));
     },
     TIMEOUT,
   );
