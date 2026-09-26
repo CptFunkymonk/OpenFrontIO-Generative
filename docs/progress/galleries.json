@@ -94,5 +94,51 @@
       "A longer-lived agent slows the nations: with 10% home no nation wins World within the hour, and on Mena the winner changes from Azerbaijan at 17.5 min to Lebanon at 36.6.",
       "The reserve moves survival, not the stall; the fix is structural (H3 tribe race, H5 strikes), as the 20-game sweep in the ledger found."
     ]
+  },
+  {
+    "id": "2026-09-26-m2-apex",
+    "date": "2026-09-26",
+    "commit": "2c9ea80",
+    "title": "baseline vs apex",
+    "varied": ["agent"],
+    "image": "2026-09-26-m2-apex.jpg",
+    "seeds": ["showcase"],
+    "maps": [
+      "World",
+      "Europe",
+      "Alps",
+      "ArchipelagoSea",
+      "Bering Strait",
+      "Mena"
+    ],
+    "games": 12,
+    "entrants": [
+      {
+        "agent": "baseline",
+        "options": {},
+        "label": ["baseline"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 4,
+        "meanProgress": 0.09,
+        "meanPeakShare": 0.072
+      },
+      {
+        "agent": "apex",
+        "options": {},
+        "label": ["apex"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 3,
+        "meanProgress": 0.127,
+        "meanPeakShare": 0.102
+      }
+    ],
+    "notes": [
+      "apex wins the opening race: at minute 3 ahead of the top nation on Europe (5.9% vs 4.3%), ArchipelagoSea (9.5% vs 7.2%) and Bering Strait (16.8% vs 11.1%), level on Mena and Alps; the baseline is behind on all six",
+      "then it stalls: land is flat from minute 3 to 15 (World 3.6-3.8%, Europe 5.9-6.6%, Mena 6.0-6.2%) while the top nation grows 4-5x by eating other nations; apex never attacks a nation",
+      "it survives much longer than the baseline (World out at 37 min vs 13, Europe 25 vs 7, Mena to the end vs 14) but is eaten in the end; on Bering Strait the other nation eats the far continent's tribes, which apex never boats to, and wins at 9.2 min",
+      "M3/M4 work: strike nations in their windows, keep boating to food across water, hold deterrence floors"
+    ]
   }
 ]
