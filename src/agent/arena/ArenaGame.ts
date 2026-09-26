@@ -84,7 +84,10 @@ export interface LeaderPoint {
 
 export interface SeatResult {
   agent: string;
+  /** The overrides the entrant was given. */
   options?: Record<string, unknown>;
+  /** Every option the agent ran with (`Agent.options`), if it reports them. */
+  resolvedOptions?: Record<string, unknown>;
   clientID: string;
   result: AgentOutcome["result"] | "error";
   eliminatedAtTick: number | null;
@@ -437,6 +440,9 @@ function seatResult(game: Game, s: Seat, error: string | null): SeatResult {
   return {
     agent: s.spec.agent,
     ...(s.spec.options ? { options: s.spec.options } : {}),
+    ...(s.host.agent.options
+      ? { resolvedOptions: { ...s.host.agent.options } }
+      : {}),
     clientID: s.clientID,
     result: s.outcome?.result ?? (error !== null ? "error" : "timeout"),
     eliminatedAtTick: s.outcome?.eliminatedAtTick ?? null,

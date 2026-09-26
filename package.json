@@ -24,6 +24,7 @@
     "perf:game": "npx tsx tests/perf/fullgame/FullGamePerf.ts",
     "arena": "tsx src/agent/arena/Arena.ts",
     "arena:gallery": "tsx src/agent/arena/Gallery.ts",
+    "arena:progress": "tsx src/agent/arena/Progress.ts",
     "replay:game": "npx tsx tests/replay/ReplayGame.ts",
     "perf:client": "npx tsx tests/perf/client/ClientUpdatePerf.ts",
     "perf:client-mem": "npx tsx tests/perf/client/ClientMemoryPerf.ts",

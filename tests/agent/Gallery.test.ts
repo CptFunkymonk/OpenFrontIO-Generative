@@ -3,11 +3,16 @@ import type {
   ArenaGameResult,
   SeatResult,
 } from "../../src/agent/arena/ArenaGame";
-import { galleryHtml, galleryRows } from "../../src/agent/arena/Gallery";
+import { gallery, galleryHtml } from "../../src/agent/arena/Gallery";
 import { GameMapType, PlayerType } from "../../src/core/game/Game";
 
 // Only the fields the gallery reads; the rest of a result is irrelevant here.
-function seat(overrides: Partial<SeatResult> = {}): SeatResult {
+const DEFAULTS = { thinkEvery: 5, expandTrigger: 0.35, expandReserve: 0.2 };
+
+function seat(
+  options?: Record<string, unknown>,
+  overrides: Partial<SeatResult> = {},
+): SeatResult {
   const point = (tick: number, share: number, alive: boolean) => ({
     tick,
     tiles: 0,
@@ -19,6 +24,8 @@ function seat(overrides: Partial<SeatResult> = {}): SeatResult {
   });
   return {
     agent: "baseline",
+    ...(options ? { options } : {}),
+    resolvedOptions: { ...DEFAULTS, ...options },
     result: "loss",
     eliminatedAtTick: 2400,
     peakShare: 0.05,
@@ -69,12 +76,9 @@ function result(
 describe("gallery", () => {
   test("shows each requested minute, then the end", () => {
     const dir = path.join("/runs", "a");
-    const [row, ...rest] = galleryRows(
-      [{ dir, result: result(dir) }],
-      dir,
-      [1, 3, 5],
-    );
-    expect(rest).toEqual([]);
+    const g = gallery([{ dir, result: result(dir) }], dir, [1, 3, 5]);
+    expect(g.rows).toHaveLength(1);
+    const [row] = g.rows;
     expect(row.map).toBe("World");
     expect(row.outcome).toBe(
       "out at 4.0 min · peak 5.0% · Finland won at 4.0 min",
@@ -100,12 +104,95 @@ describe("gallery", () => {
     ]);
   });
 
+  test("labels a lone entrant with its overrides, or as defaults", () => {
+    const dir = "/runs/a";
+    const plain = gallery([{ dir, result: result(dir) }], dir);
+    expect(plain.entrants.map((e) => e.label)).toEqual([["defaults"]]);
+    expect(plain.title).toBe("baseline: defaults");
+
+    const tuned = gallery(
+      [{ dir, result: result(dir, { seats: [seat({ expandReserve: 0.1 })] }) }],
+      dir,
+    );
+    expect(tuned.entrants[0].label).toEqual(["expandReserve 0.1"]);
+  });
+
+  test("labels a sweep with only the options that differ", () => {
+    const dir = "/runs/a";
+    const variants = [
+      undefined,
+      { expandTrigger: 0.25, expandReserve: 0.1 },
+      { expandTrigger: 0.5, expandReserve: 0.42 },
+    ];
+    const g = gallery(
+      variants.map((options, i) => ({
+        dir,
+        result: result(dir, { index: i, seats: [seat(options)] }),
+      })),
+      dir,
+    );
+    expect(g.varied).toEqual(["expandTrigger", "expandReserve"]);
+    expect(g.entrants.map((e) => e.label)).toEqual([
+      ["expandTrigger 0.35 (default)", "expandReserve 0.2 (default)"],
+      ["expandTrigger 0.25", "expandReserve 0.1"],
+      ["expandTrigger 0.5", "expandReserve 0.42"],
+    ]);
+    expect(g.title).toBe("baseline: expandTrigger, expandReserve varied");
+    expect(g.rows.map((r) => r.entrant)).toEqual([0, 1, 2]);
+  });
+
+  test("leads with the agent's name when agents differ", () => {
+    const dir = "/runs/a";
+    const g = gallery(
+      [
+        { dir, result: result(dir) },
+        {
+          dir,
+          result: result(dir, {
+            index: 1,
+            seats: [seat({ lookahead: false }, { agent: "next" })],
+          }),
+        },
+      ],
+      dir,
+    );
+    expect(g.entrants.map((e) => e.label)).toEqual([
+      ["baseline"],
+      ["next", "lookahead false"],
+    ]);
+    expect(g.title).toBe("baseline vs next");
+  });
+
+  test("totals each entrant's games", () => {
+    const dir = "/runs/a";
+    const won = seat(undefined, {
+      result: "win",
+      eliminatedAtTick: null,
+      peakShare: 0.81,
+    });
+    const g = gallery(
+      [
+        { dir, result: result(dir) },
+        { dir, result: result(dir, { index: 1, gameID: "G2", seats: [won] }) },
+      ],
+      dir,
+    );
+    expect(g.entrants).toHaveLength(1);
+    expect(g.entrants[0]).toMatchObject({
+      games: 2,
+      wins: 1,
+      eliminated: 1,
+      meanProgress: 0.531, // (0.05 / 0.8 + 1) / 2
+      meanPeakShare: 0.43,
+    });
+  });
+
   test("puts the same game from different runs side by side", () => {
     const a = path.join("/runs", "a");
     const b = path.join("/runs", "b");
-    const next = [seat({ agent: "next" })];
+    const next = [seat(undefined, { agent: "next" })];
     // Shuffled: rows follow run order, then game order within a run.
-    const rows = galleryRows(
+    const g = gallery(
       [
         {
           dir: a,
@@ -125,28 +212,28 @@ describe("gallery", () => {
       ],
       "/runs",
     );
-    expect(rows.map((r) => `${r.map} ${r.entrant}`)).toEqual([
+    expect(g.rows.map((r) => `${r.map} ${r.agent}`)).toEqual([
       "World baseline",
       "World next",
       "Mena baseline",
       "Mena next",
     ]);
-    expect(rows[1].frames[0].image).toBe("b/images/game000-t600.png");
+    expect(g.rows[1].frames[0].image).toBe("b/images/game000-t600.png");
   });
 
   test("escapes names and options in the page", () => {
     const dir = "/runs/a";
-    const options = { note: "<b>" };
     const html = galleryHtml(
-      galleryRows(
-        [{ dir, result: result(dir, { seats: [seat({ options })] }) }],
+      gallery(
+        [{ dir, result: result(dir, { seats: [seat({ note: "<b>" })] }) }],
         dir,
+        undefined,
+        "baseline & friends",
       ),
-      "baseline & friends",
     );
     expect(html).toContain("<title>baseline &amp; friends</title>");
-    expect(html).toContain("baseline{&quot;note&quot;:&quot;&lt;b&gt;&quot;}");
-    expect(html).not.toContain(JSON.stringify(options));
+    expect(html).toContain("<div>note &lt;b&gt;</div>");
+    expect(html).not.toContain("note <b>");
     expect(html).toContain('<img src="images/game000-t600.png"');
   });
 });

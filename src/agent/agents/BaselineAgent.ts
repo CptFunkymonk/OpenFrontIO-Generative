@@ -61,6 +61,10 @@ export class BaselineAgent implements Agent {
     this.o = { ...BASELINE_DEFAULTS, ...options };
   }
 
+  get options(): Readonly<Record<string, unknown>> {
+    return { ...this.o };
+  }
+
   tick(ctx: AgentContext): void {
     const { game, me } = ctx;
     if (game.inSpawnPhase()) {

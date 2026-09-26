@@ -25,6 +25,13 @@ export interface Agent {
   readonly name: string;
 
   /**
+   * Every option this agent runs with: its defaults with any overrides
+   * applied. Arena results record it, so a report can say what a changed
+   * variable was changed from.
+   */
+  readonly options?: Readonly<Record<string, unknown>>;
+
+  /**
    * Called once per game tick after it executed, starting with the first
    * spawn-phase tick. Act by calling `ctx.send`.
    *

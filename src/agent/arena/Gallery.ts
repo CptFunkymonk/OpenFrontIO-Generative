@@ -2,18 +2,21 @@
  * Contact sheets of arena games, for seeing what an agent did rather than
  * only how it scored: one row per game and seat, territory frames at fixed
  * game minutes, each captioned with the agent's land share against the
- * leading nation's.
+ * leading nation's. Rows are labelled with what sets their entrant apart:
+ * only the options that differ between the entrants shown, with the values
+ * each ran (defaults marked).
  *
- *   npm run arena -- --agent a --agent b --maps World,Mena --each-map \
- *     --play-out --image-every 1 --out arena-results/showcase
+ *   npm run arena -- --agent a --agent 'a:{"x":2}' --maps World,Mena \
+ *     --each-map --play-out --image-every 1 --out arena-results/showcase
  *   npm run arena:gallery -- arena-results/showcase [more result dirs...]
  *
- * Writes gallery.html into the first results directory (it links the PNGs in
- * each directory's images/) and, where Playwright is installed (cloud
- * sessions get it from .claude/hooks/session-start.sh), gallery.png: a
- * full-page screenshot that can be viewed or committed on its own. Rows of
- * the same game sit together, so two runs with the same seed and maps line
- * up game by game.
+ * Writes into the first results directory: gallery.html (it links the frames
+ * in each directory's images/), gallery.json (the labels and each entrant's
+ * numbers) and, where Playwright is installed (cloud sessions get it from
+ * .claude/hooks/session-start.sh), gallery.jpg, a full-page screenshot that
+ * stands on its own. Rows of the same game sit together, so runs with the
+ * same seed and maps line up game by game. `npm run arena:progress` files a
+ * gallery in the persistent store (docs/progress/).
  */
 import fs from "fs";
 import os from "os";
@@ -37,9 +40,33 @@ export interface GalleryFrame {
 export interface GalleryRow {
   gameID: string;
   map: string;
-  entrant: string;
+  agent: string;
+  /** Index into `GallerySummary.entrants`. */
+  entrant: number;
   outcome: string;
   frames: GalleryFrame[];
+}
+
+export interface GalleryEntrant {
+  agent: string;
+  /** The overrides the entrant was given. */
+  options: Record<string, unknown>;
+  /** What sets it apart from the other entrants, one item per line. */
+  label: string[];
+  games: number;
+  wins: number;
+  eliminated: number;
+  /** 1 for a win, else peak land ÷ 0.8, as in the arena summary. */
+  meanProgress: number;
+  meanPeakShare: number;
+}
+
+export interface GallerySummary {
+  title: string;
+  /** Options that differ between entrants, plus "agent" if agents do. */
+  varied: string[];
+  entrants: GalleryEntrant[];
+  rows: GalleryRow[];
 }
 
 /** A game result and the results directory it was read from. */
@@ -50,6 +77,87 @@ export interface GalleryInput {
 
 const pct = (share: number) => `${(share * 100).toFixed(1)}%`;
 const minutes = (ticks: number) => `${(ticks / TICKS_PER_MINUTE).toFixed(1)}`;
+
+/** JSON with sorted keys, so equal options compare equal. */
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "undefined";
+  }
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const o = value as Record<string, unknown>;
+  return `{${Object.keys(o)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+    .join(",")}}`;
+}
+
+const entrantKey = (s: SeatResult) => `${s.agent}${canonical(s.options ?? {})}`;
+
+const show = (v: unknown) =>
+  typeof v === "string" ? v : v === undefined ? "?" : canonical(v);
+
+/** The options a seat ran with, as far as its result records them. */
+const ranWith = (s: SeatResult): Record<string, unknown> => ({
+  ...s.resolvedOptions,
+  ...s.options,
+});
+
+/**
+ * Labels for each distinct entrant among `seats`, by `entrantKey`: the agent
+ * when agents differ, then every option whose value differs among entrants of
+ * the same agent. A lone entrant of its agent is labelled with its overrides,
+ * or "defaults".
+ */
+function entrantLabels(seats: SeatResult[]): {
+  labels: Map<string, string[]>;
+  varied: string[];
+} {
+  const entrants = new Map<string, SeatResult>();
+  for (const s of seats) {
+    if (!entrants.has(entrantKey(s))) entrants.set(entrantKey(s), s);
+  }
+  const all = [...entrants.values()];
+  const agentsVary = new Set(all.map((s) => s.agent)).size > 1;
+  const varied = new Set<string>(agentsVary ? ["agent"] : []);
+  const labels = new Map<string, string[]>();
+  for (const [key, s] of entrants) {
+    const peers = all.filter((e) => e.agent === s.agent);
+    const parts = agentsVary ? [s.agent] : [];
+    const overrides = s.options ?? {};
+    if (peers.length > 1) {
+      const keys = [...new Set(peers.flatMap((p) => Object.keys(ranWith(p))))];
+      for (const k of keys) {
+        if (new Set(peers.map((p) => canonical(ranWith(p)[k]))).size < 2) {
+          continue;
+        }
+        varied.add(k);
+        const value = ranWith(s)[k];
+        parts.push(
+          value === undefined
+            ? `${k} default`
+            : `${k} ${show(value)}${k in overrides ? "" : " (default)"}`,
+        );
+      }
+    } else {
+      for (const [k, v] of Object.entries(overrides)) {
+        parts.push(`${k} ${show(v)}`);
+      }
+    }
+    labels.set(key, parts.length > 0 ? parts : ["defaults"]);
+  }
+  return { labels, varied: [...varied] };
+}
+
+/** "baseline: expandTrigger, expandReserve varied", or one entrant's label. */
+function defaultTitle(entrants: GalleryEntrant[], varied: string[]): string {
+  const agents = [...new Set(entrants.map((e) => e.agent))];
+  if (entrants.length === 1) {
+    return `${agents[0]}: ${entrants[0].label.join(", ")}`;
+  }
+  const options = varied.filter((v) => v !== "agent");
+  const who = agents.length > 1 ? agents.join(" vs ") : agents[0];
+  return options.length > 0 ? `${who}: ${options.join(", ")} varied` : who;
+}
 
 /** The last sample at or before `tick`. */
 function at<T extends { tick: number }>(
@@ -92,15 +200,17 @@ function outcome(r: ArenaGameResult, seat: SeatResult): string {
 }
 
 /**
- * One row per game and seat, same games together, in the order the games
- * first appear. Pure: image paths come from each result's own list, made
- * relative to `galleryDir`.
+ * Rows (one per game and seat, same games together, in the order the games
+ * first appear), the entrants they belong to, and what varies between them.
+ * Pure: image paths come from each result's own list, made relative to
+ * `galleryDir`.
  */
-export function galleryRows(
+export function gallery(
   inputs: GalleryInput[],
   galleryDir: string,
   frameMinutes: number[] = DEFAULT_MINUTES,
-): GalleryRow[] {
+  title?: string,
+): GallerySummary {
   // Runs in the order given, games in run order within each; then every
   // game's rows together, in the order the games first appeared.
   const runOrder = new Map<string, number>();
@@ -123,6 +233,11 @@ export function galleryRows(
       byRun(a, b),
   );
 
+  const { labels, varied } = entrantLabels(
+    sorted.flatMap(({ result }) => result.seats),
+  );
+  const entrantIndex = new Map<string, number>();
+  const entrants: GalleryEntrant[] = [];
   const rows: GalleryRow[] = [];
   for (const { dir, result: r } of sorted) {
     const byTick = new Map<number, string>();
@@ -138,6 +253,29 @@ export function galleryRows(
       else if (name.endsWith("-final.png")) final = rel;
     }
     for (const seat of r.seats) {
+      const key = entrantKey(seat);
+      if (!entrantIndex.has(key)) {
+        entrantIndex.set(key, entrants.length);
+        entrants.push({
+          agent: seat.agent,
+          options: seat.options ?? {},
+          label: labels.get(key)!,
+          games: 0,
+          wins: 0,
+          eliminated: 0,
+          meanProgress: 0,
+          meanPeakShare: 0,
+        });
+      }
+      const entrant = entrantIndex.get(key)!;
+      const e = entrants[entrant];
+      e.games++;
+      if (seat.result === "win") e.wins++;
+      if (seat.eliminatedAtTick !== null) e.eliminated++;
+      e.meanProgress +=
+        seat.result === "win" ? 1 : Math.min(0.99, seat.peakShare / 0.8);
+      e.meanPeakShare += seat.peakShare;
+
       const frames: GalleryFrame[] = frameMinutes.map((m) => {
         const tick = m * TICKS_PER_MINUTE;
         const label = `${m} min`;
@@ -156,16 +294,26 @@ export function galleryRows(
       rows.push({
         gameID: r.gameID,
         map: r.map,
-        entrant:
-          seat.agent +
-          (seat.options !== undefined ? JSON.stringify(seat.options) : ""),
+        agent: seat.agent,
+        entrant,
         outcome: outcome(r, seat),
         frames,
       });
     }
   }
-  return rows;
+  for (const e of entrants) {
+    e.meanProgress = round(e.meanProgress / e.games);
+    e.meanPeakShare = round(e.meanPeakShare / e.games);
+  }
+  return {
+    title: title ?? defaultTitle(entrants, varied),
+    varied,
+    entrants,
+    rows,
+  };
 }
+
+const round = (v: number) => Math.round(v * 1000) / 1000;
 
 const escapeHtml = (s: string) =>
   s.replace(
@@ -176,19 +324,38 @@ const escapeHtml = (s: string) =>
       ]!,
   );
 
-export function galleryHtml(
-  rows: GalleryRow[],
-  title: string,
-  subtitle = "",
-): string {
+/** Marker colours that tell entrants apart down the page. */
+const ENTRANT_COLOURS = [
+  "#f28bd8",
+  "#7cc4ff",
+  "#ffd166",
+  "#8fdc8f",
+  "#ff9f7a",
+  "#c3a6ff",
+];
+const entrantColour = (i: number) =>
+  ENTRANT_COLOURS[i % ENTRANT_COLOURS.length];
+
+export function galleryHtml(g: GallerySummary, subtitle = ""): string {
   const legend = TERRITORY_LEGEND.map(
-    ([name, [r, g, b]]) =>
-      `<span class="swatch" style="background:rgb(${r},${g},${b})"></span>${escapeHtml(name)}`,
+    ([name, [r, gr, b]]) =>
+      `<span class="swatch" style="background:rgb(${r},${gr},${b})"></span>${escapeHtml(name)}`,
   ).join("");
-  const header = rows[0]?.frames.map((f) => f.label) ?? [];
-  const body = rows
+  const key = g.entrants
+    .map(
+      (e, i) =>
+        `<div class="key" style="border-color:${entrantColour(i)}">` +
+        `<div class="agent">${escapeHtml(e.agent)}</div>` +
+        `<div class="label">${e.label.map((l) => `<div>${escapeHtml(l)}</div>`).join("")}</div>` +
+        `<div class="stats">${e.wins}/${e.games} wins · progress ${e.meanProgress.toFixed(3)} · ` +
+        `peak ${pct(e.meanPeakShare)} · out in ${e.eliminated}/${e.games}</div></div>`,
+    )
+    .join("");
+  const header = g.rows[0]?.frames.map((f) => f.label) ?? [];
+  const body = g.rows
     .map((row, i) => {
-      const first = i === 0 || rows[i - 1].gameID !== row.gameID;
+      const first = i === 0 || g.rows[i - 1].gameID !== row.gameID;
+      const e = g.entrants[row.entrant];
       const cells = row.frames
         .map(
           (f) =>
@@ -200,44 +367,54 @@ export function galleryHtml(
         )
         .join("");
       return (
-        `<tr class="${first ? "game" : ""}"><th class="head">` +
+        `<tr class="${first ? "game" : ""}"><th class="head" style="border-left-color:${entrantColour(row.entrant)}">` +
         `<div class="map">${first ? escapeHtml(row.map) : ""}</div>` +
-        `<div class="entrant">${escapeHtml(row.entrant)}</div>` +
+        `<div class="agent">${escapeHtml(row.agent)}</div>` +
+        `<div class="label">${e.label.map((l) => `<div>${escapeHtml(l)}</div>`).join("")}</div>` +
         `<div class="outcome">${escapeHtml(row.outcome)}</div></th>` +
         `${cells}</tr>`
       );
     })
     .join("\n");
+  const varied =
+    g.entrants.length > 1 && g.varied.length > 0
+      ? `varied: ${g.varied.join(", ")} · `
+      : "";
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>${escapeHtml(title)}</title>
+<title>${escapeHtml(g.title)}</title>
 <style>
   body { background: #15171b; color: #e4e4e4; margin: 16px;
          font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; }
   h1 { font-size: 17px; margin: 0 0 2px; }
   .sub { color: #9a9a9a; margin-bottom: 8px; }
-  .legend { color: #bdbdbd; margin-bottom: 12px; }
+  .legend { color: #bdbdbd; margin-bottom: 10px; }
   .swatch { display: inline-block; width: 11px; height: 11px;
             margin: 0 5px 0 14px; vertical-align: -1px; }
   .swatch:first-child { margin-left: 0; }
+  .keys { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+  .key { border-left: 4px solid; padding: 2px 10px 2px 8px; background: #1c1f24; }
   table { border-collapse: collapse; }
   th, td { padding: 4px 5px; vertical-align: top; text-align: left; }
   thead th { color: #9a9a9a; font-weight: 500; }
   tr.game > * { border-top: 1px solid #33363c; padding-top: 10px; }
-  th.head { width: 170px; font-weight: 400; }
+  th.head { width: 200px; font-weight: 400; border-left: 4px solid transparent; }
   .map { font-weight: 600; font-size: 14px; }
-  .entrant { color: #f28bd8; word-break: break-all; }
-  .outcome { color: #bdbdbd; margin-top: 2px; }
+  .agent { color: #f28bd8; }
+  .label { color: #ffffff; font-weight: 600; font-size: 12.5px; }
+  .stats { color: #bdbdbd; font-size: 12px; margin-top: 2px; }
+  .outcome { color: #bdbdbd; margin-top: 3px; }
   .frame img, .frame .none { display: block; width: 240px; height: 150px;
             object-fit: contain; background: #0b0d10; }
   .cap { color: #b8b8b8; font-size: 11.5px; margin-top: 3px; }
 </style>
 </head>
 <body>
-<h1>${escapeHtml(title)}</h1>
-<div class="sub">${escapeHtml(subtitle)}</div>
+<h1>${escapeHtml(g.title)}</h1>
+<div class="sub">${escapeHtml(varied + subtitle)}</div>
+<div class="keys">${key}</div>
 <div class="legend">${legend} · other colours: nations</div>
 <table>
 <thead><tr><th></th>${header.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
@@ -254,8 +431,14 @@ ${body}
 // imported by name at runtime and only where it exists.
 const PLAYWRIGHT = "playwright";
 
-/** Full-page PNG of a local HTML file; false if Playwright is unavailable. */
-async function screenshot(htmlFile: string, pngFile: string): Promise<boolean> {
+/**
+ * Full-page screenshot of a local HTML file, as PNG or JPEG by the output's
+ * extension; false if Playwright is unavailable.
+ */
+async function screenshot(
+  htmlFile: string,
+  imageFile: string,
+): Promise<boolean> {
   const pw = await import(PLAYWRIGHT).catch(() => null);
   if (pw === null) return false;
   // Same system-library fallback as .claude/skills/run-openfront/driver.mjs,
@@ -276,7 +459,13 @@ async function screenshot(htmlFile: string, pngFile: string): Promise<boolean> {
       viewport: { width: 1600, height: 900 },
     });
     await page.goto(pathToFileURL(htmlFile).href, { waitUntil: "load" });
-    await page.screenshot({ path: pngFile, fullPage: true });
+    const png = imageFile.endsWith(".png");
+    // JPEG at 80 is about half the PNG's size and reads the same.
+    await page.screenshot({
+      path: imageFile,
+      fullPage: true,
+      ...(png ? {} : { type: "jpeg", quality: 80 }),
+    });
   } finally {
     await browser.close();
   }
@@ -316,9 +505,11 @@ const HELP = `Usage: npm run arena:gallery -- DIR [DIR...] [options]
 
   DIR                 arena results directory (run with --image-every 1)
   --minutes a,b,...   game minutes to show (default ${DEFAULT_MINUTES.join(",")}), plus the end
-  --out FILE          HTML to write (default: DIR/gallery.html; PNG beside it)
-  --title T           page title
-  --no-png            skip the screenshot
+  --out FILE          HTML to write (default: DIR/gallery.html; the JSON and
+                      image go beside it)
+  --title T           title (default: the agent and what was varied)
+  --png               screenshot as PNG instead of JPEG
+  --no-image          skip the screenshot
 `;
 
 async function main(): Promise<void> {
@@ -326,8 +517,8 @@ async function main(): Promise<void> {
   const dirs: string[] = [];
   let frameMinutes = DEFAULT_MINUTES;
   let out: string | null = null;
-  let title: string | null = null;
-  let png = true;
+  let title: string | undefined;
+  let image: "jpg" | "png" | null = "jpg";
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = () => {
@@ -347,8 +538,10 @@ async function main(): Promise<void> {
       out = path.resolve(next());
     } else if (arg === "--title") {
       title = next();
-    } else if (arg === "--no-png") {
-      png = false;
+    } else if (arg === "--png") {
+      image = "png";
+    } else if (arg === "--no-image") {
+      image = null;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown argument "${arg}" (see --help)`);
     } else {
@@ -358,20 +551,23 @@ async function main(): Promise<void> {
   if (dirs.length === 0) throw new Error(`no results directory\n\n${HELP}`);
 
   const htmlFile = out ?? path.join(dirs[0], "gallery.html");
-  const rows = galleryRows(
+  const base = htmlFile.replace(/\.html?$/, "");
+  const g = gallery(
     dirs.flatMap(readResults),
     path.dirname(htmlFile),
     frameMinutes,
+    title,
   );
+  fs.writeFileSync(htmlFile, galleryHtml(g, describeRuns(dirs)));
   fs.writeFileSync(
-    htmlFile,
-    galleryHtml(rows, title ?? "Arena gallery", describeRuns(dirs)),
+    `${base}.json`,
+    JSON.stringify({ ...g, runs: dirs }, null, 1),
   );
-  console.log(`${rows.length} rows → ${htmlFile}`);
-  if (!png) return;
-  const pngFile = htmlFile.replace(/\.html?$/, "") + ".png";
-  if (await screenshot(htmlFile, pngFile)) {
-    console.log(`screenshot → ${pngFile}`);
+  console.log(`${g.title}: ${g.rows.length} rows → ${htmlFile}`);
+  if (image === null) return;
+  const imageFile = `${base}.${image}`;
+  if (await screenshot(htmlFile, imageFile)) {
+    console.log(`screenshot → ${imageFile}`);
   } else {
     console.log("Playwright not installed: no screenshot (open the HTML)");
   }
