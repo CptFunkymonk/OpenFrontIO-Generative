@@ -328,6 +328,43 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (nations take such pockets during the voyage). */
   boatPocket: boolean;
 
+  // ── Package A2 NAVAL MIDGAME (H9; spec §3.7, §5.4; chapter 13 §2.12,
+  //    §5.11; NavalController, RaceField.boatTargets). Off by default. ───
+  /** Boats keep growing across water after the local food is gone:
+   *  targets past boatMaxVoyage (up to boatMidMaxVoyage) whose landmass is
+   *  projected to still hold boatMidMinFood free plus tribe tiles at the
+   *  landing and whose landing no nation's land can reach first; a
+   *  "surplus" trigger when the Purse holds boatMidSurplus of the cap
+   *  after the land allocator; far tribes sized for their regrowth during
+   *  the voyage; in stall mode the tribe price limit times
+   *  boatMidStallPrice (the troops are idle at the cap). Needs
+   *  boatVoyageScore. */
+  boatsMidgame: boolean;
+  /** Longest estimated voyage, tiles (1 per tick), for a far target. */
+  boatMidMaxVoyage: number;
+  /** Smallest projected free plus tribe tiles of the landing's landmass
+   *  when a far boat lands. */
+  boatMidMinFood: number;
+  /** Ticks of OwnerGrid history the landmass food trend is read over. */
+  boatMidRateTicks: number;
+  /** Multiple of the measured food loss per tick in the projection
+   *  (nations eat faster as they grow). */
+  boatMidRateMargin: number;
+  /** Tiles per tick a nation's front is assumed to advance: a far
+   *  landing needs no nation's land within boatMidFront·(voyage + 50 +
+   *  boatMidHold) tiles (measured: a tribe d tiles by land from a nation
+   *  survives T ticks in 75-95% of cases once d >= T/3). */
+  boatMidFront: number;
+  /** Ticks a far landing must stay out of every nation's reach after it
+   *  lands (its beachhead feeds the land allocator meanwhile). */
+  boatMidHold: number;
+  /** "surplus" trigger: boat troops available after the land allocator
+   *  at or above this share of the cap. 0 turns it off. */
+  boatMidSurplus: number;
+  /** In stall mode a boat's tribe may cost up to this multiple of the
+   *  tribeMaxPrice limit per tile. */
+  boatMidStallPrice: number;
+
   // ── Diplomacy (§3.4) ─────────────────────────────────────────────────
   /** Alliance requests to the web (allySet). E2. */
   web: boolean;
@@ -355,6 +392,81 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Alliance oracle: fork and request every "maybe" nation (§5.1.7). M3,
    *  off. E17. */
   allyOracle: boolean;
+
+  // ── Package B2: diplomacy through the midgame (DiplomacyController;
+  //    spec §5.1 item 1, §5.2 item 6; chapter 13 §2.9, §5.9). Every
+  //    option here is off (or inert) by default. ────────────────────────
+  /** The web through the midgame (spec §5.1 item 1): from webFrom on, the
+   *  plan ranks every nation that can reach us (by land, or by boat with
+   *  webBoatReach) by its midgame danger dmid and keeps the top slots
+   *  (A_max with webSlotsMax, else A_ext) allied: requests to the unallied
+   *  ones, extensions for the allied ones, a fresh request at the lapse of
+   *  a kept alliance whose extension failed (webRenew), counter-accepts
+   *  that leave room for them; every other ally lapses (never a break).
+   *  Off: the spec web (allySet by §3.4.2 danger, extensions of allySet
+   *  allies only). */
+  webMidgame: boolean;
+  /** Tick the midgame web takes over from the spec web (the opening's
+   *  requests are the spec's). */
+  webFrom: number;
+  /** dmid(N) = max(T_N + out_N, trigger_N·M_N^+) / (safe·H_ref), H_ref =
+   *  max(homeX·cap^+, min(home, cap)): its stack now or at its trigger on
+   *  its projected land, against our deterrence line at the home we hold.
+   *  Nations below this are not kept (they lapse as food). */
+  webDangerMin: number;
+  /** The midgame web may fill A_max (the recall slot too): extensions then
+   *  fail on hasTooManyAlliances and webRenew re-requests at each lapse.
+   *  Off: A_ext, so extensions can pass (A_max where A_ext is 0: small
+   *  maps never extend anyway). */
+  webSlotsMax: boolean;
+  /** Ask a kept ally's extension once this many ticks or fewer are left
+   *  (instead of extendLead). The request stays asked and the nation
+   *  re-decides it at each of its decisions, agreeing at the first where it
+   *  would accept us, and the term restarts from there [PIN NationAlliance
+   *  "allianceExtension works any time"; chapter 13 §2.9 "ask early"]: 1,800
+   *  gives it about 45 decisions instead of about 7. */
+  webExtendLead: number;
+  /** Reach includes nations on an ocean shore while we have one (boats
+   *  land anywhere; the beachhead then attacks by land), their dmid scaled
+   *  by webBoatDiscount. */
+  webBoatReach: boolean;
+  /** dmid factor of a nation reached by boat only (a boat carries T/5; the
+   *  beachhead's land attacks then send the full cap: 14 of the 67 nations
+   *  that attacked apex in quick@20 opened with a boat). */
+  webBoatDiscount: number;
+  /** Re-request a kept ally at once when its alliance lapses: a fresh
+   *  request is decided afresh without us counted as its friend, so the
+   *  extension trap (§2.9) does not apply to it. */
+  webRenew: boolean;
+  /** Smallest forecast for a renew request. */
+  webRenewMinP: number;
+  /** Only while a strike feature is on (stallStrike or strikeWindows): in
+   *  stall mode with no unallied bordering nation left to eat, the weakest
+   *  bordering kept ally is dropped from the keep set so it lapses and
+   *  becomes a target (never a break). Inert otherwise. */
+  webLapseTarget: boolean;
+  /** Buy the extension of a dangerous kept ally with its friendship: when
+   *  its extension is still refused webFriendLead ticks before expiry
+   *  (the trap, or not similarly strong), donate ceil(M_N/5) + 1 troops
+   *  (the top of the +50 draw at Impossible, DonateTroopExecution.ts) timed
+   *  to land in the turn before one of its decisions, so it judges the
+   *  pending extension Friendly (relation >= 50: accepted 67% of the time)
+   *  before decay takes the value under 50 again. At most one per
+   *  donateCooldown(); only from home at webFriendHome of the cap or more,
+   *  and never below floor(strike). Needs webMidgame. */
+  webFriend: boolean;
+  /** Ticks before expiry from which friendship is bought. */
+  webFriendLead: number;
+  /** Smallest dmid of an ally worth the troops. */
+  webFriendMinDanger: number;
+  /** Donate only while the extension forecast is below this. */
+  webFriendMinP: number;
+  /** Smallest home, as a share of the cap, for a donation. */
+  webFriendHome: number;
+  /** Diagnostic log lines only (`dip web`): the unallied nations that
+   *  matter, with their forecast. Decides nothing (it may refresh
+   *  NationModel entries lazily, so it is off for A/B runs). */
+  webDiag: boolean;
 
   // ── Defense (§3.3) ───────────────────────────────────────────────────
   /** Recall an incoming nation attack by alliance (§3.3.2). E8. */
@@ -389,6 +501,77 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Defense search over {absorb, recall, cancel TN, counter} (§5.1.7). M3,
    *  off. E18. */
   defenseSearch: boolean;
+
+  // ── Package B1: survival (HomeTarget, DefenseController,
+  //    lib/Deterrence.ts; spec §5.1 items 2-4, chapter 13 §2.6-2.9 and
+  //    §5.7-5.9). Every behaviour here is off by default. ─────────────────
+  /** Deterrence floor: raise H (the tribe, boat and strike floor, and the
+   *  TN floor through tnKeep) to the land line (T_N(d) + 1)/1.1·detMargin
+   *  of every bordering unallied nation that could land-attack us at the
+   *  floor we would keep without it and whose strategy list would pick us
+   *  (NationModel.canLandAttackUs, wouldTargetUs at its next decision d),
+   *  and to detBetrayShare·T_A(d) for every bordering ally at or above its
+   *  reserve. Lines above detMaxShare of the cap are dropped (we could not
+   *  hold them without freezing). */
+  deterrence: boolean;
+  /** Margin on the land line (T_N(d) + 1)/1.1. */
+  detMargin: number;
+  /** A line above this share of our cap is dropped (or capped, below). */
+  detMaxShare: number;
+  /** Hold a line above detMaxShare·cap at detMaxShare·cap instead of
+   *  dropping it: dropping sets free for spending the home that the
+   *  strongest neighbour is about to hit (arena quick Onion: H jumped
+   *  between 0.3 and 0.62 of the cap as Outer Enclave's line crossed 0.8). */
+  detCapLines: boolean;
+  /** Betrayal guard: H ≥ this·T_A for bordering allies at or above their
+   *  reserve (NationAllianceBehavior.ts:404-491 betrays under 1/3); 0 turns
+   *  the guard off. */
+  detBetrayShare: number;
+  /** Keep a nation's land line only if wouldTargetUs names us at the probe
+   *  home (a nation whose list picks another player first is no threat
+   *  that decision). */
+  detTargetCheck: boolean;
+  /** With detTargetCheck, a nation with at most this many affordable tribes
+   *  keeps its line anyway (it runs out of tribes before home regrows). */
+  detTribeSlack: number;
+  /** Counter an invasion when the counter wins: send an unallied nation
+   *  ceil(S·detCounterSize) + 1 troops, S the total of its attacks on us
+   *  (retreating and landed boats included), which deletes them all at our
+   *  attack's init (AttackExecution.ts:157-170) and keeps our tiles, when
+   *  home minus that stays at or above max(detCounterKeep·cap, H_vw, every
+   *  other nation's deterrence line). Never while a recall to it is
+   *  pending. */
+  detCounter: boolean;
+  /** Counter size as a multiple of their total stack; below 1 the counter
+   *  is deleted after cancelling that much and skips the −100 relation
+   *  hit. */
+  detCounterSize: number;
+  /** Home kept after a counter, as a share of the cap. */
+  detCounterKeep: number;
+  /** Stacks under this share of our home are absorbed, not countered. */
+  detCounterMin: number;
+  /** Counter only when it is decisive: with home minus the counter, the
+   *  nation cannot land-attack us at its next decision
+   *  (NationModel.canLandAttackUs on its troops after its send). A send
+   *  capped by troopSendCap never passes this (its troops left are about
+   *  0.9·H); one sized T − reserve·M leaves it at its reserve and does. */
+  detCounterDecisive: boolean;
+  /** Defense posts (×5 attacker losses, ×3 time within 30 tiles,
+   *  Config.ts:377-387) on the front with a bordering unallied nation that
+   *  our home now cannot deter and whose list would pick us
+   *  (detPostProactive), or that attacks us by land (detPostReactive): one
+   *  per 20 ticks while gold pays for it. */
+  detPosts: boolean;
+  /** Build posts before an attack, against an undeterred threat. */
+  detPostProactive: boolean;
+  /** Build posts against a running land attack (it overruns a post before
+   *  its 50 ticks of construction end, and captures it: arena smoke Onion
+   *  lost 20 posts so). */
+  detPostReactive: boolean;
+  /** Most defense posts ordered in a game. */
+  detPostsMax: number;
+  /** Tiles a post goes behind the front. */
+  detPostDepth: number;
 
   // ── Economy (§3.8) ───────────────────────────────────────────────────
   /** Cities from loot. E5. */
@@ -441,6 +624,50 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   steerGoldShare: number;
   /** Hydrogen bomb plus W1 on the largest army (§5.2.7). M4, off. E15. */
   bombs: boolean;
+
+  // ── Package A1 STRIKES: window strikes on bordering nations (§5.2,
+  //    StrikeController.windowStrikes, lib/StrikeWindows.ts) ───────────
+  /** Window strikes: launch at a bordering unallied nation one tick after
+   *  its decision when a window below is open and the purse pays for the
+   *  conquest stack; top it up before each of its decisions. Off. */
+  strikes: boolean;
+  /** W1: below reserve·cap at its next decision (never answers). */
+  strikeW1: boolean;
+  /** W2: its next decision is locked (free land, structure tribe). */
+  strikeW2: boolean;
+  /** W3: below trigger·cap there (answers about 1 decision in 10). */
+  strikeW3: boolean;
+  /** W5 vulture: hit hard by others (also a score bonus). */
+  strikeW5: boolean;
+  /** W6 decoy: another attack on it is larger than ours will be. */
+  strikeW6: boolean;
+  /** Overwhelm: our stack beats any answer, T − reserve·M. */
+  strikeOverwhelm: boolean;
+  /** Troop ratio (defender / stack) the stack is sized for after the
+   *  answer: 0.6 is the cheapest per tile [PIN PlayerAttackSpeed]. */
+  strikeRatio: number;
+  /** Margin on that stack (regrowth, drift until the first top-up). */
+  strikeMargin: number;
+  /** Worst ratio after the answer that a purse-limited stack may start at
+   *  (1: never fewer troops than it keeps). */
+  strikeMaxRatio: number;
+  /** Most strikes running at once. */
+  strikeMaxActive: number;
+  /** Launch only in stall mode (idle troops at the cap); top-ups always. */
+  strikeStallOnly: boolean;
+  /** Keep home above the land deterrence line of every other unallied
+   *  bordering nation that can attack (troopsAt/1.1) and 0.34× each
+   *  bordering ally's troops (the betrayal line). */
+  strikeDeterrence: boolean;
+  /** Never strike a nation with a finished silo and the gold for an atom
+   *  bomb while we own a city (it nukes the largest attacker first). */
+  strikeNukeVeto: boolean;
+  /** Smallest expected value per troop spent: tiles (all of them and its
+   *  gold on a kill, where only the tiles' losses and the answer are
+   *  spent) per troop. */
+  strikeMinValue: number;
+  /** Gold worth one tile in that value. */
+  strikeGoldPerTile: number;
 
   // ── Endgame (§5.3) ───────────────────────────────────────────────────
   /** The 38% MIRV gate (§5.3.2). M5, off. E16. */
@@ -570,6 +797,17 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   boatLandmassHold: 100,
   boatPocket: true,
 
+  // Package A2 NAVAL MIDGAME.
+  boatsMidgame: false,
+  boatMidMaxVoyage: 2400,
+  boatMidMinFood: 3000,
+  boatMidRateTicks: 300,
+  boatMidRateMargin: 2,
+  boatMidFront: 0.33,
+  boatMidHold: 300,
+  boatMidSurplus: 0.15,
+  boatMidStallPrice: 3,
+
   web: true,
   webRank: "danger",
   foodList: true,
@@ -583,6 +821,24 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   extendLead: 300,
   allyOracle: false,
 
+  // Package B2 (diplomacy through the midgame).
+  webMidgame: false,
+  webFrom: 1800,
+  webDangerMin: 0.5,
+  webSlotsMax: false,
+  webExtendLead: 1800,
+  webBoatReach: true,
+  webBoatDiscount: 0.75,
+  webRenew: true,
+  webRenewMinP: 0.25,
+  webLapseTarget: true,
+  webFriend: false,
+  webFriendLead: 600,
+  webFriendMinDanger: 1,
+  webFriendMinP: 0.5,
+  webFriendHome: 0.8,
+  webDiag: false,
+
   recall: true,
   recallMinP: 0.8,
   embargoStop: true,
@@ -593,6 +849,25 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   counterMargin: 0.8,
   softFloor: false,
   defenseSearch: false,
+
+  // Package B1 (survival: deterrence floor, betrayal guard, counters).
+  deterrence: false,
+  detMargin: 1.05,
+  detMaxShare: 0.8,
+  detCapLines: false,
+  detBetrayShare: 0.34,
+  detTargetCheck: true,
+  detTribeSlack: 1,
+  detCounter: false,
+  detCounterSize: 1.02,
+  detCounterKeep: 0.3,
+  detCounterMin: 0.02,
+  detCounterDecisive: false,
+  detPosts: false,
+  detPostProactive: true,
+  detPostReactive: false,
+  detPostsMax: 8,
+  detPostDepth: 15,
 
   cities: true,
   cityUpgradeFirst: true,
@@ -610,6 +885,24 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   steering: false,
   steerGoldShare: 0.3,
   bombs: false,
+
+  // Package A1 STRIKES.
+  strikes: false,
+  strikeW1: true,
+  strikeW2: true,
+  strikeW3: true,
+  strikeW5: true,
+  strikeW6: true,
+  strikeOverwhelm: true,
+  strikeRatio: 0.6,
+  strikeMargin: 1.1,
+  strikeMaxRatio: 1,
+  strikeMaxActive: 2,
+  strikeStallOnly: true,
+  strikeDeterrence: true,
+  strikeNukeVeto: true,
+  strikeMinValue: 1 / 60,
+  strikeGoldPerTile: 200,
 
   mirvGate: false,
 

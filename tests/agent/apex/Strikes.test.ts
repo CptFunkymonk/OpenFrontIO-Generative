@@ -1,0 +1,428 @@
+import { AgentIntent } from "../../../src/agent/Agent";
+import {
+  BETRAY_SHARE,
+  deterrenceFloor,
+  StrikeController,
+  strikeMemory,
+  TOPUP_LEAD,
+} from "../../../src/agent/agents/apex/controllers/StrikeController";
+import { homeFloors } from "../../../src/agent/agents/apex/HomeTarget";
+import {
+  ApexOptions,
+  parseApexOptions,
+} from "../../../src/agent/agents/apex/options";
+import { homeAvailable, View } from "../../../src/agent/agents/apex/policy";
+import { ApexState, createState } from "../../../src/agent/agents/apex/state";
+import { Ledger } from "../../../src/agent/lib/Ledger";
+import { createModels } from "../../../src/agent/lib/Models";
+import { NationModel } from "../../../src/agent/lib/NationModel";
+import { createPurse, Scheduler } from "../../../src/agent/lib/Scheduler";
+import { scanWorld, WorldModel } from "../../../src/agent/lib/WorldModel";
+import { AttackExecution } from "../../../src/core/execution/AttackExecution";
+import { NationExecution } from "../../../src/core/execution/NationExecution";
+import { PlayerExecution } from "../../../src/core/execution/PlayerExecution";
+import {
+  Cell,
+  Execution,
+  Nation,
+  Player,
+  PlayerInfo,
+  PlayerType,
+} from "../../../src/core/game/Game";
+import { Field, field, GAME_ID, own, rect, submit } from "./Field";
+
+// Window strikes (spec §5.2, package A1) against a real Impossible nation:
+// a plains field (tests/agent/apex/Field.ts, the real Config) with us on
+// the left 100 columns and one nation, run by its real NationExecution
+// seeded from the field's game ID, on the right 20; both regrow
+// (PlayerExecution). The StrikeController runs over a View built as the
+// policy builds it, with stall mode forced on; what it offers goes through
+// the agent's intent path. Tests set troops directly; agents never may.
+//
+// Pinned here: a W1 strike launched at d + 1 draws no answer through the
+// nation's next two decisions; an overwhelming strike above its trigger is
+// answered at a decision, but the answer is cancelled whole by our stack
+// (nothing lands on us) and our attack goes on; allies, allySet nations and
+// non-stall ticks are never struck; the top-up goes TOPUP_LEAD ticks before
+// a decision.
+
+const W = 120;
+const H = 60;
+const US = 100;
+const NATION_ID = "NATION01";
+
+interface Scene {
+  f: Field;
+  nation: Player;
+  rate: number;
+  phase: number;
+  /** Ticks at which the nation created an attack on us. */
+  answers: number[];
+}
+
+/** `gap`: a lake column at x = US between us and the nation, open only
+ *  in rows [28, 28 + gap), so the front is `gap` tiles wide (a lake, not
+ *  ocean: no boats). */
+async function scene(gap: number | null = null): Promise<Scene> {
+  const f = await field({
+    width: W,
+    height: H,
+    terrain: (x, y) =>
+      gap !== null && x === US && (y < 28 || y >= 28 + gap) ? "lake" : "plains",
+  });
+  const { game, me } = f;
+  own(me, rect(game, 0, 0, US, H));
+  const nationObj = new Nation(
+    new Cell(110, 30),
+    new PlayerInfo("nation", PlayerType.Nation, null, NATION_ID),
+  );
+  const nation = game.addPlayer(nationObj.playerInfo);
+  own(
+    nation,
+    rect(game, US, 0, W, H).filter((t) => game.isLand(t)),
+  );
+  game.addExecution(new PlayerExecution(me));
+  game.addExecution(new PlayerExecution(nation));
+  const exec = new NationExecution(GAME_ID, nationObj);
+  game.addExecution(exec);
+  const n = exec as unknown as { attackRate: number; attackTick: number };
+  const answers: number[] = [];
+  const add = game.addExecution.bind(game);
+  game.addExecution = (...execs: Execution[]) => {
+    for (const e of execs) {
+      if (!(e instanceof AttackExecution)) continue;
+      const owner = (e as unknown as { _owner: Player })._owner;
+      if (owner === nation && e.targetID() === me.id()) {
+        answers.push(game.ticks());
+      }
+    }
+    add(...execs);
+  };
+  // Past the nations' spawn immunity and the nation's opening send.
+  for (let i = 0; i < 70; i++) game.executeNextTick();
+  return { f, nation, rate: n.attackRate, phase: n.attackTick, answers };
+}
+
+const STRIKES: ApexOptions = parseApexOptions({ strikes: true });
+/** The small field holds a nation at 0.8 of its cap at a density of about
+ *  200 troops a tile (real nations: 20-40), so tiles are dear there: the
+ *  value rule is off where the answer's mechanics are the point. */
+const ANY_VALUE: ApexOptions = parseApexOptions({
+  strikes: true,
+  strikeMinValue: 0,
+});
+
+interface Run {
+  s: ApexState;
+  nm: NationModel;
+  ledger: Ledger;
+  wm: WorldModel | null;
+  logs: string[];
+}
+
+function run(sc: Scene, s: ApexState): Run {
+  const { game, me } = sc.f;
+  return {
+    s,
+    nm: new NationModel(game, me, GAME_ID, createModels(game)),
+    ledger: new Ledger(),
+    wm: null,
+    logs: [],
+  };
+}
+
+/** One onTick of the StrikeController over a View as the policy builds it;
+ *  returns what it offered (flushed as the policy flushes). */
+function strikeTick(sc: Scene, o: ApexOptions, r: Run): AgentIntent[] {
+  const { game, me } = sc.f;
+  const tick = game.ticks();
+  const models = createModels(game);
+  r.ledger.observe(me, tick, game);
+  r.nm.observe(tick);
+  r.wm = scanWorld(game, me, r.wm);
+  const floors = homeFloors({ tick, o, me, models, nm: r.nm }, r.s);
+  const purse = createPurse(homeAvailable(me, floors), floors);
+  const scheduler = new Scheduler(o, game.config().msPerTick());
+  scheduler.begin(tick, { perSecond: 10, perMinute: 150 }, purse);
+  const v: View = {
+    game,
+    me,
+    tick,
+    gameID: GAME_ID,
+    o,
+    models,
+    wm: r.wm,
+    nm: r.nm,
+    ledger: r.ledger,
+    race: null,
+    owners: null,
+    scheduler,
+    purse,
+    lookahead: null,
+    forRollout: null,
+    live: null,
+    log: (line) => r.logs.push(line),
+  };
+  new StrikeController().onTick(v, r.s);
+  const sent: AgentIntent[] = [];
+  scheduler.flush(
+    (i) => {
+      sent.push(i);
+      return "ok";
+    },
+    r.ledger,
+    tick,
+  );
+  for (const x of sent) submit(sc.f, x);
+  return sent;
+}
+
+/** Stall mode on since long ago. */
+function stalled(): ApexState {
+  const s = createState();
+  s.stall.since = 0;
+  return s;
+}
+
+const incomingFrom = (me: Player, n: Player) =>
+  me.incomingAttacks().filter((a) => a.attacker() === n);
+const ourAttackOn = (me: Player, n: Player) =>
+  me.outgoingAttacks().filter((a) => a.target() === n);
+
+/** Runs strikeTick every tick, holding both sides' troops at these shares
+ *  of their caps until the first launch; returns the launch tick and
+ *  intent (or null after `ticks`). */
+function untilLaunch(
+  sc: Scene,
+  r: Run,
+  o: ApexOptions,
+  nationShare: number,
+  ticks: number,
+): { tick: number; intent: AgentIntent } | null {
+  const { game, me, config } = sc.f;
+  for (let i = 0; i < ticks; i++) {
+    sc.nation.setTroops(Math.round(nationShare * config.maxTroops(sc.nation)));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const tick = game.ticks();
+    const sent = strikeTick(sc, o, r);
+    if (sent.length > 0) {
+      game.executeNextTick();
+      return { tick, intent: sent[0] };
+    }
+    game.executeNextTick();
+  }
+  return null;
+}
+
+describe("apex window strikes (§5.2, package A1)", () => {
+  test("W1: launched one tick after the nation's decision with the conquest stack; no answer through its next two decisions", async () => {
+    const sc = await scene();
+    const { game, me, config } = sc.f;
+    const r = run(sc, stalled());
+    expect(r.nm.params(NATION_ID)).toMatchObject({
+      rate: sc.rate,
+      phase: sc.phase,
+    });
+    const M = config.maxTroops(sc.nation);
+    const reserve = r.nm.params(NATION_ID).reserve;
+    const launch = untilLaunch(sc, r, STRIKES, 0.08, 3 * sc.rate);
+    expect(launch).not.toBeNull();
+    const t0 = launch!.tick;
+    // One tick after its decision.
+    expect((t0 - 1) % sc.rate).toBe(sc.phase);
+    const line = r.logs.find((l) => l.includes("wstrike"))!;
+    expect(line).toContain(" W1 ");
+    // The stack: T1/0.6·1.1 at least (the kill cost may ask more), and
+    // well under what the purse holds.
+    const T = 0.08 * M;
+    const troops = (launch!.intent as { troops: number }).troops;
+    expect(troops).toBeGreaterThanOrEqual(Math.floor((T / 0.6) * 1.1));
+    expect(troops).toBeLessThan(0.5 * config.maxTroops(me));
+    expect(strikeMemory(r.s).stats.launches).toBe(1);
+    expect(ourAttackOn(me, sc.nation).length).toBe(1);
+    const tilesAtLaunch = sc.nation.numTilesOwned();
+    // Its next two decisions see our attack and answer neither time (its
+    // troops stay below its reserve: our attack only lowers them).
+    let decisions = 0;
+    while (game.ticks() <= t0 - 1 + 2 * sc.rate) {
+      if (game.ticks() % sc.rate === sc.phase) {
+        decisions++;
+        expect(sc.nation.troops()).toBeLessThan(reserve * M);
+      }
+      strikeTick(sc, STRIKES, r);
+      game.executeNextTick();
+      expect(incomingFrom(me, sc.nation)).toEqual([]);
+    }
+    expect(decisions).toBe(2);
+    expect(sc.answers).toEqual([]);
+    expect(sc.nation.numTilesOwned()).toBeLessThan(tilesAtLaunch);
+  });
+
+  test("overwhelm: above its trigger the nation answers, but our stack cancels the answer whole and goes on", async () => {
+    // A 4-tile front, so the nation lives to its decisions (on the open
+    // field the stack annexes it within its rate − 1 unseen ticks).
+    const sc = await scene(4);
+    const { game, me, config } = sc.f;
+    const r = run(sc, stalled());
+    const M = config.maxTroops(sc.nation);
+    const p = r.nm.params(NATION_ID);
+    // At the default value rule it is not worth it.
+    const dear = run(sc, stalled());
+    expect(untilLaunch(sc, dear, STRIKES, 0.8, sc.rate + 2)).toBeNull();
+    const launch = untilLaunch(sc, r, ANY_VALUE, 0.8, 3 * sc.rate);
+    expect(launch).not.toBeNull();
+    const t0 = launch!.tick;
+    const line = r.logs.find((l) => l.includes("wstrike"))!;
+    expect(line).toContain(" overwhelm ");
+    const S = (launch!.intent as { troops: number }).troops;
+    // At least its troops (ratio ≤ 1 after the answer), more than the
+    // answer bound T − reserve·M.
+    expect(S).toBeGreaterThan(0.8 * M);
+    // Up to three decisions (a random boat pre-empts 1 in 10). Its troops
+    // are held at 0.8 of its cap (a test lever): at ~200 a tile our attack
+    // would drain it below its reserve before it decides.
+    while (sc.answers.length === 0 && game.ticks() <= t0 - 1 + 3 * sc.rate) {
+      sc.nation.setTroops(Math.round(0.8 * M));
+      game.executeNextTick();
+      expect(incomingFrom(me, sc.nation)).toEqual([]);
+    }
+    expect(sc.answers.length).toBeGreaterThan(0);
+    expect(sc.answers[0] % sc.rate).toBe(sc.phase);
+    for (let i = 0; i < 3; i++) {
+      game.executeNextTick();
+      // The answer never reaches our land: the 1:1 cancel deleted it.
+      expect(incomingFrom(me, sc.nation)).toEqual([]);
+    }
+    const ours = ourAttackOn(me, sc.nation);
+    expect(ours.length).toBe(1);
+    expect(ours[0].troops()).toBeGreaterThan(0);
+    // It kept about its reserve at home (it sent T − reserve·M).
+    expect(sc.nation.troops()).toBeLessThan((p.reserve + 0.05) * M);
+  });
+
+  test("never an ally, an allySet nation, or outside stall mode; off by default", async () => {
+    const sc = await scene();
+    const { game, me } = sc.f;
+    expect(parseApexOptions().strikes).toBe(false);
+    const cases: { o: ApexOptions; s: () => ApexState }[] = [
+      { o: parseApexOptions(), s: stalled },
+      { o: STRIKES, s: createState },
+      {
+        o: STRIKES,
+        s: () => {
+          const s = stalled();
+          s.web.allySet = [NATION_ID];
+          return s;
+        },
+      },
+    ];
+    for (const c of cases) {
+      const r = run(sc, c.s());
+      for (let i = 0; i < sc.rate + 2; i++) {
+        expect(strikeTick(sc, c.o, r)).toEqual([]);
+        game.executeNextTick();
+      }
+    }
+    me.createAllianceRequest(sc.nation)!.accept();
+    expect(me.isAlliedWith(sc.nation)).toBe(true);
+    const r = run(sc, stalled());
+    expect(untilLaunch(sc, r, STRIKES, 0.08, sc.rate + 2)).toBeNull();
+  });
+
+  test("top-up: TOPUP_LEAD ticks before the nation's decision, a stack short of the conquest stack is raised", async () => {
+    const sc = await scene();
+    const { game, me, config } = sc.f;
+    const r = run(sc, stalled());
+    const M = config.maxTroops(sc.nation);
+    const launch = untilLaunch(sc, r, STRIKES, 0.08, 3 * sc.rate);
+    expect(launch).not.toBeNull();
+    // The nation regains troops (a test lever: think of a refund); our
+    // stack is now short of T/0.6·1.1.
+    sc.nation.setTroops(Math.round(0.25 * M));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    let topUpAt = -1;
+    for (let i = 0; i < sc.rate + 2 && topUpAt < 0; i++) {
+      const tick = game.ticks();
+      const sent = strikeTick(sc, STRIKES, r);
+      if (sent.length > 0) {
+        topUpAt = tick;
+        expect(sent[0]).toMatchObject({ type: "attack", targetID: NATION_ID });
+      }
+      game.executeNextTick();
+    }
+    expect(topUpAt).toBeGreaterThan(0);
+    expect((topUpAt + TOPUP_LEAD) % sc.rate).toBe(sc.phase);
+    expect(strikeMemory(r.s).stats.topUps).toBe(1);
+    expect(r.logs.some((l) => l.includes("wtopup"))).toBe(true);
+    // One attack (the top-up absorbed the first), larger than the nation.
+    const ours = ourAttackOn(me, sc.nation);
+    expect(ours.length).toBe(1);
+    expect(ours[0].troops()).toBeGreaterThan(sc.nation.troops() / 0.6);
+  });
+
+  test("deterrence: a strike keeps home above every other bordering nation's land line, and the betrayal line of an ally", async () => {
+    // Us on the left half; nation A top right, nation B bottom right.
+    const f = await field({ width: 80, height: 40 });
+    const { game, me, config } = f;
+    own(me, rect(game, 0, 0, 40, 40));
+    const add = (id: string, y0: number) => {
+      const n = game.addPlayer(new PlayerInfo(id, PlayerType.Nation, null, id));
+      own(n, rect(game, 40, y0, 80, y0 + 20));
+      return n;
+    };
+    const A = add("NATIONA1", 0);
+    const B = add("NATIONB1", 20);
+    for (let i = 0; i < 60; i++) game.executeNextTick();
+    A.setTroops(Math.round(0.2 * config.maxTroops(A)));
+    B.setTroops(Math.round(0.95 * config.maxTroops(B)));
+    me.setTroops(Math.round(0.9 * config.maxTroops(me)));
+    const nm = new NationModel(game, me, GAME_ID, createModels(game));
+    const tick = game.ticks();
+    nm.observe(tick);
+    const v = {
+      o: STRIKES,
+      wm: scanWorld(game, me, null),
+      nm,
+      game,
+      me,
+      tick,
+    };
+    expect(v.wm.nations.map((n) => n.id).sort()).toEqual([
+      "NATIONA1",
+      "NATIONB1",
+    ]);
+    // B above its trigger, nothing locking it: its line binds a strike on
+    // A; A (below its reserve) never binds a strike on B.
+    const dB = nm.nextDecision(B.id(), tick);
+    expect(nm.gates(B.id(), dB)).toBe("open");
+    expect(deterrenceFloor(v, A.id())).toBeCloseTo(
+      (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe(),
+      6,
+    );
+    expect(nm.gates(A.id(), nm.nextDecision(A.id(), tick))).toBe(
+      "belowReserve",
+    );
+    expect(deterrenceFloor(v, B.id())).toBe(0);
+    // The line is tight: B cannot land-attack the home a strike leaves at
+    // the floor, and can 20% below it.
+    const floor = deterrenceFloor(v, A.id());
+    expect(nm.canLandAttackUs(B.id(), floor + 1, dB)).toBe(false);
+    expect(nm.canLandAttackUs(B.id(), 0.8 * floor, dB)).toBe(true);
+    // Off: no floor.
+    expect(
+      deterrenceFloor(
+        {
+          ...v,
+          o: parseApexOptions({ strikes: true, strikeDeterrence: false }),
+        },
+        A.id(),
+      ),
+    ).toBe(0);
+    // An ally: the betrayal line instead.
+    me.createAllianceRequest(B)!.accept();
+    expect(deterrenceFloor(v, A.id())).toBeCloseTo(
+      BETRAY_SHARE * B.troops(),
+      6,
+    );
+  });
+});

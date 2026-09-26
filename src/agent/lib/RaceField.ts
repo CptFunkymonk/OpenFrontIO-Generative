@@ -1462,6 +1462,98 @@ export interface BoatTarget {
   /** The estimated voyage in tiles (with a VoyageField), else the Manhattan
    *  distance from our centroid. */
   dist: number;
+  /** Past the voyage limit, let in by a FarReach (then `food` is the
+   *  landmass's projected food at the landing). */
+  far: boolean;
+}
+
+/**
+ * Not in spec §2.7 (o.boatsMidgame): targets past `voyage.max`, up to
+ * `max` tiles, when their landmass will still hold food when the boat lands
+ * and no nation's land is close enough to reach the landing first.
+ */
+export interface FarReach {
+  /** Longest estimated voyage, tiles. */
+  max: number;
+  /** Free plus tribe tiles landmass `comp` is projected to keep `ticks`
+   *  from now (the caller's trend); asked for the voyage plus `hold`. */
+  foodAt: (comp: number, ticks: number) => number;
+  /** Smallest projected food for a far target. */
+  minFood: number;
+  /** nationLandDistance of the OwnerGrid (per sample), or null. */
+  nationDist: Int32Array | null;
+  /** Tiles a nation's front advances per tick: a far target needs its
+   *  sample at least front·(voyage + hold) tiles (by land) from every
+   *  nation. */
+  front: number;
+  /** Ticks past the voyage the landing must stay clear of nations and its
+   *  landmass keep minFood. */
+  hold: number;
+}
+
+/**
+ * Not in spec §2.7 (o.boatsMidgame): per OwnerGrid sample, the land
+ * distance in tiles to the nearest sample a Nation owns (`me` excluded):
+ * a 4-connected BFS over land samples, water samples being walls, stride
+ * tiles a step. −1 where no nation's land reaches (a landmass without a
+ * nation). Nations take tribes and free land by land, so this bounds how
+ * soon one can reach a landing. O(samples).
+ */
+export function nationLandDistance(
+  game: Game,
+  og: OwnerGrid,
+  me: Player,
+): Int32Array {
+  const kind = ownerKinds(game);
+  const mine = me.smallID();
+  const { owner, ow, oh, stride } = og;
+  const n = owner.length;
+  const dist = new Int32Array(n).fill(-1);
+  const queue = new Int32Array(n);
+  let tail = 0;
+  for (let i = 0; i < n; i++) {
+    const id = owner[i];
+    if (id <= 0 || id === mine || id >= kind.length) continue;
+    if (kind[id] !== KIND_NATION) continue;
+    dist[i] = 0;
+    queue[tail++] = i;
+  }
+  for (let head = 0; head < tail; head++) {
+    const i = queue[head];
+    const d = dist[i] + stride;
+    const x = i % ow;
+    const y = (i - x) / ow;
+    // Inlined 4-neighbours (W, E, N, S).
+    if (x > 0) {
+      const e = i - 1;
+      if (dist[e] < 0 && owner[e] !== OWNER_WATER) {
+        dist[e] = d;
+        queue[tail++] = e;
+      }
+    }
+    if (x + 1 < ow) {
+      const e = i + 1;
+      if (dist[e] < 0 && owner[e] !== OWNER_WATER) {
+        dist[e] = d;
+        queue[tail++] = e;
+      }
+    }
+    if (y > 0) {
+      const e = i - ow;
+      if (dist[e] < 0 && owner[e] !== OWNER_WATER) {
+        dist[e] = d;
+        queue[tail++] = e;
+      }
+    }
+    if (y + 1 < oh) {
+      const e = i + ow;
+      if (dist[e] < 0 && owner[e] !== OWNER_WATER) {
+        dist[e] = d;
+        queue[tail++] = e;
+      }
+    }
+  }
+  return dist;
 }
 
 /**
@@ -1580,7 +1672,12 @@ export function voyageAt(f: VoyageField, grid: RaceGrid, c: number): number {
  *
  * With `voyage` (not in the spec): the distance is the sample cell's
  * estimated voyage (voyageAt) instead, and a sample the field does not
- * reach, or farther than `voyage.max` tiles, is no candidate.
+ * reach, or farther than `voyage.max` tiles, is no candidate. With
+ * `voyage.far` (o.boatsMidgame), a sample past `voyage.max` but within
+ * `far.max` is one when its landmass's food projected to far.hold ticks
+ * after the landing (far.foodAt) is at least far.minFood and no nation's
+ * land lies within far.front·(voyage + far.hold) tiles of it
+ * (far.nationDist); it is scored by that projected food.
  */
 export function boatTargets(
   game: Game,
@@ -1588,7 +1685,7 @@ export function boatTargets(
   og: OwnerGrid,
   me: Player,
   max: number,
-  voyage?: { field: VoyageField; max: number },
+  voyage?: { field: VoyageField; max: number; far?: FarReach },
 ): BoatTarget[] {
   if (max <= 0) return [];
   const map = game.map();
@@ -1643,6 +1740,8 @@ export function boatTargets(
   const heapScore = new Float64Array(K);
   const heapBlock = new Int32Array(K);
   const heapDist = new Float64Array(K);
+  // A far candidate's projected food (−1: a near one, scored by food).
+  const heapFood = new Float64Array(K);
   let size = 0;
   // Min-heap order: lower score first, then higher block (worse).
   const worse = (a: number, b: number) =>
@@ -1658,6 +1757,9 @@ export function boatTargets(
     const d0 = heapDist[a];
     heapDist[a] = heapDist[b];
     heapDist[b] = d0;
+    const f0 = heapFood[a];
+    heapFood[a] = heapFood[b];
+    heapFood[b] = f0;
   };
   const down = (i: number) => {
     for (;;) {
@@ -1673,16 +1775,26 @@ export function boatTargets(
   for (let i = 0; i < n; i++) {
     const comp = comps[i];
     if (comp < 0) continue;
-    const f = food.get(comp) ?? 0;
+    let f = food.get(comp) ?? 0;
     if (f < BOAT_MIN_FOOD) continue;
     const bx = i % ow;
     const by = (i - bx) / ow;
     let dist: number;
+    let projected = -1;
     if (voyage !== undefined) {
       const c =
         Math.floor(sampleY(by) / cell) * cw + Math.floor(sampleX(bx) / cell);
       dist = voyageAt(voyage.field, grid, c);
-      if (dist < 0 || dist > voyage.max) continue;
+      if (dist < 0) continue;
+      if (dist > voyage.max) {
+        const far = voyage.far;
+        if (far === undefined || dist > far.max) continue;
+        const nd = far.nationDist === null ? -1 : far.nationDist[i];
+        if (nd >= 0 && nd < far.front * (dist + far.hold)) continue;
+        projected = far.foodAt(comp, dist + far.hold);
+        if (!(projected >= far.minFood)) continue;
+        f = projected;
+      }
     } else {
       dist = Math.abs(sampleX(bx) - mx) + Math.abs(sampleY(by) - my);
     }
@@ -1691,6 +1803,7 @@ export function boatTargets(
       heapScore[size] = score;
       heapBlock[size] = i;
       heapDist[size] = dist;
+      heapFood[size] = projected;
       let j = size++;
       while (j > 0) {
         const p = (j - 1) >> 1;
@@ -1705,6 +1818,7 @@ export function boatTargets(
       heapScore[0] = score;
       heapBlock[0] = i;
       heapDist[0] = dist;
+      heapFood[0] = projected;
       down(0);
     }
   }
@@ -1724,14 +1838,16 @@ export function boatTargets(
     if (landing === null || used.has(landing)) continue;
     used.add(landing);
     const comp = comps[block];
+    const far = heapFood[j] >= 0;
     out.push({
       tile: landing,
       comp,
-      food: food.get(comp) ?? 0,
+      food: far ? heapFood[j] : (food.get(comp) ?? 0),
       tn: id === 0,
       tribeSmallID: id === 0 ? null : id,
       score: heapScore[j],
       dist: heapDist[j],
+      far,
     });
   }
   return out;

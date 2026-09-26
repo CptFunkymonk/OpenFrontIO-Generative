@@ -4,9 +4,18 @@ import {
   PlayerID,
   PlayerType,
   TerrainType,
+  UnitType,
 } from "../../../../core/game/Game";
+import {
+  attackWhy,
+  counterTroops,
+  floorWithout,
+  frontTiles,
+  postSites,
+} from "../../../lib/Deterrence";
 import { allySlots } from "../../../lib/RaceField";
 import { Prio, Proposal } from "../../../lib/Scheduler";
+import { noteBorderNations } from "../HomeTarget";
 import type { Controller, View } from "../policy";
 import { ApexState, NEVER } from "../state";
 import { BORDER_JITTER } from "./ExpansionController";
@@ -24,7 +33,16 @@ import { BORDER_JITTER } from "./ExpansionController";
 //                          once, unless it is a strike target (o.embargoStop)
 //   §3.3.5 never           counter-attacks, breakAlliance, or spending home
 //                          below H_vw: this controller offers none of them,
-//                          but for the counter below (off by default)
+//                          but for the counters below (off by default)
+//   winning counter        o.detCounter (package B1): an unallied nation's
+//   (not in the spec)      attacks on us, S troops in all, are deleted by
+//                          an attack of ceil(S·detCounterSize) + 1 on it
+//                          (AttackExecution.ts:157-170), when home after it
+//                          keeps max(detCounterKeep·cap, H_vw, every other
+//                          nation's deterrence line); see counterWins
+//   defense posts          o.detPosts (package B1): a post on the front
+//   (not in the spec)      with a bordering unallied nation that attacks us
+//                          or that our home cannot deter; see posts
 //   counter (not in the    o.counter: after absorbing a fresh land attack of
 //   spec)                  an unallied nation estimated to take counterShare
 //                          of our tiles or more, while home idles at
@@ -62,6 +80,17 @@ import { BORDER_JITTER } from "./ExpansionController";
 const STOP_IN_FLIGHT = 2;
 /** §3.3.3: at most one free TN cancel per this many ticks. */
 const TN_CANCEL_EVERY = 50;
+/** o.detCounter: ticks between two counters on one nation. A counter sent
+ *  at t inits in turn t + 1 and is seen at t + 1 (latency 1); the extra
+ *  ticks cover the browser's latency jitter. */
+const COUNTER_EVERY = 3;
+/** o.detPosts: ticks between two post checks (a post takes 50 to build). */
+const POST_EVERY = 20;
+/** o.detPosts: candidate sites scored per check. */
+const POST_CANDIDATES = 40;
+/** o.detPosts: sites tried with canBuild per check (each floods about 700
+ *  tiles). */
+const POST_PROBES = 3;
 
 /** Our memory (spec §2.10: controllers keep none of their own). Declared
  *  here rather than in state.ts, which another engineer owns; it is created
@@ -76,6 +105,11 @@ export interface DefenseMemory {
   seen: Record<string, number>;
   /** Recalls awaiting their answering decision. */
   recalls: Record<PlayerID, { at: number; d: number; p: number }>;
+  /** o.detCounter: tick of our last winning counter on each nation (absent
+   *  in memories created before it). */
+  counters?: Record<PlayerID, number>;
+  /** o.detPosts: tick of the last post check. */
+  lastPost?: number;
   stats: DefenseStats;
 }
 
@@ -89,6 +123,10 @@ export interface DefenseStats {
   refused: number;
   stops: number;
   tnCancels: number;
+  /** o.detCounter's counters (absent in memories created before it). */
+  counterWins?: number;
+  /** o.detPosts' posts ordered. */
+  posts?: number;
 }
 
 declare module "../state" {
@@ -176,12 +214,110 @@ export class DefenseController implements Controller {
 
   onTick(v: View, s: ApexState): void {
     const mem = defenseMemory(s);
+    noteBorderNations(v, s);
     this.settleRecalls(v, mem);
     const { attackers, incoming } = this.scanIncoming(v, mem);
     // §3.3.3 first: Emergency, and its key must precede the allocator's.
     this.tnCancel(v, mem, incoming);
     if (attackers.length > 0) this.recalls(v, s, mem, attackers);
+    if (attackers.length > 0 && v.o.detCounter) {
+      this.counterWins(v, mem, attackers);
+    }
+    if (v.o.detPosts) this.posts(v, mem, attackers);
     this.stops(v, s);
+  }
+
+  /**
+   * o.detPosts (package B1): defense posts. Within defensePostRange (30) of
+   * a post of ours an attacker loses ×5 troops per tile and takes ×3 as
+   * long (Config.ts:377-387, AttackExecution.attackLogicInput). Every
+   * POST_EVERY ticks, with gold for one (min(250k, 50k·(posts + 1))) and
+   * fewer than detPostsMax posts ordered this game: the most dangerous
+   * bordering unallied nation — with detPostReactive one attacking us by
+   * land now (largest stack first), else, with detPostProactive, the one
+   * with most troops that could
+   * land-attack us at our home now and would pick us
+   * (NationModel.canLandAttackUs; wouldTargetUs, or at most detTribeSlack
+   * affordable tribes left) — gets a post detPostDepth tiles behind the
+   * stretch of our front with it that the fewest posts cover
+   * (lib/Deterrence.postSites). In every elimination of arena quick@20 the
+   * agent idled at its cap with 0.07-2.8M gold while a nation above
+   * 1.1× its home invaded.
+   */
+  private posts(v: View, mem: DefenseMemory, attackers: Attacker[]): void {
+    const { o, me, game, nm, tick: t } = v;
+    if (t - (mem.lastPost ?? NEVER) < POST_EVERY) return;
+    mem.lastPost = t;
+    const mine = me.units(UnitType.DefensePost);
+    // Posts ordered, not alive: an invasion captures the posts it
+    // overruns (they are structures), and posts ordered into a running
+    // attack were overrun before they were built (50 ticks).
+    if ((mem.stats.posts ?? 0) >= o.detPostsMax) return;
+    const cost = game.config().unitInfo(UnitType.DefensePost).cost(game, me);
+    if (me.gold() < cost) return;
+    let N: Player | null = null;
+    let why = "";
+    let best = 0;
+    for (const x of o.detPostReactive ? attackers : []) {
+      const p = x.player;
+      if (p.type() !== PlayerType.Nation || me.isFriendly(p)) continue;
+      if (x.first <= 0 || x.troops <= best) continue;
+      best = x.troops;
+      N = p;
+      why = `attack ${Math.round(x.troops)}`;
+    }
+    if (N === null && o.detPostProactive) {
+      const home = me.troops();
+      for (const n of v.wm.nations) {
+        if (n.type !== PlayerType.Nation || n.friendly) continue;
+        const st = nm.get(n.id);
+        if (st === undefined || !st.full || !st.sharesBorderWithUs) continue;
+        const T = game.player(n.id).troops();
+        if (T <= best) continue;
+        if (!nm.canLandAttackUs(n.id, home, nm.nextDecision(n.id, t + 1))) {
+          continue;
+        }
+        if (
+          st.affordableTribes > o.detTribeSlack &&
+          nm.wouldTargetUs(n.id, home) === null
+        ) {
+          continue;
+        }
+        best = T;
+        N = game.player(n.id);
+        why = `threat T=${Math.round(T)}`;
+      }
+    }
+    if (N === null) return;
+    const front = frontTiles(game, me, N);
+    const sites = postSites(
+      game,
+      me,
+      N,
+      front,
+      mine.map((u) => u.tile()),
+      game.config().defensePostRange(),
+      o.detPostDepth,
+      POST_CANDIDATES,
+    );
+    for (let i = 0; i < sites.length && i < POST_PROBES; i++) {
+      const at = me.canBuild(UnitType.DefensePost, sites[i].tile);
+      if (at === false) continue;
+      const ok = v.scheduler.offer({
+        intent: { type: "build_unit", unit: UnitType.DefensePost, tile: at },
+        prio: Prio.Recall,
+        cls: "defense",
+        key: "build:post",
+      });
+      if (!ok) return;
+      mem.stats.posts = (mem.stats.posts ?? 0) + 1;
+      v.log?.(
+        `${t} def post vs ${N.name()} (${why}) at ${game.x(at)},${game.y(at)} ` +
+          `covers ${sites[i].covers}/${front.length} cost=${cost} ` +
+          `gold=${me.gold()} posts=${mine.length + 1}`,
+      );
+      return;
+    }
   }
 
   // ── Incoming attacks (§3.3.1) ──────────────────────────────────────────
@@ -256,6 +392,18 @@ export class DefenseController implements Controller {
         `${a.sourceTile() !== null ? "boat" : "land"} ~${Math.round(tiles)} tiles ` +
         `home=${Math.round(me.troops())} tiles=${me.numTilesOwned()}`,
     );
+    if (v.log !== undefined && N.type() === PlayerType.Nation) {
+      const st = v.nm.get(N.id());
+      const f = v.purse.floors;
+      const term = f.detTerms?.find((x) => x.id === N.id());
+      v.log(
+        `${v.tick} def why ${N.name()} ${attackWhy(me, N, troops, models)} ` +
+          `nm border=${st?.sharesBorderWithUs ?? "-"} ` +
+          `free=${st?.bordersFreeLand ?? "-"} tribes=${st?.affordableTribes ?? "-"} ` +
+          `at=${st?.refreshedAt ?? "-"} H=${Math.round(f.H)} ` +
+          `det=${Math.round(f.det ?? 0)}${term !== undefined ? ` term=${Math.round(term.floor)}` : ""}`,
+      );
+    }
     return tiles;
   }
 
@@ -322,6 +470,85 @@ export class DefenseController implements Controller {
       `${t} def counter ${N.name()} ${X} (its attack ${Math.round(x.first)}, ` +
         `~${Math.round(x.estimate)} tiles)`,
     );
+  }
+
+  /**
+   * o.detCounter (package B1; docs/13 §2.3, §2.8): a counter that wins.
+   * Our new attack on N cancels N's attacks on us 1:1 at its init, in N's
+   * incoming order, retreating ones and landed boats included
+   * (AttackExecution.ts:157-170): X = ceil(S·detCounterSize) + 1 with S
+   * their total now deletes them all (they only shrink before ours inits,
+   * GameImpl.ts:526-551) and goes on into N with the rest. Absorbing costs
+   * land, and with it cap, for good (every elimination in arena quick@20
+   * began as an invasion of an agent idle at its cap); a counter costs X
+   * home troops, which regrow, and leaves N without the stack it sent
+   * (below its trigger it runs its list 1 decision in 10, docs/13 §2.8).
+   * Largest stack first, each only if home − X keeps
+   * max(detCounterKeep·cap, H_vw, every other nation's deterrence line),
+   * never while a request of ours to N is pending (the recall comes
+   * first), at most once per COUNTER_EVERY ticks per nation, and not for
+   * stacks under detCounterMin of home (absorbed).
+   */
+  private counterWins(v: View, mem: DefenseMemory, attackers: Attacker[]) {
+    const { o, me, tick: t } = v;
+    const floors = v.purse.floors;
+    const cap = floors.cap;
+    if (cap <= 0) return;
+    const stacks = new Map<number, number>();
+    for (const a of me.incomingAttacks()) {
+      const sid = a.attacker().smallID();
+      stacks.set(sid, (stacks.get(sid) ?? 0) + a.troops());
+    }
+    const order = attackers
+      .filter(
+        (x) =>
+          x.player.type() === PlayerType.Nation &&
+          x.player.isAlive() &&
+          !me.isFriendly(x.player),
+      )
+      .map((x) => ({ N: x.player, S: stacks.get(x.player.smallID()) ?? 0 }))
+      .sort((a, b) => b.S - a.S || a.N.smallID() - b.N.smallID());
+    mem.counters ??= {};
+    for (const { N, S } of order) {
+      const id = N.id();
+      if (S <= 0 || S < o.detCounterMin * v.purse.home) continue;
+      if (t - (mem.counters[id] ?? NEVER) < COUNTER_EVERY) continue;
+      if (mem.recalls[id] !== undefined) continue;
+      if (me.outgoingAllianceRequests().some((r) => r.recipient() === N)) {
+        continue;
+      }
+      const X = counterTroops(S, o.detCounterSize);
+      const keep = Math.max(
+        o.detCounterKeep * cap,
+        floors.vw,
+        floorWithout(floors.detTerms, id),
+      );
+      if (v.purse.home - X < keep) continue;
+      // o.detCounterDecisive: only a counter after which N cannot attack us
+      // again at its next decision (its troops already paid for the stack
+      // we delete; a send it sized at its reserve leaves it there).
+      if (
+        o.detCounterDecisive &&
+        v.nm.canLandAttackUs(id, v.purse.home - X, v.nm.nextDecision(id, t + 1))
+      ) {
+        continue;
+      }
+      const ok = v.scheduler.offer({
+        intent: { type: "attack", targetID: id, troops: X },
+        prio: Prio.Recall,
+        cls: "defense",
+        key: `attack:${N.smallID()}`,
+        spend: { kind: "defense", troops: X },
+        meta: { target: N.smallID() },
+      });
+      if (!ok) continue;
+      mem.counters[id] = t;
+      mem.stats.counterWins = (mem.stats.counterWins ?? 0) + 1;
+      v.log?.(
+        `${t} def counterwin ${N.name()} ${X} (stack ${Math.round(S)}, ` +
+          `home ${Math.round(v.purse.home + X)}, keep ${Math.round(keep)})`,
+      );
+    }
   }
 
   /** One recall attempt on N; null if sent, else why not (for the log). */

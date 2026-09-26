@@ -12,6 +12,8 @@ import {
   boatTargets,
   cellOf,
   expectedLand,
+  FarReach,
+  nationLandDistance,
   OWNER_WATER,
   OwnerGrid,
   RaceGrid,
@@ -19,6 +21,7 @@ import {
   voyageField,
 } from "../../../lib/RaceField";
 import { Prio } from "../../../lib/Scheduler";
+import type { ApexOptions } from "../options";
 import type { Controller, View } from "../policy";
 import { type ApexState, noteLine } from "../state";
 import {
@@ -37,7 +40,7 @@ import {
 // config.boatMaxNumber() of our boats are at sea and the Purse has
 // o.boatMinTroops for a boat, it sends boats to unowned land and tribes we
 // do not touch (RaceField.boatTargets on the policy's race and owner grids)
-// when one of three triggers holds:
+// when one of three triggers holds (a fourth with o.boatsMidgame, below):
 // - "blocked" (land maps): no free land borders us (F = 0) and the land
 //   allocator has no tribe to launch at;
 // - "stall": stall mode (§3.6.6, rule 2), with o.stallBoats;
@@ -83,6 +86,32 @@ import {
 //   landmass for o.boatLandmassHold ticks, and this decision's land
 //   launches (Scheduler.hasKey) count; without o.boatBorderTribes, tribes
 //   that border us are the land allocator's.
+//
+// Midgame (o.boatsMidgame, package A2; chapter 13 §2.12, §5.11): once the
+// food near us is gone, what is left lies on landmasses farther than
+// o.boatMaxVoyage (quick@20: Four Islands and Bering Strait held 50-235k
+// tribe tiles 500-1,300 tiles of sea away while 1-2.4M of our troops sat
+// at the cap). With it:
+// - far targets (RaceField FarReach), up to o.boatMidMaxVoyage: the
+//   landmass's free plus tribe land, projected from its trend over the
+//   OwnerGrid history (s.naval.foodSeen over o.boatMidRateTicks, the loss
+//   rate times o.boatMidRateMargin), still holds o.boatMidMinFood
+//   FAR_LAND_SLACK + o.boatMidHold ticks after the landing, and no nation's
+//   land lies within o.boatMidFront × (voyage + FAR_LAND_SLACK +
+//   o.boatMidHold) tiles of the landing (RaceField.nationLandDistance).
+//   Measured on Four Islands, Bering Strait and Yellow Sea in minutes 1-4:
+//   a tribe sample d tiles by land from the nearest nation survives T
+//   ticks in 75-95% of cases once d >= T/3 (0.33 tiles a tick), and faster
+//   fronts later (at 0.15, 3 of 3 far boats found their landing eaten).
+//   A boat whose landing flips to a nation is turned back
+//   (o.boatCancelOnFlip); a landing on a dead tribe finds nothing to take
+//   and retreats in full (AttackExecution.ts:302-306); a live beachhead
+//   hands the land allocator the tribes around it;
+// - a "surplus" trigger: the Purse still holds o.boatMidSurplus of the cap
+//   for boats after the land allocator decided;
+// - a far tribe is sized for its regrowth during the voyage; in stall mode
+//   (troops idle at the cap) a tribe may cost up to o.boatMidStallPrice
+//   times the price limit.
 
 /** A failed canBuild probe is remembered this long, per race-grid cell. */
 export const PROBE_TTL = 200;
@@ -100,8 +129,13 @@ const CANCEL_IN_FLIGHT = 5;
 /** Largest free-land pocket flood-filled around a landing; a larger one is
  *  sized by its landmass's free land. */
 export const POCKET_MAX = 4096;
+/** o.boatsMidgame: ticks added to a far voyage for the landing and its
+ *  first fight (FarReach.hold is this plus o.boatMidHold). */
+export const FAR_LAND_SLACK = 50;
+/** o.boatsMidgame: OwnerGrid food snapshots kept in s.naval.foodSeen. */
+const FOOD_SEEN_MAX = 8;
 
-export type BoatTrigger = "blocked" | "stall" | "water";
+export type BoatTrigger = "blocked" | "stall" | "water" | "surplus";
 
 /** A boat's troops; for a tribe also its clamp stack and expected refund
  *  (Ledger plan fields). */
@@ -126,12 +160,17 @@ export interface NavalMemory {
   launch: Record<string, { src: TileRef; at: number }>;
   /** Boats we asked to turn back: unit id -> tick. */
   cancelled: Record<string, number>;
+  /** o.boatsMidgame: free plus tribe tiles by landmass (keyed by id) at
+   *  each OwnerGrid stamp, oldest first. */
+  foodSeen: { stamp: number; food: Record<string, number> }[];
   /** Counts for logs and tests; never read by decisions. */
   stats: {
     cancels: number;
     eaten: number;
     headroom: number;
     prechecks: number;
+    /** Far boats sent (o.boatsMidgame). */
+    far: number;
   };
 }
 
@@ -146,8 +185,11 @@ export function navalMemory(s: ApexState): NavalMemory {
   s.naval ??= {
     launch: {},
     cancelled: {},
-    stats: { cancels: 0, eaten: 0, headroom: 0, prechecks: 0 },
+    foodSeen: [],
+    stats: { cancels: 0, eaten: 0, headroom: 0, prechecks: 0, far: 0 },
   };
+  s.naval.foodSeen ??= [];
+  s.naval.stats.far ??= 0;
   return s.naval;
 }
 
@@ -161,6 +203,93 @@ function voyageOf(v: View, grid: RaceGrid, og: OwnerGrid): VoyageField {
   if (memo !== undefined && memo.mine === mine) return memo.f;
   const f = voyageField(v.game, grid, v.wm.shoreSample);
   voyageMemo.set(og, { mine, f });
+  return f;
+}
+
+/** RaceField.nationLandDistance of an OwnerGrid (one BFS per grid): a memo
+ *  of plain data, like voyageOf. */
+const nationDistMemo = new WeakMap<
+  OwnerGrid,
+  { mine: number; d: Int32Array }
+>();
+
+function nationDistOf(v: View, og: OwnerGrid): Int32Array {
+  const mine = v.me.smallID();
+  const memo = nationDistMemo.get(og);
+  if (memo !== undefined && memo.mine === mine) return memo.d;
+  const d = nationLandDistance(v.game, og, v.me);
+  nationDistMemo.set(og, { mine, d });
+  return d;
+}
+
+/** Free plus tribe tiles by landmass id (as foodSeen keys them). */
+function foodByComp(food: LandmassFood): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [c, f] of food.free) out[String(c)] = f;
+  for (const [c, f] of food.tribe) out[String(c)] = (out[String(c)] ?? 0) + f;
+  return out;
+}
+
+/** o.boatsMidgame: records an OwnerGrid's food by landmass in
+ *  s.naval.foodSeen, once per stamp (the last FOOD_SEEN_MAX kept). */
+export function recordFood(
+  mem: NavalMemory,
+  food: LandmassFood,
+  stamp: number,
+): void {
+  const seen = mem.foodSeen;
+  const last = seen[seen.length - 1];
+  if (last !== undefined && last.stamp >= stamp) return;
+  seen.push({ stamp, food: foodByComp(food) });
+  if (seen.length > FOOD_SEEN_MAX) seen.splice(0, seen.length - FOOD_SEEN_MAX);
+}
+
+/**
+ * o.boatsMidgame, FarReach.foodAt: a landmass's food `ticks` from now, its
+ * food now minus o.boatMidRateMargin × its loss per tick since the oldest
+ * snapshot of s.naval.foodSeen within o.boatMidRateTicks, times `ticks`.
+ * No loss is assumed without an older snapshot, and a landmass gaining food
+ * projects its food now.
+ */
+export function foodProjection(
+  mem: NavalMemory,
+  food: LandmassFood,
+  stamp: number,
+  o: Pick<ApexOptions, "boatMidRateTicks" | "boatMidRateMargin">,
+): (comp: number, voyage: number) => number {
+  const now = foodByComp(food);
+  let old: { stamp: number; food: Record<string, number> } | null = null;
+  for (const e of mem.foodSeen) {
+    if (e.stamp < stamp && stamp - e.stamp <= o.boatMidRateTicks) {
+      old = e;
+      break;
+    }
+  }
+  return (comp, ticks) => {
+    const key = String(comp);
+    const cur = now[key] ?? 0;
+    if (old === null) return cur;
+    const loss = Math.max(0, (old.food[key] ?? 0) - cur);
+    const rate = loss / (stamp - old.stamp);
+    return cur - o.boatMidRateMargin * rate * ticks;
+  };
+}
+
+/** landmassFood of an OwnerGrid for one player: a memo of plain data (the
+ *  grid never changes once built). */
+const foodMemo = new WeakMap<OwnerGrid, { mine: number; f: LandmassFood }>();
+
+function foodOf(
+  game: Game,
+  grid: RaceGrid,
+  og: OwnerGrid,
+  me: Player,
+): LandmassFood {
+  const mine = me.smallID();
+  const memo = foodMemo.get(og);
+  if (memo !== undefined && memo.mine === mine) return memo.f;
+  const f = landmassFood(game, grid, og, me);
+  foodMemo.set(og, { mine, f });
   return f;
 }
 
@@ -219,6 +348,10 @@ export class NavalController implements Controller {
   decide(v: View, s: ApexState): void {
     const { o, game, me, tick, wm, race, owners } = v;
     if (!o.boats) return;
+    // The food trend needs every OwnerGrid, boat decision or not.
+    if (o.boatsMidgame && race !== null && owners !== null) {
+      recordFood(navalMemory(s), foodOf(game, race, owners, me), owners.stamp);
+    }
     if (tick - s.timers.lastBoat < o.boatEvery) return;
     const max = game.config().boatMaxNumber();
     if (wm.boatsInFlight >= max) return;
@@ -227,7 +360,7 @@ export class NavalController implements Controller {
     // No send could go out (class cap, budget): no probes either.
     if (v.scheduler.classLeft("boat") < 1) return;
     if (v.scheduler.intentsLeft(Prio.Boat) < 1) return;
-    const food = landmassFood(game, race, owners, me);
+    const food = foodOf(game, race, owners, me);
     const trigger = boatTrigger(v, s, food);
     if (trigger === null) return;
     s.timers.lastBoat = tick;
@@ -256,8 +389,18 @@ export class NavalController implements Controller {
       failed.has(cell);
     const guard = o.boatAvoidWarships ? hostileWarships(game, me) : [];
     const reach = game.config().warshipTargettingRange() + o.boatWarshipMargin;
+    const far: FarReach | undefined = o.boatsMidgame
+      ? {
+          max: o.boatMidMaxVoyage,
+          foodAt: foodProjection(mem, food, owners.stamp, o),
+          minFood: o.boatMidMinFood,
+          nationDist: nationDistOf(v, owners),
+          front: o.boatMidFront,
+          hold: FAR_LAND_SLACK + o.boatMidHold,
+        }
+      : undefined;
     const voyage = o.boatVoyageScore
-      ? { field: voyageOf(v, race, owners), max: o.boatMaxVoyage }
+      ? { field: voyageOf(v, race, owners), max: o.boatMaxVoyage, far }
       : undefined;
     let guarded = 0;
     const markGuarded = (cell: number) => {
@@ -381,10 +524,11 @@ export class NavalController implements Controller {
     });
     if (!accepted) return false;
     const { game } = v;
+    if (t.far) navalMemory(s).stats.far++;
     this.note(
       v,
       s,
-      `boat (${trigger}) ${send.troops} to ${tribe !== null ? `tribe ${tribe}` : "free land"} at ${game.x(t.tile)},${game.y(t.tile)} (landmass ${t.comp}, food ${t.food}, ${Math.round(t.dist)} tiles)${guarded > 0 ? `, ${guarded} guarded skipped` : ""}`,
+      `boat (${trigger}) ${send.troops} to ${tribe !== null ? `tribe ${tribe}` : "free land"} at ${game.x(t.tile)},${game.y(t.tile)} (landmass ${t.comp}, ${t.far ? "far, projected " : ""}food ${Math.round(t.food)}, ${Math.round(t.dist)} tiles)${guarded > 0 ? `, ${guarded} guarded skipped` : ""}`,
     );
     return true;
   }
@@ -428,12 +572,20 @@ export class NavalController implements Controller {
       navalMemory(s).stats.eaten++;
       return null;
     }
+    // A far boat meets the tribe's troops after its voyage's regrowth
+    // (o.boatsMidgame), at most its cap.
+    const troopsAtLanding = t.far
+      ? Math.min(
+          Math.max(b.troops(), models.cap(b)),
+          b.troops() + Math.max(0, models.regrowth(b)) * t.dist,
+        )
+      : b.troops();
     const sz = tribeSizing(
       models,
       me.numTilesOwned(),
       {
         tiles: b.numTilesOwned(),
-        troops: b.troops(),
+        troops: troopsAtLanding,
         isTraitor: b.isTraitor(),
         contact: beachheadFront(b.numTilesOwned()),
         contactMix: mix,
@@ -442,7 +594,11 @@ export class NavalController implements Controller {
       o.tribeRatio,
       o,
     );
-    if (sz.p > o.tribeMaxPrice * models.tnPrice(mix)) return null;
+    const idle =
+      o.boatsMidgame && (trigger === "stall" || inStall(s, v.tick, o));
+    const maxPrice =
+      o.tribeMaxPrice * (idle ? o.boatMidStallPrice : 1) * models.tnPrice(mix);
+    if (sz.p > maxPrice) return null;
     const troops = Math.ceil(sz.S + o.beachheadExtra);
     if (troops > avail) return null;
     const refund = Math.max(0, troops - sz.cost);
@@ -589,7 +745,18 @@ export function boatTrigger(
   if (blocked(v, s)) return "blocked";
   if (v.o.stallBoats && inStall(s, v.tick, v.o)) return "stall";
   if (waterPriority(v, s, food)) return "water";
+  if (surplus(v)) return "surplus";
   return null;
+}
+
+/** o.boatsMidgame "surplus": after the land allocator decided (Naval
+ *  decides after Expansion, and the Purse is debited as offers are
+ *  accepted), boats may still spend o.boatMidSurplus of the cap. */
+export function surplus(v: Pick<View, "o" | "purse">): boolean {
+  const { o, purse } = v;
+  if (!o.boatsMidgame || !(o.boatMidSurplus > 0)) return false;
+  const cap = purse.floors.cap;
+  return cap > 0 && purse.available("boat") >= o.boatMidSurplus * cap;
 }
 
 /**
