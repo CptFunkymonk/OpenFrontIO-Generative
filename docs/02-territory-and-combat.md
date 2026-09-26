@@ -10,15 +10,15 @@ This is the core loop. Every number here was verified directly against
 
 ### Inputs
 
-| Field | Source |
-|---|---|
-| `terrain` | terrain of the tile being taken |
-| `attackTroops` | the **live, decreasing** stack (`AttackExecution.ts:332`) |
-| `attacker` | `{type, numTiles}` |
-| `defender` | `null` for TerraNullius, else `{type, numTiles, troops, isTraitor, isDisconnectedTeammate}` |
-| `defenderHasDefensePost` | boolean — any active defender post within **30** |
-| `falloutRatio` | `numTilesWithFallout / numLandTiles` — a **global** ratio, not local |
-| `borderSize` | `attack.borderSize() + rand(0..4)`, **computed once per tick** |
+| Field                    | Source                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `terrain`                | terrain of the tile being taken                                                             |
+| `attackTroops`           | the **live, decreasing** stack (`AttackExecution.ts:332`)                                   |
+| `attacker`               | `{type, numTiles}`                                                                          |
+| `defender`               | `null` for TerraNullius, else `{type, numTiles, troops, isTraitor, isDisconnectedTeammate}` |
+| `defenderHasDefensePost` | boolean — any active defender post within **30**                                            |
+| `falloutRatio`           | `numTilesWithFallout / numLandTiles` — a **global** ratio, not local                        |
+| `borderSize`             | `attack.borderSize() + rand(0..4)`, **computed once per tick**                              |
 
 ### Modifier order (`Config.ts:882-920`)
 
@@ -76,43 +76,43 @@ tickFraction = speedCost * tileCost
   attackers and dies **25% faster**.
 - `attackerTroopLoss` is **per tile**, not per tick.
 - `attackTroops` fed into the formula is the live count, so losses and speed both
-  worsen *within* a single tick as the stack burns down.
+  worsen _within_ a single tick as the stack burns down.
 
 ### Golden values (pinned in `tests/__snapshots__/AttackLogicGolden.test.ts.snap`)
 
 Baseline: Plains, attacker 20k tiles, defender 20k tiles / 100k troops, attack
 100k troops, `borderSize` 100.
 
-| Case | atk loss/tile | def loss/tile | `tickFraction` |
-|---|---|---|---|
-| baseline | 38.56 | 5 | 0.01928 (≈52 tiles/tick) |
-| defender has a defense post | 192.79 (5×) | 5 | 0.05783 (3×) |
-| defender is a traitor | 19.28 (0.5×) | 5 | 0.01542 (0.8×) |
-| human/nation attacks a Bot | 26.99 (0.7×) | 5 | unchanged |
-| **bot attacks human** | 38.56 | 5 | unchanged — **no bot-attacker penalty** |
-| **bot attacks bot** | 38.56 | 5 | unchanged — the 0.7× does NOT apply |
-| disconnected teammate | **0** | 5 | unchanged |
-| fallout 10% (f = 4.8) | 185.08 | 5 | 0.09252 |
-| fallout 100% (f = 3) | 115.67 | 5 | 0.05783 |
-| Mountain + post + fallout 0.5 + traitor | 578.36 | 5 | 0.28037 |
+| Case                                    | atk loss/tile | def loss/tile | `tickFraction`                          |
+| --------------------------------------- | ------------- | ------------- | --------------------------------------- |
+| baseline                                | 38.56         | 5             | 0.01928 (≈52 tiles/tick)                |
+| defender has a defense post             | 192.79 (5×)   | 5             | 0.05783 (3×)                            |
+| defender is a traitor                   | 19.28 (0.5×)  | 5             | 0.01542 (0.8×)                          |
+| human/nation attacks a Bot              | 26.99 (0.7×)  | 5             | unchanged                               |
+| **bot attacks human**                   | 38.56         | 5             | unchanged — **no bot-attacker penalty** |
+| **bot attacks bot**                     | 38.56         | 5             | unchanged — the 0.7× does NOT apply     |
+| disconnected teammate                   | **0**         | 5             | unchanged                               |
+| fallout 10% (f = 4.8)                   | 185.08        | 5             | 0.09252                                 |
+| fallout 100% (f = 3)                    | 115.67        | 5             | 0.05783                                 |
+| Mountain + post + fallout 0.5 + traitor | 578.36        | 5             | 0.28037                                 |
 
 ### End-to-end scenarios (`tests/__snapshots__/AttackScenarios.test.ts.snap`)
 
 100×100 plains map, two ~5,000-tile rectangles, no troop regen:
 
-| Scenario | ticks | tiles taken | atk loss/tile |
-|---|---|---|---|
-| 50k vs 50k, attack 10k | 24 | 125 | 80 |
-| 50k vs 50k, attack 50k (all-in) | 43 | 805 | 62.1 |
-| 200k vs 20k, attack 40k | 30 | 1,184 | 33.8 |
-| 20k vs 200k, attack 4k | 27 | 41 | 97.6 |
-| vs bot defender, attack 10k | 34 | 178 | 56.2 |
-| vs traitor defender, attack 10k | 39 | 249 | 40.2 |
-| one defense post at the border, attack 10k | 13 | 39 | 256.4 |
-| three posts covering the whole border, attack 10k | 11 | 25 | 400 |
-| **vs terra nullius, attack 2k (human)** | 25 | 125 | **16 flat** |
-| **vs terra nullius, attack 2k (bot)** | 50 | 250 | **8 flat** |
-| 400-tile turtle, 4M troops, under a post, attacked with 1M | 17 | 32 | 31,250 |
+| Scenario                                                   | ticks | tiles taken | atk loss/tile |
+| ---------------------------------------------------------- | ----- | ----------- | ------------- |
+| 50k vs 50k, attack 10k                                     | 24    | 125         | 80            |
+| 50k vs 50k, attack 50k (all-in)                            | 43    | 805         | 62.1          |
+| 200k vs 20k, attack 40k                                    | 30    | 1,184       | 33.8          |
+| 20k vs 200k, attack 4k                                     | 27    | 41          | 97.6          |
+| vs bot defender, attack 10k                                | 34    | 178         | 56.2          |
+| vs traitor defender, attack 10k                            | 39    | 249         | 40.2          |
+| one defense post at the border, attack 10k                 | 13    | 39          | 256.4         |
+| three posts covering the whole border, attack 10k          | 11    | 25          | 400           |
+| **vs terra nullius, attack 2k (human)**                    | 25    | 125         | **16 flat**   |
+| **vs terra nullius, attack 2k (bot)**                      | 50    | 250         | **8 flat**    |
+| 400-tile turtle, 4M troops, under a post, attacked with 1M | 17    | 32          | 31,250        |
 
 Note the pattern: **in PvP the attack always spends its entire stack** unless it
 runs out of frontier first.
@@ -181,21 +181,21 @@ heap entries cost nothing, so the loop can churn many duplicates in one tick.
 
 ## 2.4 How an attack ends
 
-| Situation | Outcome |
-|---|---|
-| `troops < 1` | `attack.delete()` — **every remaining troop is lost, nothing refunded** |
-| Frontier empties | `retreat(0)` — **100% of remaining troops returned, free** |
-| Alliance formed mid-attack | `retreat(0)` — free |
-| You cancel vs a player | 20 ticks frozen, then **25% of the remaining stack dies** |
-| You cancel vs TerraNullius | 20 ticks frozen, then **free** |
-| Defender drops below 100 tiles | `handleDeadDefender()` |
+| Situation                      | Outcome                                                                 |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `troops < 1`                   | `attack.delete()` — **every remaining troop is lost, nothing refunded** |
+| Frontier empties               | `retreat(0)` — **100% of remaining troops returned, free**              |
+| Alliance formed mid-attack     | `retreat(0)` — free                                                     |
+| You cancel vs a player         | 20 ticks frozen, then **25% of the remaining stack dies**               |
+| You cancel vs TerraNullius     | 20 ticks frozen, then **free**                                          |
+| Defender drops below 100 tiles | `handleDeadDefender()`                                                  |
 
 ### `handleDeadDefender()` (`:448-481`)
 
 Triggers when `target.numTilesOwned() < 100`. Calls `conquerPlayer` (gold
 transfer, kill stats), then up to 100 passes over the defender's remaining tiles:
 any tile bordering **you** is yours; otherwise any tile bordering a **third**
-non-friendly player is conquered by *that* player.
+non-friendly player is conquered by _that_ player.
 
 > Finishing a player instantly wipes their last <100 tiles and **partially gifts
 > them to your neighbours**. If a rival borders the corpse, you are feeding them.
@@ -224,20 +224,21 @@ priority     = (rand(0..6) + 10) * (1 - numOwnedByMe*0.5 + mag/2) + currentTick
 ```
 
 Consequences:
+
 - `+ currentTick` means earlier-discovered tiles win ties — the frontier is
   roughly FIFO across ticks.
 - The `(1 - numOwnedByMe*0.5 + mag/2)` factor shrinks as you surround a tile, so
   **concave pockets and salients are eaten first**, before the front advances. It
-  first reaches ≤0 at `numOwnedByMe = 3` on plains (`mag/2 = 0.5`, giving exactly
-  0) and is strictly negative only at 4; on mountain (`mag/2 = 1`) it is never
-  negative. At `numOwnedByMe = 2` it is still +0.5 on plains.
+  first reaches ≤0 at `numOwnedByMe = 3` on plains (`mag/2 = 0.5`, giving
+  exactly 0) and is strictly negative only at 4; on mountain (`mag/2 = 1`) it is
+  never negative. At `numOwnedByMe = 2` it is still +0.5 on plains.
 - Mountains get a larger positive multiplier than plains, so **the attack prefers
   flat land and routes around mountains**.
 - The PRNG is `new PseudoRandom(123)` — **the same fixed seed for every attack in
   every game**. It is variety, not unpredictability.
 
 > **Attack direction is not "toward the capital".** You choose where an attack
-> *starts* (via a boat) and how many troops it gets. You do not choose where it
+> _starts_ (via a boat) and how many troops it gets. You do not choose where it
 > goes.
 
 **`borderSize` is a first-class resource.** `tickFraction` divides by it, so tiles
@@ -251,7 +252,7 @@ Ownership moves, borders are recomputed for the tile and its 4 neighbours, and
 
 **Structures on a captured tile** (`PlayerExecution.ts:57-78`): everything
 transfers to the new owner at its current level — **except a Defense Post, which
-is destroyed**. A structure whose tile becomes *unowned* is destroyed outright.
+is destroyed**. A structure whose tile becomes _unowned_ is destroyed outright.
 
 ### Disconnected territory
 
@@ -264,16 +265,17 @@ water or the map edge through own-or-unclaimed land.
 
 ## 2.6 Amphibious assault
 
-| Property | Value |
-|---|---|
-| Gold cost | **0** |
-| Troop cost | deducted at departure |
-| Concurrent boats | **3** (`boatMaxNumber()`), 0 if TransportShip is disabled |
-| **Cooldown** | **none — there is no boat cooldown anywhere in `src/core`** |
-| Speed | 1 tile/tick, water A* |
-| Landing search | nearest shore within manhattan **50** of the click, owned by the owner of the clicked tile, on a water component touching your shoreline |
+| Property         | Value                                                                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Gold cost        | **0**                                                                                                                                    |
+| Troop cost       | deducted at departure                                                                                                                    |
+| Concurrent boats | **3** (`boatMaxNumber()`), 0 if TransportShip is disabled                                                                                |
+| **Cooldown**     | **none — there is no boat cooldown anywhere in `src/core`**                                                                              |
+| Speed            | 1 tile/tick, water A\*                                                                                                                   |
+| Landing search   | nearest shore within manhattan **50** of the click, owned by the owner of the clicked tile, on a water component touching your shoreline |
 
 **On arrival** (`TransportShipExecution.ts:239-292`):
+
 - Target tile owned by **you** → treated as a return: **25% of the troops die**.
   This fires even on a normal outbound trip if you captured the landing tile by
   land in the meantime.
@@ -305,24 +307,24 @@ if (defender === null) {
 }
 ```
 
-| | TerraNullius | Player |
-|---|---|---|
-| Attacker loss/tile | **flat**: Plains 16, Highland 20, Mountain 24 (human/nation); half for bots | scales with troop ratio, density, territory size |
-| Effect of stack size on loss | **none** | bigger stack is cheaper per tile |
-| Defender loss | 0 | `troops / numTiles` per tile |
-| Tick budget | `borderSize * 2` (**double**) | 1 |
-| Posts / fallout | **still apply** | apply |
-| Traitor / territory curves | do **not** apply | apply |
-| Retreat malus | **0%** | 25% |
+|                              | TerraNullius                                                                | Player                                           |
+| ---------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
+| Attacker loss/tile           | **flat**: Plains 16, Highland 20, Mountain 24 (human/nation); half for bots | scales with troop ratio, density, territory size |
+| Effect of stack size on loss | **none**                                                                    | bigger stack is cheaper per tile                 |
+| Defender loss                | 0                                                                           | `troops / numTiles` per tile                     |
+| Tick budget                  | `borderSize * 2` (**double**)                                               | 1                                                |
+| Posts / fallout              | **still apply**                                                             | apply                                            |
+| Traitor / territory curves   | do **not** apply                                                            | apply                                            |
+| Retreat malus                | **0%**                                                                      | 25%                                              |
 
 **The expansion speed saturates.** The per-tile cost clamps at 5 once
 `attackTroops >= 400 * tileCost`:
 
-| Terrain | troops to saturate | max tiles/tick |
-|---|---|---|
-| Plains | 6,600 | `0.4 × borderSize` |
-| Highland | 8,000 | `0.4 × borderSize` |
-| Mountain | 10,000 | `0.4 × borderSize` |
+| Terrain  | troops to saturate | max tiles/tick     |
+| -------- | ------------------ | ------------------ |
+| Plains   | 6,600              | `0.4 × borderSize` |
+| Highland | 8,000              | `0.4 × borderSize` |
+| Mountain | 10,000             | `0.4 × borderSize` |
 
 Past ~10k troops, throwing more at neutral land buys nothing but more simultaneous
 frontage. Confirmed by scenario data: 2k troops → 125 tiles in 25 ticks (5/tick);
@@ -333,16 +335,16 @@ fallout multiplier); only the AI avoids it.
 
 ## 2.8 Defense posts
 
-| Property | Value |
-|---|---|
-| Range | **30** tiles, Euclidean (`distSquared <= 900`) |
-| Attacker-loss multiplier | **×5** |
-| Attacker-speed multiplier | **×3** slower |
-| Cost | `min(250_000, (n+1) * 50_000)` |
-| Build time | 50 ticks |
-| Min spacing from any structure | 15 tiles |
-| On tile capture | **destroyed**, not captured |
-| Upgradable | **no** |
+| Property                       | Value                                          |
+| ------------------------------ | ---------------------------------------------- |
+| Range                          | **30** tiles, Euclidean (`distSquared <= 900`) |
+| Attacker-loss multiplier       | **×5**                                         |
+| Attacker-speed multiplier      | **×3** slower                                  |
+| Cost                           | `min(250_000, (n+1) * 50_000)`                 |
+| Build time                     | 50 ticks                                       |
+| Min spacing from any structure | 15 tiles                                       |
+| On tile capture                | **destroyed**, not captured                    |
+| Upgradable                     | **no**                                         |
 
 **Posts do not stack.** `defenderHasDefensePost` is a boolean that short-circuits
 on the first match. Two overlapping posts give exactly the same 5×/3× as one. The
@@ -365,10 +367,10 @@ Under-construction posts do not count. A post must belong to the defender.
 3. **Frontage is the master speed variable.** Tiles/tick scales ~linearly with
    `borderSize`. A boat beachhead starts at ≤4 border tiles and is therefore
    glacial for its first ticks.
-4. **Cancelling costs 20 frozen ticks *before* the 25% tax.**
+4. **Cancelling costs 20 frozen ticks _before_ the 25% tax.**
 5. **Retreating from unclaimed land is free; from a player it costs 25%.**
 6. **A new land attack eats your existing boat beachhead** against the same
-   target — the merge checks *your* `sourceTile`, not the victim's. The spread-out
+   target — the merge checks _your_ `sourceTile`, not the victim's. The spread-out
    beachhead frontier is thrown away.
 7. **Simultaneous opposing attacks annihilate 1:1** at creation. Attacking someone
    who is attacking you can cancel both stacks before a tile moves.
@@ -385,7 +387,7 @@ Under-construction posts do not count. A post must belong to the defender.
 12. **Big empires are easier to attack AND better at attacking.**
     `largeTerritoryBonus` cuts attacker losses to 0.3× and speeds them up at giant
     size. This is deliberately anti-turtle.
-13. **Bots only get the 0.7× discount as *defenders* against Human/Nation
+13. **Bots only get the 0.7× discount as _defenders_ against Human/Nation
     attackers.** Bot-attacks-bot and bot-attacks-human get nothing.
 14. **Spawn immunity binds only Human attackers.** Nations and Bots ignore it.
 15. **Fewer than 100 defender tiles = instant elimination** on the next tile, and

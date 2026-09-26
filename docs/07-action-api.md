@@ -5,17 +5,18 @@ This is the chapter you emit commands from.
 ## 7.1 The envelope
 
 ```ts
-ClientIntentMessageSchema = z.object({          // Schemas.ts:1159
+// Schemas.ts:1159
+ClientIntentMessageSchema = z.object({
   type: z.literal("intent"),
-  intent: IntentSchema,                         // discriminated union on "type"
-})
+  intent: IntentSchema, // discriminated union on "type"
+});
 ```
 
 **The client never sends `clientID`.** The server stamps it from the
 authenticated socket (`GameServer.ts:337`):
 
 ```ts
-StampedIntent = Intent & { clientID: ClientID }   // Schemas.ts:817-820
+StampedIntent = Intent & { clientID: ClientID }; // Schemas.ts:817-820
 ```
 
 `MappedID` is a dictionary-encoded clientID matching `/^[A-Za-z0-9]{8,10}$/`. The
@@ -32,44 +33,44 @@ never enter the turn log.
 
 ### Gameplay intents
 
-| `type` | Schema | Notes and preconditions |
-|---|---|---|
-| `attack` | `{ targetID: MappedID \| null, troops: float(min 0) \| null }` | **`targetID: null` means attack TerraNullius.** `troops: null` falls back to `troops/5` (human) or `/20` (bot). Clamped to your troops; the actual **floored deducted** amount is used |
-| `cancel_attack` | `{ attackID: string }` | `attackID` comes from `AttackUpdate.id` in `PlayerUpdate.outgoingAttacks`. Retreat completes 20 ticks later. **Unbounded string** — only the 2 KB frame cap limits it |
-| `boat` | `{ troops: float(min 0) /*required*/, dst: uint }` | Fails silently and deterministically if: 3 boats already in flight, target is your own tile, `!canAttackPlayer`, no landing tile, or no launch port |
-| `cancel_boat` | `{ unitID: uint }` | Must be one of your own outgoing boats |
-| `move_warship` | `{ unitIds: int[] (nonempty), tile: uint }` | ⚠️ **no max array length**. Each warship must exist, be active, and **share a water component with the target** — others are silently skipped |
-| `spawn` | `{ tile: uint }` | Must be *queued during* the spawn phase. Under `randomSpawn`, no re-rolls |
-| `build_unit` | `{ unit: UnitType, tile: uint, rocketDirectionUp?: boolean, amount?: uint(1..50) }` | Rejected if the unit is disabled, the tile is invalid, no legal spawn tile exists, or gold is insufficient |
-| `upgrade_structure` | `{ unit: UnitType, unitId: uint, amount?: uint(1..50) }` | ⚠️ **`unit` is accepted and then ignored** by the executor. The structure must be yours |
-| `delete_unit` | `{ unitId: uint }` | Yours, active, on land, on your own territory, not in the spawn phase, past the 300-tick cooldown |
-| `allianceRequest` | `{ recipient: MappedID }` | See `06-diplomacy-and-ai.md §6.1` |
-| `allianceReject` | `{ requestor: MappedID }` | **No relation penalty for rejecting** |
-| `allianceExtension` | `{ recipient: MappedID }` | |
-| `breakAlliance` | `{ recipient: MappedID }` | Marks you a traitor for 300 ticks |
-| `targetPlayer` | `{ target: MappedID }` | Not self, not friendly, 150-tick cooldown. **−40 relation.** Lasts 100 ticks |
-| `emoji` | `{ recipient: MappedID \| "AllPlayers", emoji: uint(0..59) }` | 12 rows × 5 = 60 entries, so **max index 59**. 50-tick cooldown per recipient |
-| `quick_chat` | `{ recipient: MappedID, quickChatKey: string, target?: MappedID }` | `"<category>.<key>"` from `resources/QuickChat.json`. **No mechanical effect** |
-| `donate_gold` | `{ recipient: MappedID, gold: float(min 0) \| null }` | Requires `isFriendly`. 100-tick cooldown per recipient. `null` → `gold/3` |
-| `donate_troops` | `{ recipient: MappedID, troops: float(min 0) \| null }` | Same gate. Capped at the recipient's headroom |
-| `embargo` | `{ targetID: MappedID, action: "start" \| "stop" }` | Always permanent |
-| `embargo_all` | `{ action: "start" \| "stop" }` | 100-tick cooldown; skips self, bots and teammates |
-| `toggle_pause` | `{ paused: boolean }` (`.default(false)`) | Lobby creator or admin only; refused on listed games |
-| `mark_disconnected` | `{ isDisconnected: boolean }` | **Server-internal.** A client sending it is rejected 400 |
+| `type`              | Schema                                                                              | Notes and preconditions                                                                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attack`            | `{ targetID: MappedID \| null, troops: float(min 0) \| null }`                      | **`targetID: null` means attack TerraNullius.** `troops: null` falls back to `troops/5` (human) or `/20` (bot). Clamped to your troops; the actual **floored deducted** amount is used |
+| `cancel_attack`     | `{ attackID: string }`                                                              | `attackID` comes from `AttackUpdate.id` in `PlayerUpdate.outgoingAttacks`. Retreat completes 20 ticks later. **Unbounded string** — only the 2 KB frame cap limits it                  |
+| `boat`              | `{ troops: float(min 0) /*required*/, dst: uint }`                                  | Fails silently and deterministically if: 3 boats already in flight, target is your own tile, `!canAttackPlayer`, no landing tile, or no launch port                                    |
+| `cancel_boat`       | `{ unitID: uint }`                                                                  | Must be one of your own outgoing boats                                                                                                                                                 |
+| `move_warship`      | `{ unitIds: int[] (nonempty), tile: uint }`                                         | ⚠️ **no max array length**. Each warship must exist, be active, and **share a water component with the target** — others are silently skipped                                          |
+| `spawn`             | `{ tile: uint }`                                                                    | Must be _queued during_ the spawn phase. Under `randomSpawn`, no re-rolls                                                                                                              |
+| `build_unit`        | `{ unit: UnitType, tile: uint, rocketDirectionUp?: boolean, amount?: uint(1..50) }` | Rejected if the unit is disabled, the tile is invalid, no legal spawn tile exists, or gold is insufficient                                                                             |
+| `upgrade_structure` | `{ unit: UnitType, unitId: uint, amount?: uint(1..50) }`                            | ⚠️ **`unit` is accepted and then ignored** by the executor. The structure must be yours                                                                                                |
+| `delete_unit`       | `{ unitId: uint }`                                                                  | Yours, active, on land, on your own territory, not in the spawn phase, past the 300-tick cooldown                                                                                      |
+| `allianceRequest`   | `{ recipient: MappedID }`                                                           | See `06-diplomacy-and-ai.md §6.1`                                                                                                                                                      |
+| `allianceReject`    | `{ requestor: MappedID }`                                                           | **No relation penalty for rejecting**                                                                                                                                                  |
+| `allianceExtension` | `{ recipient: MappedID }`                                                           |                                                                                                                                                                                        |
+| `breakAlliance`     | `{ recipient: MappedID }`                                                           | Marks you a traitor for 300 ticks                                                                                                                                                      |
+| `targetPlayer`      | `{ target: MappedID }`                                                              | Not self, not friendly, 150-tick cooldown. **−40 relation.** Lasts 100 ticks                                                                                                           |
+| `emoji`             | `{ recipient: MappedID \| "AllPlayers", emoji: uint(0..59) }`                       | 12 rows × 5 = 60 entries, so **max index 59**. 50-tick cooldown per recipient                                                                                                          |
+| `quick_chat`        | `{ recipient: MappedID, quickChatKey: string, target?: MappedID }`                  | `"<category>.<key>"` from `resources/QuickChat.json`. **No mechanical effect**                                                                                                         |
+| `donate_gold`       | `{ recipient: MappedID, gold: float(min 0) \| null }`                               | Requires `isFriendly`. 100-tick cooldown per recipient. `null` → `gold/3`                                                                                                              |
+| `donate_troops`     | `{ recipient: MappedID, troops: float(min 0) \| null }`                             | Same gate. Capped at the recipient's headroom                                                                                                                                          |
+| `embargo`           | `{ targetID: MappedID, action: "start" \| "stop" }`                                 | Always permanent                                                                                                                                                                       |
+| `embargo_all`       | `{ action: "start" \| "stop" }`                                                     | 100-tick cooldown; skips self, bots and teammates                                                                                                                                      |
+| `toggle_pause`      | `{ paused: boolean }` (`.default(false)`)                                           | Lobby creator or admin only; refused on listed games                                                                                                                                   |
+| `mark_disconnected` | `{ isDisconnected: boolean }`                                                       | **Server-internal.** A client sending it is rejected 400                                                                                                                               |
 
 ### Control intents (never simulated)
 
-| `type` | Schema | Authorization |
-|---|---|---|
-| `kick_player` | `{ targetClientID?, targetPublicID? }` | Lobby creator or admin; **refused on a publicly listed lobby unless admin**; 400 on self-kick |
-| `update_game_config` | `{ config: partial GameConfig }` | Creator or admin bot; 403 public; 409 started; 409 on listed/host-cheats/whitelist |
-| `toggle_game_start_timer` | `{}` | Creator or admin bot; 403 public; 409 started/queued |
+| `type`                    | Schema                                 | Authorization                                                                                 |
+| ------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `kick_player`             | `{ targetClientID?, targetPublicID? }` | Lobby creator or admin; **refused on a publicly listed lobby unless admin**; 400 on self-kick |
+| `update_game_config`      | `{ config: partial GameConfig }`       | Creator or admin bot; 403 public; 409 started; 409 on listed/host-cheats/whitelist            |
+| `toggle_game_start_timer` | `{}`                                   | Creator or admin bot; 403 public; 409 started/queued                                          |
 
 > ⚠️ **`ExecutionManager.createExec` has no case for those three** and falls
 > through to `default: throw`. On a real server this is unreachable (the server
 > returns before queueing them). **But `LocalServer` — singleplayer and replays —
 > pushes every non-pause intent into the turn unconditionally**, and `createExecs`
-> is called *outside* `GameRunner.executeNextTick`'s try/catch. An agent driving
+> is called _outside_ `GameRunner.executeNextTick`'s try/catch. An agent driving
 > `LocalServer` directly must never emit those three.
 
 > `ExecutionManager.createExec` also requires `playerByClientID` to resolve;
@@ -107,8 +108,8 @@ execution order for the turn.
 9. `this._ticks++` — **the increment is last**, so the `tick` field of updates
    emitted this pass is the pre-increment value.
 
-> **Critical latency fact.** An execution created from a turn-*N* intent is pushed
-> to `unInitExecs`; step 2 only ticks *already-initialized* executions. So its
+> **Critical latency fact.** An execution created from a turn-_N_ intent is pushed
+> to `unInitExecs`; step 2 only ticks _already-initialized_ executions. So its
 > first `tick()` is on **tick N+1**. Many one-shot executions do all their work in
 > `init()` and report `isActive() === false` — those do take effect on tick N.
 > Budget **≥2 ticks (200 ms) plus RTT** for anything that needs a `tick()`.
@@ -133,13 +134,14 @@ Executions **disabled** during the spawn phase include `AttackExecution`,
 ### Per-tick payload
 
 ```ts
-interface GameUpdateViewData {              // GameUpdates.ts:21-76
+// GameUpdates.ts:21-76
+interface GameUpdateViewData {
   tick: number;
-  updates: GameUpdates;                     // Record<GameUpdateType, Update[]>
-  packedTileUpdates: Uint32Array;           // [tileRef, (state & 0xffff) | (terrain << 16)] pairs
+  updates: GameUpdates; // Record<GameUpdateType, Update[]>
+  packedTileUpdates: Uint32Array; // [tileRef, (state & 0xffff) | (terrain << 16)] pairs
   packedMotionPlans?: Uint32Array;
-  packedPlayerUpdates?: Float64Array;       // QUINTS: [smallID, tilesOwned, gold, troops, goldEarned]
-  packedAttackUpdates?: Float64Array;       // quads: [ownerSmallID, direction(0=out,1=in), index, troops]
+  packedPlayerUpdates?: Float64Array; // QUINTS: [smallID, tilesOwned, gold, troops, goldEarned]
+  packedAttackUpdates?: Float64Array; // quads: [ownerSmallID, direction(0=out,1=in), index, troops]
   playerNameViewData?: Record<string, NameViewData>;
   tickExecutionDuration?: number;
   pendingTurns?: number;
@@ -201,14 +203,14 @@ here" oracle.** It returns `canAttack`, `buildableUnits[]`,
 
 ### Client → server messages
 
-| type | Schema |
-|---|---|
-| `join` | `{ token, gameID, username, clanTag, cosmetics?, turnstileToken, spectator?, gitCommit?, platform? }` |
-| `rejoin` | `{ gameID, lastTurn: uint, token, gitCommit? }` |
-| `intent` | `{ intent }` |
-| `ping` | `{ sentAt: uint }` |
-| `hash` | `{ hash: float, turnNumber: uint }` |
-| `winner`, `live_stats`, `spectate`, `report`, `log` | — |
+| type                                                | Schema                                                                                                |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `join`                                              | `{ token, gameID, username, clanTag, cosmetics?, turnstileToken, spectator?, gitCommit?, platform? }` |
+| `rejoin`                                            | `{ gameID, lastTurn: uint, token, gitCommit? }`                                                       |
+| `intent`                                            | `{ intent }`                                                                                          |
+| `ping`                                              | `{ sentAt: uint }`                                                                                    |
+| `hash`                                              | `{ hash: float, turnNumber: uint }`                                                                   |
+| `winner`, `live_stats`, `spectate`, `report`, `log` | —                                                                                                     |
 
 Constraints: username 3–27 chars over `[ _.\-a-zA-Z0-9À-ÿ]` with ≥1 non-space;
 clan tag `/^[a-zA-Z0-9]{2,5}$/`; `gameID` `/^[A-Za-z0-9]{8,10}$/`.
@@ -263,14 +265,14 @@ silently converted to a **spectator**.
 
 ### Rate limits — hard numbers
 
-| Constant | Value | Effect on breach |
-|---|---|---|
-| `INTENTS_PER_SECOND` | **10** | intent **silently dropped** |
-| `INTENTS_PER_MINUTE` | **150** | silently dropped |
-| `MAX_INTENT_SIZE` | **2,000 bytes** | **kick** |
-| `REJOINS_PER_MINUTE` | 5 | dropped |
-| `TOTAL_BYTES` | **5 MiB** cumulative per client per game | **kick** |
-| HTTP API | 20 req/IP/s | — |
+| Constant             | Value                                    | Effect on breach            |
+| -------------------- | ---------------------------------------- | --------------------------- |
+| `INTENTS_PER_SECOND` | **10**                                   | intent **silently dropped** |
+| `INTENTS_PER_MINUTE` | **150**                                  | silently dropped            |
+| `MAX_INTENT_SIZE`    | **2,000 bytes**                          | **kick**                    |
+| `REJOINS_PER_MINUTE` | 5                                        | dropped                     |
+| `TOTAL_BYTES`        | **5 MiB** cumulative per client per game | **kick**                    |
+| HTTP API             | 20 req/IP/s                              | —                           |
 
 **Non-intent messages (`ping`, `hash`, `winner`, `live_stats`, `spectate`,
 `report`) have no per-count limit** — only the 5 MiB cap.
@@ -288,15 +290,15 @@ the reconnect mapping. `maxGameDuration = 3 h`; `emptyGameTimeout = 10 min`.
 
 ## 7.6 Game modes and lobby options
 
-| Enum | Values |
-|---|---|
-| `GameType` | `Singleplayer` / `Public` / `Private` |
-| `GameMode` | `FFA` / `Team` |
-| `RankedType` | `OneVOne` (`"1v1"`) / `TwoVTwo` (`"2v2"`) |
-| `Difficulty` | `Easy` / `Medium` / `Hard` / `Impossible` |
-| `GameMapSize` | `Compact` / `Normal` |
-| `PlayerType` | `Bot` / `Human` / `Nation` |
-| Team presets | `Duos`, `Trios`, `Quads`, `HumansVsNations` |
+| Enum          | Values                                      |
+| ------------- | ------------------------------------------- |
+| `GameType`    | `Singleplayer` / `Public` / `Private`       |
+| `GameMode`    | `FFA` / `Team`                              |
+| `RankedType`  | `OneVOne` (`"1v1"`) / `TwoVTwo` (`"2v2"`)   |
+| `Difficulty`  | `Easy` / `Medium` / `Hard` / `Impossible`   |
+| `GameMapSize` | `Compact` / `Normal`                        |
+| `PlayerType`  | `Bot` / `Human` / `Nation`                  |
+| Team presets  | `Duos`, `Trios`, `Quads`, `HumansVsNations` |
 
 ### `GameConfigSchema` — every field
 
@@ -338,6 +340,7 @@ only after the spawn phase.
 ### The threshold predicate
 
 Returns true if **any** of:
+
 1. `maxTimerValue` is set and `elapsedGameSeconds >= maxTimerValue * 60` — the
    leader wins.
 2. `elapsedGameSeconds >= 10,200` (**170 minutes**) — a hard forced finish 10
@@ -350,7 +353,7 @@ Returns true if **any** of:
 drops by **2 points per minute** after `startMinutes` (default 30), floored at 0 —
 so a stalled game always ends.
 
-> Nuking neutral land *lowers the denominator*, making the 80% threshold easier to
+> Nuking neutral land _lowers the denominator_, making the 80% threshold easier to
 > reach for whoever holds the most remaining land. **[DERIVED]**
 
 ### FFA
@@ -398,13 +401,13 @@ retreat, bleeding 1%→50% max HP per second.
 
 ### Seeding — everything derives from `gameID`
 
-| Seed | Consumer |
-|---|---|
-| `simpleHash(gameID)` | the master random that assigns `PlayerInfo.id` per human, then nation creation |
-| `simpleHash(gameID) + 1` | `Executor.random` |
-| `simpleHash(gameID) + 2` | `TribeSpawner` |
-| `simpleHash(playerInfo.id) + simpleHash(gameID)` | each `SpawnExecution` |
-| **hardcoded `123`** | **every `AttackExecution`** |
+| Seed                                             | Consumer                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `simpleHash(gameID)`                             | the master random that assigns `PlayerInfo.id` per human, then nation creation |
+| `simpleHash(gameID) + 1`                         | `Executor.random`                                                              |
+| `simpleHash(gameID) + 2`                         | `TribeSpawner`                                                                 |
+| `simpleHash(playerInfo.id) + simpleHash(gameID)` | each `SpawnExecution`                                                          |
+| **hardcoded `123`**                              | **every `AttackExecution`**                                                    |
 
 The PRNG is **sfc32**, all 32-bit integer ops, seed expanded through splitmix32
 with 12 warm-up calls. `nextInt(min, max)` is **max-exclusive**.
@@ -430,12 +433,12 @@ mid-execution. Turns added but not executed are **not** part of it.
 ### Replays
 
 Archived records require an **exact `gitCommit` match**. `PlayerRecord` must keep
-`teamIndex`, `friends` and `isLobbyCreator` — they are simulation *inputs*.
+`teamIndex`, `friends` and `isLobbyCreator` — they are simulation _inputs_.
 `toggle_pause` intents are stripped during replay.
 
 ### Simulating ahead — the caveats
 
-1. You cannot predict other players' intents; you can only simulate *your* intents
+1. You cannot predict other players' intents; you can only simulate _your_ intents
    against current state.
 2. An intent lands in whichever turn is open when the server receives it, and its
    execution `init()`s on that tick and first `tick()`s on the next. **Budget ≥2

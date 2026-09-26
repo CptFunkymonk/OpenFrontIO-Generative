@@ -5,39 +5,40 @@
 `TileRef = number` — a raw grid index (`GameMap.ts:5`). There are no x/y lookup
 tables; the arithmetic is deliberate (`GameMap.ts:119-123`).
 
-| Operation | Formula | Source |
-|---|---|---|
-| `ref(x, y)` | `y * width + x` (throws on bad coords) | `GameMap.ts:167-172` |
-| `x(ref)` | `ref % width` | `GameMap.ts:180-182` |
-| `y(ref)` | `(ref / width) \| 0` | `GameMap.ts:184-186` |
-| `isValidRef(ref)` | integer, `0 <= ref < width*height` | `GameMap.ts:174-176` |
+| Operation         | Formula                                | Source               |
+| ----------------- | -------------------------------------- | -------------------- |
+| `ref(x, y)`       | `y * width + x` (throws on bad coords) | `GameMap.ts:167-172` |
+| `x(ref)`          | `ref % width`                          | `GameMap.ts:180-182` |
+| `y(ref)`          | `(ref / width) \| 0`                   | `GameMap.ts:184-186` |
+| `isValidRef(ref)` | integer, `0 <= ref < width*height`     | `GameMap.ts:174-176` |
 
 Two parallel buffers, each `width*height` (`GameMap.ts:114-115`):
 
 **`terrain: Uint8Array`** — from the map file, mutable only by water nukes:
 
-| Bits | Mask | Meaning |
-|---|---|---|
-| 7 | `0x80` | `IS_LAND_BIT` |
-| 6 | `0x40` | `SHORELINE_BIT` |
-| 5 | `0x20` | `OCEAN_BIT` |
-| 0–4 | `0x1F` | `MAGNITUDE_MASK` (0–31) |
+| Bits | Mask   | Meaning                 |
+| ---- | ------ | ----------------------- |
+| 7    | `0x80` | `IS_LAND_BIT`           |
+| 6    | `0x40` | `SHORELINE_BIT`         |
+| 5    | `0x20` | `OCEAN_BIT`             |
+| 0–4  | `0x1F` | `MAGNITUDE_MASK` (0–31) |
 
 `GameMap.ts:127-130`. `IMPASSABLE_MAGNITUDE = 31` (`:135`).
 
 **`state: Uint16Array`** — mutable game state:
 
-| Bits | Mask | Meaning |
-|---|---|---|
-| 0–11 | `0xFFF` | smallID of the owner; `0` = TerraNullius. **Max 4095 players** |
-| 13 | `0x2000` | `FALLOUT_BIT` |
-| 14 | `0x4000` | `DEFENSE_BONUS_BIT` — **dead, never set by the sim** |
+| Bits | Mask     | Meaning                                                        |
+| ---- | -------- | -------------------------------------------------------------- |
+| 0–11 | `0xFFF`  | smallID of the owner; `0` = TerraNullius. **Max 4095 players** |
+| 13   | `0x2000` | `FALLOUT_BIT`                                                  |
+| 14   | `0x4000` | `DEFENSE_BONUS_BIT` — **dead, never set by the sim**           |
 
 `GameMap.ts:140-143`, `296-326`.
 
 Derived predicates:
+
 - `isShore(ref)` = `isLand && isShoreline` (`GameMap.ts:387-389`). The shoreline bit is set on **both
-  sides** of a coast — land tiles next to water *and* water tiles next to land
+  sides** of a coast — land tiles next to water _and_ water tiles next to land
   (`map_generator.go:312-352`). Impassable tiles never get it.
 - `isOceanShore(ref)` = land tile with a 4-neighbour whose **ocean bit** is set
   (`GameMap.ts:226-236`).
@@ -51,15 +52,16 @@ Derived predicates:
 ```
 enum TerrainType { Plains, Highland, Mountain, Ocean, Impassable }
 ```
+
 `Game.ts:365-371`. Derivation — `terrainType`, `GameMap.ts:397-407`:
 
-| Condition | Type |
-|---|---|
-| land, magnitude ≥ 31 | `Impassable` |
-| land, magnitude < 10 | `Plains` |
-| land, magnitude < 20 | `Highland` |
-| land, magnitude ≥ 20 | `Mountain` |
-| not land | `Ocean` (**including lakes** — ocean-vs-lake is the separate `OCEAN_BIT`) |
+| Condition            | Type                                                                      |
+| -------------------- | ------------------------------------------------------------------------- |
+| land, magnitude ≥ 31 | `Impassable`                                                              |
+| land, magnitude < 10 | `Plains`                                                                  |
+| land, magnitude < 20 | `Highland`                                                                |
+| land, magnitude ≥ 20 | `Mountain`                                                                |
+| not land             | `Ocean` (**including lakes** — ocean-vs-lake is the separate `OCEAN_BIT`) |
 
 Magnitude means elevation on land (0–30 from the PNG blue channel) and
 **distance to the nearest land** on water (`ceil(manhattan/2)`, capped 31;
@@ -69,19 +71,19 @@ shoreline water = 0) — `map_generator.go:156-161, 355-402`.
 
 `terrainAttackBase` (`Config.ts:172-188`) — **verified against source**:
 
-| Terrain | `mag` (drives attacker losses) | `tileCost` (drives slowness) |
-|---|---|---|
-| Plains | 80 | 16.5 |
-| Highland | 100 | 20 |
-| Mountain | 120 | 25 |
-| Impassable | **throws** | — |
+| Terrain    | `mag` (drives attacker losses) | `tileCost` (drives slowness) |
+| ---------- | ------------------------------ | ---------------------------- |
+| Plains     | 80                             | 16.5                         |
+| Highland   | 100                            | 20                           |
+| Mountain   | 120                            | 25                           |
+| Impassable | **throws**                     | —                            |
 
-Attacking *into* mountain costs 1.5× the troops of plains and is ~1.5× slower.
+Attacking _into_ mountain costs 1.5× the troops of plains and is ~1.5× slower.
 The penalty is paid by the attacker, always.
 
 ### What impassable terrain blocks
 
-Cannot be conquered, attacked, nuke-*targeted*, included in a blast, flooded by
+Cannot be conquered, attacked, nuke-_targeted_, included in a blast, flooded by
 water nukes, crossed by rail, or built on. Not counted in `numLandTiles`. Acts as
 the map edge for the encirclement check.
 
@@ -97,9 +99,9 @@ and land counts live only in `resources/maps/<folder>/manifest.json`.
 
 **`GameMapSize`** (`Game.ts:151-154`):
 
-| | game map | pathfinding minimap |
-|---|---|---|
-| `Normal` | `map.bin` (W×H) | `map4x.bin` (W/2 × H/2) |
+|           | game map                | pathfinding minimap      |
+| --------- | ----------------------- | ------------------------ |
+| `Normal`  | `map.bin` (W×H)         | `map4x.bin` (W/2 × H/2)  |
 | `Compact` | `map4x.bin` (W/2 × H/2) | `map16x.bin` (W/4 × H/4) |
 
 `TerrainMapLoader.ts:95-106`. **The minimap is always exactly half the game map's
@@ -112,14 +114,14 @@ the **same** 52-tile start, so players are ~4× more densely packed.
 
 ### Notable maps
 
-| Category | Maps |
-|---|---|
-| **All land — no boats, ports, trade or warships possible** | `Alps` (2000×1836, 3,672,000 land, 100%), `TheBox` (2048², 4,194,304, 100%) |
-| Smallest | `Onion` 512×512, 210,555 land |
-| Most water-dominated | `ArchipelagoSea` 6%, `Hawaii` 6%, `Japan` 8%, `Sol` 8%, `Caribbean` 10% |
-| Extreme aspect | `MississippiRiver` 400×4200, `Passage` 6000×400, `AmazonRiver` 5536×276 |
-| Most nations | `GiantWorldMap` 107, `WorldInverted` 93, `Dyslexdria` 82, `Russia` 82 |
-| Common | `World` 2000×1000 / 651,569 land / 72 nations; `Europe` 2904×1672 / 2,345,907 / 52 |
+| Category                                                   | Maps                                                                               |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **All land — no boats, ports, trade or warships possible** | `Alps` (2000×1836, 3,672,000 land, 100%), `TheBox` (2048², 4,194,304, 100%)        |
+| Smallest                                                   | `Onion` 512×512, 210,555 land                                                      |
+| Most water-dominated                                       | `ArchipelagoSea` 6%, `Hawaii` 6%, `Japan` 8%, `Sol` 8%, `Caribbean` 10%            |
+| Extreme aspect                                             | `MississippiRiver` 400×4200, `Passage` 6000×400, `AmazonRiver` 5536×276            |
+| Most nations                                               | `GiantWorldMap` 107, `WorldInverted` 93, `Dyslexdria` 82, `Russia` 82              |
+| Common                                                     | `World` 2000×1000 / 651,569 land / 72 nations; `Europe` 2904×1672 / 2,345,907 / 52 |
 
 21 maps define `teamGameSpawnAreas`, keyed by team count as a string
 (`GameImpl.ts:1069-1081`). `Alps` forces water nukes at 75%, `ArchipelagoSea` and
@@ -127,22 +129,22 @@ the **same** 52-tile start, so players are ~4× more densely packed.
 
 ## 1.4 Pathfinding and unit speeds
 
-| Domain | Algorithm | Map used |
-|---|---|---|
-| Water (boats, trade, warships) | HPA* over 32×32 clusters, flat `AStarWater` fallback | **minimap** |
-| Rail / trains | generic A* + `RailAdapter` | **minimap** |
-| Air (shells, SAM missiles) | seeded random 4-dir greedy walk, **no obstacle awareness** | full map |
-| Nukes / MIRV | cubic Bézier arc, no map awareness | full map |
+| Domain                         | Algorithm                                                  | Map used    |
+| ------------------------------ | ---------------------------------------------------------- | ----------- |
+| Water (boats, trade, warships) | HPA\* over 32×32 clusters, flat `AStarWater` fallback      | **minimap** |
+| Rail / trains                  | generic A\* + `RailAdapter`                                | **minimap** |
+| Air (shells, SAM missiles)     | seeded random 4-dir greedy walk, **no obstacle awareness** | full map    |
+| Nukes / MIRV                   | cubic Bézier arc, no map awareness                         | full map    |
 
 `PathFinder.ts:168-205`.
 
 **Water cost** (`AStar.Water.ts:5-15`), `BASE_COST = 100`:
 
-| Water magnitude | penalty |
-|---|---|
+| Water magnitude                  | penalty                       |
+| -------------------------------- | ----------------------------- |
 | `< 3` (within ~5 tiles of shore) | **+1000** (11× a normal step) |
-| `3..10` | 0 — the sweet spot |
-| `> 10` (deep) | +100 |
+| `3..10`                          | 0 — the sweet spot            |
+| `> 10` (deep)                    | +100                          |
 
 Ships hug the 3–10 magnitude band, i.e. **6–20 tiles offshore**. Heuristics are
 weighted (5× for `AStarWater`) and therefore **inadmissible** — paths are fast,
@@ -150,18 +152,18 @@ not optimal.
 
 ### Speeds, tiles per tick
 
-| Unit | Speed | Source |
-|---|---|---|
-| Transport ship (boat) | **1** | `TransportShipExecution.ts:38` |
-| Trade ship | **1** | `TradeShipExecution.ts:145-168` |
-| Warship patrolling/retreating | **1** | `WarshipExecution.ts:745-755` |
-| Warship hunting a trade ship | **2**, captures at manhattan ≤ 5 | `WarshipExecution.ts:681-691` |
-| Train | **2** rail tiles | `TrainExecution.ts:34` |
-| Shell | **3** | `ShellExecution.ts:67` |
-| SAM missile | **12** | `Config.ts:1172-1174` |
-| Atom / Hydrogen bomb | **10** arc units | `Config.ts:1123` |
-| MIRV carrier | **15** | `Config.ts:1125` |
-| MIRV warhead | **22** (+0..4 by index) | `Config.ts:1127` |
+| Unit                          | Speed                            | Source                          |
+| ----------------------------- | -------------------------------- | ------------------------------- |
+| Transport ship (boat)         | **1**                            | `TransportShipExecution.ts:38`  |
+| Trade ship                    | **1**                            | `TradeShipExecution.ts:145-168` |
+| Warship patrolling/retreating | **1**                            | `WarshipExecution.ts:745-755`   |
+| Warship hunting a trade ship  | **2**, captures at manhattan ≤ 5 | `WarshipExecution.ts:681-691`   |
+| Train                         | **2** rail tiles                 | `TrainExecution.ts:34`          |
+| Shell                         | **3**                            | `ShellExecution.ts:67`          |
+| SAM missile                   | **12**                           | `Config.ts:1172-1174`           |
+| Atom / Hydrogen bomb          | **10** arc units                 | `Config.ts:1123`                |
+| MIRV carrier                  | **15**                           | `Config.ts:1125`                |
+| MIRV warhead                  | **22** (+0..4 by index)          | `Config.ts:1127`                |
 
 Caveats: a ship "step" is a path node from the upscaled minimap path, so diagonal
 steps give ≈1.41 tiles/tick Euclidean. Nuke speed is along the **arc**, whose
@@ -192,35 +194,35 @@ bit, which is a static "part of the largest water body" flag.
 
 **What components gate:**
 
-| Mechanic | Rule |
-|---|---|
-| Warship construction | your port must share the target water tile's component |
-| Warship move order | **silently skipped** if the ship is in a different component |
-| Warship docking/retreat | ports in the same component only |
-| Trade partners | ports sharing a component with this port's water neighbours |
-| Transport launch | your shore tiles filtered to the destination's component |
-| Transport target | target shore must be on a component adjacent to your shoreline, `maxDist = 50` |
-| AI port siting | ocean, or a lake component ≥ **3,000** full-map tiles (except on Easy) |
+| Mechanic                | Rule                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| Warship construction    | your port must share the target water tile's component                         |
+| Warship move order      | **silently skipped** if the ship is in a different component                   |
+| Warship docking/retreat | ports in the same component only                                               |
+| Trade partners          | ports sharing a component with this port's water neighbours                    |
+| Transport launch        | your shore tiles filtered to the destination's component                       |
+| Transport target        | target shore must be on a component adjacent to your shoreline, `maxDist = 50` |
+| AI port siting          | ocean, or a lake component ≥ **3,000** full-map tiles (except on Easy)         |
 
 A spawn on a lake-only coast gets a port that can only trade with players on the
 **same lake**.
 
 ## 1.6 The spawn phase
 
-| Setting | Value | Source |
-|---|---|---|
-| Spawn phase, singleplayer | 100 ticks | `Config.ts:856-859` |
-| Spawn phase, random spawn | 150 ticks | `Config.ts:860-862` |
-| Spawn phase, otherwise | **200 ticks** | `Config.ts:863` |
-| `minDistanceBetweenPlayers()` | **30** (manhattan) | `Config.ts:823-825` |
-| `MAX_SPAWN_TRIES` | 1,000 | `SpawnExecution.ts:38` |
-| `RELAX_MIN_DIST_AT` | 750 — after try 750 the distance check is dropped | `SpawnExecution.ts:39` |
-| Spawn immunity | 50 ticks | `Config.ts:189` |
+| Setting                       | Value                                             | Source                 |
+| ----------------------------- | ------------------------------------------------- | ---------------------- |
+| Spawn phase, singleplayer     | 100 ticks                                         | `Config.ts:856-859`    |
+| Spawn phase, random spawn     | 150 ticks                                         | `Config.ts:860-862`    |
+| Spawn phase, otherwise        | **200 ticks**                                     | `Config.ts:863`        |
+| `minDistanceBetweenPlayers()` | **30** (manhattan)                                | `Config.ts:823-825`    |
+| `MAX_SPAWN_TRIES`             | 1,000                                             | `SpawnExecution.ts:38` |
+| `RELAX_MIN_DIST_AT`           | 750 — after try 750 the distance check is dropped | `SpawnExecution.ts:39` |
+| Spawn immunity                | 50 ticks                                          | `Config.ts:189`        |
 
 ## 1.7 The starting territory: exactly 52 tiles
 
 `getSpawnTiles(gm, tile, requireAllValid)` (**`src/core/execution/Util.ts:130-159`**
-— note: *execution*/Util.ts, not `src/core/Util.ts`) BFS-floods
+— note: _execution_/Util.ts, not `src/core/Util.ts`) BFS-floods
 `euclDistFN(tile, 4, center=true)`, which shifts the circle centre to
 `(x-0.5, y-0.5)` and tests `dx² + dy² <= 16` (`GameMap.ts:715-735`).
 
@@ -229,6 +231,7 @@ widths top to bottom `4, 6, 8, 8, 8, 8, 6, 4`. **The disc is biased up-and-left
 of the clicked tile by half a tile.**
 
 Two modes:
+
 - `requireAllValid = true` → `null` if **any** of the 52 is owned, non-land or
   impassable. Used by the random-spawn search.
 - `requireAllValid = false` → the valid subset, possibly fewer than 52. Used for
@@ -243,6 +246,7 @@ Client-side gating before the intent is sent: `isLand && !hasOwner &&
 inSpawnPhase && !isRandomSpawn` (`ClientGameRunner.ts:1216-1224`).
 
 Server-side gates on the intent path (`SpawnExecution.ts:60-94`):
+
 - invalid `TileRef` → no-op
 - the intent must have been **queued during** the spawn phase (captured in
   `init()`). An intent sent on the last spawn tick still lands; later ones do not.
@@ -258,7 +262,7 @@ manhattan 30; then require **all 52 tiles** valid.
 
 Because of that last requirement the **disc itself** contains no water, no
 impassable terrain and nobody else's land. It does **not** follow that the spawn
-is inland: nothing constrains the tiles *outside* the disc, and the disc's outer
+is inland: nothing constrains the tiles _outside_ the disc, and the disc's outer
 ring is 4-adjacent to them, so a disc-edge tile beside water is a shore tile and a
 Port can be built on it at once. Measured: **5 of 500** valid random-spawn discs
 on Iceland (Normal) contained an `isShore` tile. Coastal random spawns are rare,
@@ -266,11 +270,11 @@ not impossible. If all 1,000 tries fail the player is simply not placed.
 
 ### Who gets spawned
 
-| Population | Trigger |
-|---|---|
-| Humans | **only when `isRandomSpawn()`** are spawns pre-created (`PlayerSpawner.ts:13-23`) |
-| Nations | one `NationExecution` each when `spawnNations()` |
-| Bots (tribes) | `TribeSpawner.spawnTribes(bots())` when `bots() > 0` |
+| Population    | Trigger                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| Humans        | **only when `isRandomSpawn()`** are spawns pre-created (`PlayerSpawner.ts:13-23`) |
+| Nations       | one `NationExecution` each when `spawnNations()`                                  |
+| Bots (tribes) | `TribeSpawner.spawnTribes(bots())` when `bots() > 0`                              |
 
 > With random spawn **off**, a human who never sends a spawn intent is never
 > placed. There is no end-of-phase fallback anywhere.
@@ -326,7 +330,7 @@ encircled**. The cost is that coastline is a second attack surface: enemy boats
 land on any shore tile reachable within 50 tiles of their target.
 
 **7. Terrain does not affect economy at all.** Gold is flat; troop growth depends
-only on tile *count*. **Land quantity beats land quality for economy; land quality
+only on tile _count_. **Land quantity beats land quality for economy; land quality
 only buys defence.**
 
 **8. Nations avoid mountains 50% of the time**, so mountain-adjacent spawns tend

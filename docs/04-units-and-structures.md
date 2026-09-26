@@ -7,24 +7,24 @@ ladders are in `03-economy.md §3.3`.
 
 `UnitType` — `Game.ts:195-212`. Groupings — `Game.ts:220-253`.
 
-| Enum | String | Group | You can build it? |
-|---|---|---|---|
-| `TransportShip` | `"Transport"` | PlayerBuildable | yes (not in the build menu — it is the boat-attack intent) |
-| `Warship` | `"Warship"` | BuildableAttacks | yes |
-| `Shell` | `"Shell"` | — | no (warships spawn them) |
-| `SAMMissile` | `"SAMMissile"` | — | no |
-| `Port` | `"Port"` | Structures | yes |
-| `AtomBomb` | `"Atom Bomb"` | Nukes, BuildableAttacks | yes |
-| `HydrogenBomb` | `"Hydrogen Bomb"` | Nukes, BuildableAttacks | yes |
-| `TradeShip` | `"Trade Ship"` | — | no (ports spawn them) |
-| `MissileSilo` | `"Missile Silo"` | Structures | yes |
-| `DefensePost` | `"Defense Post"` | Structures | yes |
-| `SAMLauncher` | `"SAM Launcher"` | Structures | yes |
-| `City` | `"City"` | Structures | yes |
-| `MIRV` | `"MIRV"` | Nukes, BuildableAttacks | yes |
-| `MIRVWarhead` | `"MIRV Warhead"` | Nukes | no |
-| `Train` | `"Train"` | — | no (factories spawn them) |
-| `Factory` | `"Factory"` | Structures | yes |
+| Enum            | String            | Group                   | You can build it?                                          |
+| --------------- | ----------------- | ----------------------- | ---------------------------------------------------------- |
+| `TransportShip` | `"Transport"`     | PlayerBuildable         | yes (not in the build menu — it is the boat-attack intent) |
+| `Warship`       | `"Warship"`       | BuildableAttacks        | yes                                                        |
+| `Shell`         | `"Shell"`         | —                       | no (warships spawn them)                                   |
+| `SAMMissile`    | `"SAMMissile"`    | —                       | no                                                         |
+| `Port`          | `"Port"`          | Structures              | yes                                                        |
+| `AtomBomb`      | `"Atom Bomb"`     | Nukes, BuildableAttacks | yes                                                        |
+| `HydrogenBomb`  | `"Hydrogen Bomb"` | Nukes, BuildableAttacks | yes                                                        |
+| `TradeShip`     | `"Trade Ship"`    | —                       | no (ports spawn them)                                      |
+| `MissileSilo`   | `"Missile Silo"`  | Structures              | yes                                                        |
+| `DefensePost`   | `"Defense Post"`  | Structures              | yes                                                        |
+| `SAMLauncher`   | `"SAM Launcher"`  | Structures              | yes                                                        |
+| `City`          | `"City"`          | Structures              | yes                                                        |
+| `MIRV`          | `"MIRV"`          | Nukes, BuildableAttacks | yes                                                        |
+| `MIRVWarhead`   | `"MIRV Warhead"`  | Nukes                   | no                                                         |
+| `Train`         | `"Train"`         | —                       | no (factories spawn them)                                  |
+| `Factory`       | `"Factory"`       | Structures              | yes                                                        |
 
 `Structures = [City, DefensePost, SAMLauncher, MissileSilo, Port, Factory]`.
 **Anything without `maxHealth` dies to a single hit** (`UnitImpl.ts:233-235`) —
@@ -32,15 +32,15 @@ that is everything except the Warship.
 
 ## 4.2 Build time and placement
 
-| Structure | Build ticks | Seconds |
-|---|---|---|
-| City | 20 | 2 |
-| Factory | 20 | 2 |
-| Port | 50 | 5 |
-| Defense Post | 50 | 5 |
-| Missile Silo | 100 | 10 |
-| **SAM Launcher** | **300** | **30** |
-| Warship, nukes, MIRV | 0 — delegate immediately | — |
+| Structure            | Build ticks              | Seconds |
+| -------------------- | ------------------------ | ------- |
+| City                 | 20                       | 2       |
+| Factory              | 20                       | 2       |
+| Port                 | 50                       | 5       |
+| Defense Post         | 50                       | 5       |
+| Missile Silo         | 100                      | 10      |
+| **SAM Launcher**     | **300**                  | **30**  |
+| Warship, nukes, MIRV | 0 — delegate immediately | —       |
 
 `instantBuild` sets all of these to 0.
 
@@ -58,9 +58,10 @@ and it counts as **1** toward the cost ladder rather than its level.
 
 **Land structures** (City, Factory, MissileSilo, DefensePost, SAMLauncher) —
 `PlayerImpl.ts:1734-1805`:
+
 1. The clicked tile must be **owned by you**, or there is no placement at all.
 2. Flood your own tiles within Euclidean **15** of the click.
-3. Reject any candidate within Euclidean **15** of *any* structure of *any* owner,
+3. Reject any candidate within Euclidean **15** of _any_ structure of _any_ owner,
    including under-construction ones.
 4. Sort by distance to the click — the structure **auto-snaps to the nearest
    surviving tile**.
@@ -86,30 +87,31 @@ one** — `canUpgrade` wins over `canBuild`. The cost is the next rung of the sa
 ladder.
 
 `increaseLevel()` (`UnitImpl.ts:738-757`):
+
 - For **MissileSilo and SAMLauncher**, the new missile slot **starts on cooldown**.
 - For **SAMLauncher**, range interpolates linearly to the new value over
   `samUpgradeDuration() = 45` ticks.
 
 ### What a level actually buys
 
-| Structure | Effect of level |
-|---|---|
-| **City** | `maxTroops += 250,000` per level. Under-construction cities excluded |
-| **Port** | (a) trade-ship rolls per 10-tick check = level; (b) trade-partner weight = level; (c) warship docking capacity = level; (d) docked healing pool = `level × 5` HP/tick shared |
-| **Factory** | train-spawn rolls per tick = level; counted level-weighted in `trainSpawnRate` |
-| **Missile Silo** | **number of simultaneously ready missiles** |
-| **SAM Launcher** | ready interceptors = level, **and** range |
-| Defense Post | n/a — always level 1 |
+| Structure        | Effect of level                                                                                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **City**         | `maxTroops += 250,000` per level. Under-construction cities excluded                                                                                                         |
+| **Port**         | (a) trade-ship rolls per 10-tick check = level; (b) trade-partner weight = level; (c) warship docking capacity = level; (d) docked healing pool = `level × 5` HP/tick shared |
+| **Factory**      | train-spawn rolls per tick = level; counted level-weighted in `trainSpawnRate`                                                                                               |
+| **Missile Silo** | **number of simultaneously ready missiles**                                                                                                                                  |
+| **SAM Launcher** | ready interceptors = level, **and** range                                                                                                                                    |
+| Defense Post     | n/a — always level 1                                                                                                                                                         |
 
 ## 4.4 Capture, destruction and deletion
 
 ### When the tile under a structure changes hands (`PlayerExecution.ts:57-78`, every tick)
 
-| Structure | Fate |
-|---|---|
-| City, Port, Factory, Missile Silo, SAM Launcher | **captured intact at their current level** |
-| **Defense Post** | **destroyed**, credited to the captor |
-| Any structure whose tile becomes **unowned** (nuked into fallout/water) | **destroyed**, no credit |
+| Structure                                                               | Fate                                       |
+| ----------------------------------------------------------------------- | ------------------------------------------ |
+| City, Port, Factory, Missile Silo, SAM Launcher                         | **captured intact at their current level** |
+| **Defense Post**                                                        | **destroyed**, credited to the captor      |
+| Any structure whose tile becomes **unowned** (nuked into fallout/water) | **destroyed**, no credit                   |
 
 Capture clears any pending voluntary deletion, removes the unit from the old
 owner's list, and moves **both players' cost ladders**. A captured structure keeps
@@ -126,9 +128,9 @@ teammate** (`GameImpl.ts:1540-1553`). Trade ships are captured by warships.
 Preconditions: the unit exists, is yours, is active, is **on your own territory**,
 **on land**, not during the spawn phase, and the cooldown has elapsed.
 
-| Constant | Value |
-|---|---|
-| `deleteUnitCooldown()` | **300 ticks (30 s)** between deletions, per player |
+| Constant                 | Value                                                      |
+| ------------------------ | ---------------------------------------------------------- |
+| `deleteUnitCooldown()`   | **300 ticks (30 s)** between deletions, per player         |
 | `deletionMarkDuration()` | **300 ticks** — the unit keeps working for 30 s, then dies |
 
 > **There is no gold refund.** None. Deleting a level-N structure destroys the
@@ -138,7 +140,7 @@ Preconditions: the unit exists, is yours, is active, is **on your own territory*
 ## 4.5 City
 
 Its entire tick logic is: on the first tick, if a Factory is within
-`trainStationMaxRange() = 110`, become a train station. That is all it *does*.
+`trainStationMaxRange() = 110`, become a train station. That is all it _does_.
 
 Its value is `+250,000 maxTroops per level` and being a train **trade
 destination** (25,000–35,000 gold per visiting train, paid to both parties).
@@ -174,18 +176,18 @@ losses, ×3 slower, does not stack, destroyed on capture, not upgradable, and
 
 ## 4.10 Warships
 
-| Property | Value |
-|---|---|
-| Base max health | **1000** |
-| Cost | `min(1M, (n+1) × 250k)` |
-| Patrol range | 100 |
-| Targeting range | 130 |
-| Shell reload | 20 ticks (fires every 21) — **but transport-ship targets are exempt: `lastShellAttack` is not updated, so a warship shelling transports fires every tick** (`WarshipExecution.ts:656-661`) |
-| Docking range | 5 |
-| Passive heal | **+1 HP/tick** within **150** of any of your ports, in any state |
-| Docked heal pool | `portLevel × 5` HP/tick, split across docked ships |
-| Retreat threshold | health < **75%** of veterancy-adjusted max |
-| Shell lifetime after the firing unit dies | 50 ticks |
+| Property                                  | Value                                                                                                                                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Base max health                           | **1000**                                                                                                                                                                                   |
+| Cost                                      | `min(1M, (n+1) × 250k)`                                                                                                                                                                    |
+| Patrol range                              | 100                                                                                                                                                                                        |
+| Targeting range                           | 130                                                                                                                                                                                        |
+| Shell reload                              | 20 ticks (fires every 21) — **but transport-ship targets are exempt: `lastShellAttack` is not updated, so a warship shelling transports fires every tick** (`WarshipExecution.ts:656-661`) |
+| Docking range                             | 5                                                                                                                                                                                          |
+| Passive heal                              | **+1 HP/tick** within **150** of any of your ports, in any state                                                                                                                           |
+| Docked heal pool                          | `portLevel × 5` HP/tick, split across docked ships                                                                                                                                         |
+| Retreat threshold                         | health < **75%** of veterancy-adjusted max                                                                                                                                                 |
+| Shell lifetime after the firing unit dies | 50 ticks                                                                                                                                                                                   |
 
 ### Shell damage (`ShellExecution.ts:96-114`)
 
@@ -239,24 +241,24 @@ patrol tile also disables repair-retreat for 50 ticks.
 
 ### Veterancy (`UnitImpl.ts:651-727`)
 
-| Constant | Value |
-|---|---|
-| Max veterancy | **3** |
-| Health bonus | **+20% of base max HP per level** |
-| Shell damage bonus | **+20% per level** |
-| Transport kills per level | **10** |
-| Trade captures per level | **25** |
+| Constant                  | Value                             |
+| ------------------------- | --------------------------------- |
+| Max veterancy             | **3**                             |
+| Health bonus              | **+20% of base max HP per level** |
+| Shell damage bonus        | **+20% per level**                |
+| Transport kills per level | **10**                            |
+| Trade captures per level  | **25**                            |
 
 **Killing an enemy Warship (the final blow) = instant +1 level**, and it **wipes**
 the partial progress meter. Transports and captures share one meter worth 250
 points per level: a transport kill is 25 points, a capture is 10. Overflow carries.
 
 | Vet | Max HP | Retreat threshold | Shell damage range |
-|---|---|---|---|
-| 0 | 1000 | 750 | 200–300 |
-| 1 | 1200 | 900 | 240–360 |
-| 2 | 1400 | 1050 | 280–420 |
-| 3 | 1600 | 1200 | 320–480 |
+| --- | ------ | ----------------- | ------------------ |
+| 0   | 1000   | 750               | 200–300            |
+| 1   | 1200   | 900               | 240–360            |
+| 2   | 1400   | 1050              | 280–420            |
+| 3   | 1600   | 1200              | 320–480            |
 
 Gaining a level does **not** heal the ship. Veterancy lives in `warshipState` and
 therefore **survives capture**. Only warships have it.
