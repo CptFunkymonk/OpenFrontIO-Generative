@@ -532,6 +532,68 @@ describe("peak dmid (webPeakKeep)", () => {
   });
 });
 
+describe("slots and leads (v3)", () => {
+  test("the keep set leaves floor(webSlotSpare * A_max) of A_ext free for nations dying (13 non-bot players: A_max 4, A_ext 3, kept 2)", () => {
+    const w = synth(
+      { webMidgame: true, allyMinP: 2, webSlotSpare: 0.25 },
+      TROOPS,
+    );
+    // Eight inert one-tile nations far from everyone: 13 non-bot players.
+    for (let i = 0; i < 8; i++) {
+      const p = w.game.addPlayer(
+        new PlayerInfo(`x${i}`, PlayerType.Nation, null, `NATIONX${i}`),
+      );
+      p.conquer(w.game.ref(199, 90 + i));
+    }
+    expect(allySlots(w.game, w.us, 0)).toEqual({
+      max: 4,
+      ext: 3,
+      webTarget: 3,
+    });
+    w.h.step();
+    w.h.step();
+    expect(diplomacyMemory(w.s).mid!.slots).toBe(2);
+    // The default (0): all of A_ext; with 5 players A_ext = 1 either way.
+    const none = synth({ webMidgame: true }, TROOPS);
+    none.h.step();
+    expect(diplomacyMemory(none.s).mid!.slots).toBe(1);
+  });
+
+  for (const opening of [false, true]) {
+    test(`between webFrom and the first midgame plan the spec path asks with ${opening ? "webExtendLead (webExtendOpening)" : "extendLead: no early ask"}`, () => {
+      // Not in stall mode's danger home: A is in the spec's allySet.
+      const w = synth(
+        {
+          webMidgame: true,
+          webFrom: 60,
+          stallDangerHome: false,
+          webExtendOpening: opening,
+        },
+        TROOPS,
+      );
+      w.s.stall.since = null;
+      w.h.step();
+      ally(w, A);
+      expireAt(w, A, w.game.ticks() + 1500);
+      const before: AgentIntent[] = [];
+      while (w.game.ticks() < 60) before.push(...w.h.step());
+      const early: AgentIntent[] = [];
+      // Plans at 0 and 51 (spec), the first midgame plan at 102.
+      while (w.game.ticks() < 100) early.push(...w.h.step());
+      expect(w.s.web.allySet).toContain(A);
+      expect(before.filter((i) => i.type === "allianceExtension")).toEqual([]);
+      expect(
+        early.filter((i) => i.type === "allianceExtension").length > 0,
+      ).toBe(opening);
+      if (opening) return;
+      const late: AgentIntent[] = [];
+      while (w.game.ticks() < 110) late.push(...w.h.step());
+      expect(diplomacyMemory(w.s).mid!.keep).toContain(A);
+      expect(late).toContainEqual({ type: "allianceExtension", recipient: A });
+    });
+  }
+});
+
 describe("the slot above A_ext (webSlotBorrow)", () => {
   // A_ext = 1, A_max = 2: D (dmid 0.27, outside the keep set) holds the
   // A_ext slot; A is kept and unallied.

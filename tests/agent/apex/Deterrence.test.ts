@@ -24,7 +24,14 @@
  *   included); below 1 it is deleted after cancelling as much, with no
  *   hit [PIN AttackMerge]. It is not sent when home would fall under
  *   detCounterKeep·cap, for stacks under detCounterMin of home, while a
- *   request to the nation is pending, or with the option off.
+ *   request to the nation is pending, with the option off, or (with
+ *   detCounterNoUnlock) when it would let a second, deterred nation attack
+ *   us (a two-nation field and the real NationModel).
+ * - The hold (detHold): a land line kept at its highest value for hold
+ *   ticks; unlockedBy and potentialSend over stand-ins.
+ * - Defense posts (detPosts): front and site geometry, a reactive post
+ *   that gets built, proactive posts before an attack, and the filters
+ *   (detPostMinShare, detPostMinThreat, detPostLead, detPostsMax).
  */
 import { AgentIntent } from "../../../src/agent/Agent";
 import { defenseMemory } from "../../../src/agent/agents/apex/controllers/DefenseController";

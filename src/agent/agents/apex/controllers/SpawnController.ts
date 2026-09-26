@@ -1,4 +1,4 @@
-import { Game, GameType, Player } from "../../../../core/game/Game";
+import { Game, GameType, Player, PlayerType } from "../../../../core/game/Game";
 import { TileRef } from "../../../../core/game/GameMap";
 import type { AgentContext } from "../../../Agent";
 import type { GameFork } from "../../../Fork";
@@ -11,6 +11,7 @@ import {
 import {
   ArrivalField,
   buildRaceGrid,
+  cellOf,
   idleArrival,
   IdleSample,
   idleSample,
@@ -22,6 +23,11 @@ import {
   staticArrival,
 } from "../../../lib/RaceField";
 import { Prio } from "../../../lib/Scheduler";
+import {
+  EraseCandidate,
+  eraseCandidates,
+  reachScore,
+} from "../../../lib/SpawnErase";
 import { planSpawn } from "../../../lib/SpawnPlanner";
 import type { ApexOptions, SpawnMode } from "../options";
 import type { Controller, View } from "../policy";
@@ -51,9 +57,29 @@ import { type ApexState, noteLine } from "../state";
 // tick T* and sends at T* − 1. An agent cannot see which host runs it, so the
 // signal is the option the browser is told to pass: spawnWallBudgetMs ≤
 // BROWSER_SPAWN_WALL_MS (see isBrowserSpawn).
+//
+// Preview (o.spawnPreview, package A3; chapter 13 §2.1, §5.1): a spawn sent
+// at the agent's first call (ctx.tick === 1) lands in tick 2, before every
+// nation, and ends the phase before any nation hops; but the live game at
+// tick 1 shows neither the tribes (they land in tick 1) nor the nations
+// (tick 2), and a race field planned on it is blind (spawnDelay 1: ≥ top at
+// minute 3 in 28% of quick@4 games against 50%). So the plan is made on a
+// fork advanced PREVIEW_ADVANCE ticks without us, which is exactly the
+// layout the nations land in, and sent at tick 1. With o.spawnErase it also
+// weighs spawning on a nation's pick, which covers the nation's disc so it
+// is never placed (lib/SpawnErase.ts), verified in a second fork.
 
 /** Ticks after a send before a spawn that did not land is resent (§3.2.4). */
 export const RESEND_TICKS = 10;
+/** The preview plans at the agent's first call: its spawn goes into turn 1
+ *  and lands in tick 2, ahead of the nations' first SpawnExecutions
+ *  [PIN SpawnPhaseSingleplayer 9]. */
+export const PREVIEW_TICK = 1;
+/** Ticks the preview fork is advanced: the tribes land in tick 1 and the
+ *  nations in tick 2. */
+export const PREVIEW_ADVANCE = 2;
+/** Erasure sites verified in a fork before the best race candidate wins. */
+export const ERASE_VERIFY_MAX = 2;
 /** Idle fork: ticks between samples (§3.2.2). */
 export const IDLE_SAMPLE_EVERY = 150;
 /** Rollout value: c̄ = 17 troops per tile (§3.2.5, value(·, 17)). */
@@ -108,6 +134,10 @@ export interface SpawnPlan {
   candidates: SpawnCandidate[] | null;
   /** Mode rollout: what each rolled-out candidate reached. */
   rollouts: RolloutRecord[];
+  /** Planned on the preview fork (o.spawnPreview). */
+  preview: boolean;
+  /** The verified erasure site at the head of the queue, if one won. */
+  erase: EraseCandidate | null;
 }
 
 export interface RolloutRecord {
@@ -132,6 +162,7 @@ export interface RolloutRecord {
 export class SpawnController implements Controller {
   readonly name = "spawn";
   private current: SpawnPlan | null = null;
+  private layoutGrid: RaceGrid | null = null;
 
   /** The plan in use (null before the first eligible tick). For tests and
    *  logs. */
@@ -139,16 +170,31 @@ export class SpawnController implements Controller {
     return this.current;
   }
 
+  /** The race grid the preview built on its fork (null without one). Its
+   *  terrain arrays are the game's; only `free`, which spawnCandidates
+   *  alone reads, is the fork's at tick 3. So the policy can adopt it as
+   *  its own race grid after the spawn instead of building another. */
+  get previewGrid(): RaceGrid | null {
+    return this.layoutGrid;
+  }
+
   onTick(v: View, s: ApexState): void {
     const { game, me, tick, o } = v;
     if (me.hasSpawned()) return;
-    if (tick < spawnTick(game, o)) return;
+    const preview =
+      this.current === null && tick === PREVIEW_TICK && previewAllowed(v);
+    if (!preview && tick < spawnTick(game, o)) return;
     const sentAt = s.spawn.sentAt;
     if (sentAt !== null && tick - sentAt < RESEND_TICKS) return;
 
     let plan = this.current;
     if (plan === null) {
-      plan = this.makePlan(v, true);
+      const previewed = preview ? this.previewPlan(v, s) : null;
+      if (preview && previewed === null) {
+        this.note(v, s, "spawn preview: no fork, planning as without it");
+        if (tick < spawnTick(game, o)) return;
+      }
+      plan = previewed ?? this.makePlan(v, true);
       this.current = plan;
       this.notePlan(v, s, plan, "");
     } else if (sentAt !== null) {
@@ -180,10 +226,14 @@ export class SpawnController implements Controller {
     s.spawn.planned = tile;
     s.spawn.sentAt = tick;
     s.spawn.mode = plan.mode;
+    const erase =
+      plan.erase !== null && plan.erase.tile === tile
+        ? `, erase ${plan.erase.name}`
+        : "";
     this.note(
       v,
       s,
-      `spawn (${plan.mode}) at ${xy(game, tile)}, candidate ${plan.next + 1}/${plan.queue.length}`,
+      `spawn (${plan.mode}${plan.preview ? ", preview" : ""}${erase}) at ${xy(game, tile)}, candidate ${plan.next + 1}/${plan.queue.length}`,
     );
   }
 
@@ -203,18 +253,7 @@ export class SpawnController implements Controller {
 
   /** A plan by `mode` on (game, me): the live game, or a fork of it. */
   private planOn(v: View, mode: SpawnMode, game: Game, me: Player): SpawnPlan {
-    if (mode === "plan") {
-      const t = planSpawn(game, me);
-      return {
-        queue: t === null ? [] : [t],
-        next: 0,
-        minDisc: 1,
-        sendAt: null,
-        mode,
-        candidates: null,
-        rollouts: [],
-      };
-    }
+    if (mode === "plan") return planSpawnPlan(game, me);
     const grid = this.grid(v);
     if (mode === "idle") {
       const arr = this.idleField(v, grid);
@@ -391,6 +430,118 @@ export class SpawnController implements Controller {
     return plan;
   }
 
+  /**
+   * o.spawnPreview at ctx.tick === PREVIEW_TICK: fork, advance
+   * PREVIEW_ADVANCE ticks without us (the tribes and every nation land on
+   * the fork as they will in the game, since nothing we do reaches them
+   * before tick 2), plan by the mode on that layout, and send at once. Mode
+   * idle reads its arrival times from a second such fork stepped on; mode
+   * rollout forks the live game with the spawn in turn 1, as always. With
+   * o.spawnErase the erasure sites are weighed against the best candidate
+   * (on the static field only: their scores are race scores). Null when no
+   * fork can be made.
+   */
+  private previewPlan(v: View, s: ApexState): SpawnPlan | null {
+    const { live, o } = v;
+    if (live === null) return null;
+    const f = previewFork(v.lookahead, live);
+    if (f === null) return null;
+    const layout = f.game;
+    const fme = layout.playerByClientID(live.clientID);
+    if (fme === null) return null;
+    const mode = effectiveMode(v);
+    let plan: SpawnPlan;
+    if (mode === "plan") {
+      plan = planSpawnPlan(layout, fme);
+    } else {
+      const grid = buildRaceGrid(layout, o);
+      this.layoutGrid = grid;
+      const race = staticArrival(grid, layout, o);
+      let idle: ArrivalField | null = null;
+      if (mode === "idle") {
+        const base = previewFork(v.lookahead, live);
+        if (base !== null) idle = this.idleField(v, grid, base);
+      }
+      plan = candidatePlan(
+        grid,
+        idle ?? race,
+        layout,
+        fme,
+        o,
+        idle !== null ? "idle" : "race",
+      );
+      if (o.spawnErase && idle === null) {
+        this.erase(v, s, live, plan, grid, race, layout, fme);
+        if (mode === "rollout" && plan.erase !== null) {
+          // Roll it out with the others: the best candidate by score.
+          plan.candidates = [
+            eraseAsCandidate(grid, layout, plan.erase),
+            ...(plan.candidates ?? []),
+          ];
+        }
+      }
+      if (mode === "rollout") this.rollouts(v, plan);
+    }
+    plan.preview = true;
+    return plan;
+  }
+
+  /**
+   * o.spawnErase: the erasure sites scoring above (1 + spawnEraseMargin) ×
+   * the best candidate's score, verified in a fork best first (at most
+   * ERASE_VERIFY_MAX); the first that holds goes to the head of the queue,
+   * the candidates follow it.
+   */
+  private erase(
+    v: View,
+    s: ApexState,
+    live: AgentContext,
+    plan: SpawnPlan,
+    grid: RaceGrid,
+    arr: ArrivalField,
+    layout: Game,
+    fme: Player,
+  ): void {
+    // The best candidate's score, its A and B capped by the land connected
+    // to it, as the erasure sites' are (SpawnErase.landReach).
+    const head = plan.candidates?.[0];
+    const best = head === undefined ? 0 : reachScore(layout, head, v.o);
+    const floor = best * (1 + v.o.spawnEraseMargin);
+    if (head !== undefined && best < head.score) {
+      this.note(
+        v,
+        s,
+        `erase: the best candidate's reach cuts its score ${head.score.toFixed(0)} to ${best.toFixed(0)}`,
+      );
+    }
+    const cands = eraseCandidates(grid, arr, layout, fme, v.o, floor);
+    if (cands.length === 0) {
+      this.note(v, s, `erase: no site above ${floor.toFixed(0)}`);
+      return;
+    }
+    let tried = 0;
+    for (const e of cands) {
+      const line =
+        `erase ${e.name} at ${xy(layout, e.tile)}: A ${e.site.A} B ` +
+        `${e.site.B} threat ${e.site.threat} score ` +
+        `${e.site.score.toFixed(0)} (bound ${e.bound.toFixed(0)}` +
+        `${e.site.reach !== undefined ? `, land reach ${e.site.reach}` : ""}` +
+        `) against ${floor.toFixed(0)}`;
+      if (e.site.score <= floor || tried >= ERASE_VERIFY_MAX) {
+        this.note(v, s, line);
+        continue;
+      }
+      tried++;
+      const why = verifyErase(v.lookahead, live, e, layout);
+      this.note(v, s, `${line}: ${why ?? "verified"}`);
+      if (why !== null) continue;
+      plan.erase = e;
+      plan.queue = [e.tile, ...plan.queue.filter((t) => t !== e.tile)];
+      plan.next = 0;
+      return;
+    }
+  }
+
   private notePlan(v: View, s: ApexState, plan: SpawnPlan, prefix: string) {
     for (const r of plan.rollouts) {
       const res = r.result;
@@ -442,7 +593,40 @@ function candidatePlan(
     mode,
     candidates,
     rollouts: [],
+    preview: false,
+    erase: null,
   };
+}
+
+/** Mode plan: SpawnPlanner.planSpawn's tile on (game, me). */
+function planSpawnPlan(game: Game, me: Player): SpawnPlan {
+  const t = planSpawn(game, me);
+  return {
+    queue: t === null ? [] : [t],
+    next: 0,
+    minDisc: 1,
+    sendAt: null,
+    mode: "plan",
+    candidates: null,
+    rollouts: [],
+    preview: false,
+    erase: null,
+  };
+}
+
+/** Whether the preview can run (o.spawnPreview): singleplayer, whose phase
+ *  ends at our spawn; a live context to fork; not the browser, where the
+ *  first call may come after tick 1 and a spawn sent then need not land
+ *  in tick 2 (§3.2.6 plans there); not a random-spawn game. */
+function previewAllowed(v: View): boolean {
+  const { o, game } = v;
+  return (
+    o.spawnPreview &&
+    v.live !== null &&
+    !isBrowserSpawn(o) &&
+    game.config().gameConfig().gameType === GameType.Singleplayer &&
+    !game.config().isRandomSpawn()
+  );
 }
 
 /** §3.2.5: the best k candidates, then planSpawn's and the island ones
@@ -488,6 +672,82 @@ function forkOf(la: Lookahead | null, live: AgentContext): GameFork | null {
   }
 }
 
+/** A fork advanced PREVIEW_ADVANCE ticks without intents: the layout the
+ *  nations land in. Null when forking or stepping fails. */
+function previewFork(
+  la: Lookahead | null,
+  live: AgentContext,
+): GameFork | null {
+  const f = forkOf(la, live);
+  if (f === null) return null;
+  try {
+    f.advance(PREVIEW_ADVANCE);
+  } catch {
+    return null;
+  }
+  return f;
+}
+
+/**
+ * Plays the erasure in a fresh fork (our spawn in turn 1, as the live send
+ * goes, then the nations' landing tick) and checks it on the result: we hold
+ * the disc predicted, the erased nations were never placed, and every other
+ * nation of the layout holds what it holds there. Null when it holds, else
+ * what went wrong.
+ */
+function verifyErase(
+  la: Lookahead | null,
+  live: AgentContext,
+  e: EraseCandidate,
+  layout: Game,
+): string | null {
+  const f = forkOf(la, live);
+  if (f === null) return "no fork";
+  try {
+    f.step([{ type: "spawn", tile: e.tile }]);
+    f.advance(PREVIEW_ADVANCE - 1);
+  } catch (err) {
+    return `fork failed: ${String(err)}`;
+  }
+  const g = f.game;
+  const me = g.playerByClientID(live.clientID);
+  if (me === null || !me.hasSpawned()) return "our spawn did not land";
+  if (me.numTilesOwned() !== e.disc) {
+    return `we hold ${me.numTilesOwned()} tiles, not ${e.disc}`;
+  }
+  const erased = new Set([e.nation, ...e.also]);
+  for (const id of erased) {
+    const p = g.player(id);
+    if (p.isAlive() || p.hasSpawned()) return `${p.name()} was placed`;
+  }
+  for (const n of layout.players()) {
+    if (n.type() !== PlayerType.Nation || erased.has(n.id())) continue;
+    const p = g.player(n.id());
+    if (p.numTilesOwned() !== n.numTilesOwned()) {
+      return `${n.name()} holds ${p.numTilesOwned()} tiles, not ${n.numTilesOwned()}`;
+    }
+  }
+  return null;
+}
+
+/** An erasure site as a race candidate (mode rollout's pool). */
+function eraseAsCandidate(
+  grid: RaceGrid,
+  game: Game,
+  e: EraseCandidate,
+): SpawnCandidate {
+  return {
+    tile: e.tile,
+    cell: cellOf(grid, game, e.tile),
+    free: e.site.A,
+    pie: e.site.B,
+    threat: e.site.threat,
+    snack: e.site.snack,
+    source: "race",
+    score: e.site.score,
+  };
+}
+
 function xy(game: Game, t: TileRef | undefined): string {
   return t === undefined ? "none" : `${game.x(t)},${game.y(t)}`;
 }
@@ -500,5 +760,11 @@ function planLine(v: View, plan: SpawnPlan): string {
       ? ` best ${best.source} A ${best.free} B ${best.pie} threat ${best.threat} score ${best.score.toFixed(0)}`
       : "";
   const at = plan.sendAt !== null ? `, send at ${plan.sendAt}` : "";
-  return `spawn plan (${plan.mode}): ${plan.queue.length} candidates${head}${at}`;
+  const e = plan.erase;
+  const erase =
+    e !== null
+      ? `; erase ${e.name} A ${e.site.A} B ${e.site.B} threat ${e.site.threat} score ${e.site.score.toFixed(0)}`
+      : "";
+  const preview = plan.preview ? ", preview" : "";
+  return `spawn plan (${plan.mode}${preview}): ${plan.queue.length} candidates${head}${erase}${at}`;
 }

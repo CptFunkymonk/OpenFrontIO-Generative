@@ -114,6 +114,26 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  pass 20,000 (§3.2.6; rollouts are off there). */
   spawnWallBudgetMs: number;
 
+  // ── Package A3 SPAWN PREVIEW (H1; chapter 13 §2.1, §5.1;
+  //    SpawnController.previewPlan, lib/SpawnErase.ts). Off by default. ──
+  /** Spawn at the agent's first call (ctx.tick 1), planned on a fork
+   *  advanced 2 ticks without us: the tribes (tick 1) and every nation
+   *  (tick 2) are on the ground there, exactly as they will be. The spawn
+   *  lands in tick 2 ahead of every nation and ends the phase before any
+   *  nation hops. Singleplayer outside the browser only; otherwise, or if
+   *  the fork fails, the spawn goes out at spawnDelay as before. */
+  spawnPreview: boolean;
+  /** With spawnPreview: also consider spawning on exactly a nation's pick,
+   *  which covers its disc so it is never placed. Scored as a race site on
+   *  the arrival field without that nation, and verified in a second fork
+   *  (the nation disappears and no other nation is cut). */
+  spawnErase: boolean;
+  /** An erasure site must score above (1 + this) × the best race
+   *  candidate's score. */
+  spawnEraseMargin: number;
+  /** Most erasure sites scored exactly (each a full nation search). */
+  spawnEraseK: number;
+
   // ── HomeTarget and floors (§3.1) ─────────────────────────────────────
   /** Home target as a share of the cap (H_econ). E3. */
   homeX: number;
@@ -477,6 +497,20 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Ticks by which every ally outside the keep set must lapse before the
    *  first kept expiry for webSlotBorrow (a few decisions at A_ext). */
   webSlotMargin: number;
+  /** Keep set size A_ext − ⌊this·A_max⌋ (at least 1): A_max shrinks as
+   *  nations die (by 15-30% within an alliance's term from minute 3, arena
+   *  quick@20), and while we hold more than A_ext every extension and
+   *  renew fails on hasTooManyAlliances (arena North America: 15 alliances
+   *  against an A_max down from 17 to 13; Nunavut and Alaska lapsed). 0:
+   *  off (0.25 with webExtendOpening off screened worse, package B2 ab4). */
+  webSlotSpare: number;
+  /** At the midgame's start (from webFrom to the first midgame plan, the
+   *  plan tick after it), the spec web's extensions go out with
+   *  webExtendLead instead of extendLead: every ally in the opening's
+   *  allySet is asked at once, most accept (we are strong at minute 3),
+   *  and the opening's web is kept five more minutes before the keep set
+   *  trims it. The first midgame screens (ab2, ab3) played this way. */
+  webExtendOpening: boolean;
   /** Buy the extension of a dangerous kept ally with its friendship: when
    *  its extension is still refused webFriendLead ticks before expiry
    *  (the trap, or not similarly strong), donate ceil(M_N/5) + 1 troops
@@ -557,7 +591,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (NationModel.canLandAttackUs, wouldTargetUs at its next decision d),
    *  and to detBetrayShare·T_A(d) for every bordering ally at or above its
    *  reserve. Lines above detMaxShare of the cap are dropped (we could not
-   *  hold them without freezing). */
+   *  hold them without freezing). Not adopted (package B1 A/B, quick@20
+   *  0:12: eliminated 3 → 6 of 12 with lines dropped or capped): the
+   *  invasions that kill come from nations whose line T/1.1 is above our
+   *  cap, which no floor can hold, and the floor slows expansion. */
   deterrence: boolean;
   /** Margin on the land line (T_N(d) + 1)/1.1. */
   detMargin: number;
@@ -620,7 +657,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Defense posts (×5 attacker losses, ×3 time within 30 tiles,
    *  Config.ts:377-387) on the front with a bordering unallied nation that
    *  our home now cannot deter (detPostProactive), or that attacks us by
-   *  land (detPostReactive): one per 20 ticks while gold pays for it. */
+   *  land (detPostReactive): one per 20 ticks while gold pays for it. Not
+   *  adopted (package B1 A/B, quick@20 0:32: final land +0.5 pp, 15 better
+   *  and 8 worse, but eliminated 6 → 9; fronts are mostly too long for
+   *  the posts gold buys, and posts ordered mid-invasion are overrun). */
   detPosts: boolean;
   /** Build posts before an attack, against an undeterred threat. */
   detPostProactive: boolean;
@@ -782,6 +822,50 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  1.6% -> 4.2%; same progress as v1 over 12 games). */
   strikeMinContact: number;
 
+  // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
+  //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
+  /** Master flag; off, every option of this block is ignored and the
+   *  structure policy reads exposedSite. On, the nuke-rule replica
+   *  (NukeModel) decides exposure: a city site or upgrade is exposed only to
+   *  a nation whose nuke ladder names us, that owns a silo, and that could
+   *  aim the bomb it would pick at the site (both rings clear, no SAM of
+   *  ours reaching the aim point). Arena quick@20 and showcase-m2: 16 of the
+   *  19 bombs at apex came from the land leader aiming at us as its
+   *  runner-up; exposedSite also blocked cities against nations aiming
+   *  elsewhere (idle gold 1.2M on average from minute 3). */
+  nukeModel: boolean;
+  /** Latent exposures count: the ladder names us below the rung that
+   *  answers now (its bombs go elsewhere until that rung clears). */
+  nukeLatent: boolean;
+  /** A nation whose gold is short of its perceived atom price still counts
+   *  from this share of it. */
+  nukePayShare: number;
+  /** While we hold rank 1 or 2 in land among humans and nations, an
+   *  unfriendly nation with a silo in their top 3 counts as exposed through
+   *  the crown rung: the runner-up flip came with no warning (quick@20
+   *  Mississippi: Rosedale aimed at us 21 ticks before its first bomb, silo
+   *  and gold ready). */
+  nukeRankGuard: boolean;
+  /** Ticks a nation whose ladder named us keeps counting (latent) after it
+   *  stops: the land ranking flips back and forth. 0 = none. */
+  nukeMemory: number;
+  /** SAM hub: while exposed to atoms only, one SAM farther than an atom's
+   *  outer radius from every structure of ours, then cities in its covered
+   *  ring (atom outer < d ≤ samRange − atom outer): aimed atoms there are
+   *  interceptable, and the salvo a SAM draws (NNB maybeDestroyEnemySam)
+   *  spares them. Skipped against a nation that can pay a hydrogen bomb
+   *  (it hunts SAMs below level 5 from outside their range). */
+  samHub: boolean;
+  /** Most SAMs we own at once. */
+  samMax: number;
+  /** A SAM is built only if it covers at least this many finished city
+   *  levels, or our gold also pays the next city level (a hub to fill). */
+  samMinLevels: number;
+  /** No SAM while a shooter could salvo it at once: ready slots and real
+   *  gold for the salvo (2 atoms, 1 while it is under construction and
+   *  nothing else of ours is nukeable). */
+  samSlotGate: boolean;
+
   // ── Endgame (§5.3) ───────────────────────────────────────────────────
   /** The 38% MIRV gate (§5.3.2). M5, off. E16. */
   mirvGate: boolean;
@@ -832,6 +916,12 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   spawnKeep: 2,
   spawnFinal: 1800,
   spawnWallBudgetMs: 120_000,
+
+  // Package A3 SPAWN PREVIEW.
+  spawnPreview: false,
+  spawnErase: false,
+  spawnEraseMargin: 0,
+  spawnEraseK: 4,
 
   homeX: 0.3,
   vwGuard: 0.17,
@@ -950,6 +1040,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   webKeepFeasible: true,
   webSlotBorrow: true,
   webSlotMargin: 300,
+  webSlotSpare: 0,
+  webExtendOpening: true,
   webFriend: false,
   webFriendGold: true,
   webFriendGoldShare: 0.9,
@@ -1037,6 +1129,17 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeRetreatRatio: 1.5,
   strikeDetHorizon: 0,
   strikeMinContact: 0,
+
+  // Package B3 NUKES AND SAMs.
+  nukeModel: false,
+  nukeLatent: true,
+  nukePayShare: 0.5,
+  nukeRankGuard: true,
+  nukeMemory: 600,
+  samHub: true,
+  samMax: 1,
+  samMinLevels: 3,
+  samSlotGate: true,
 
   mirvGate: false,
 

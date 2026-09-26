@@ -3,10 +3,12 @@ import {
   MAX_UPGRADE_AMOUNT,
   Player,
   PlayerType,
+  Structures,
   Unit,
   UnitType,
 } from "../../../../core/game/Game";
 import { TileRef } from "../../../../core/game/GameMap";
+import { Bomb, NukeModel, NukeReason } from "../../../lib/NukeModel";
 import { Prio } from "../../../lib/Scheduler";
 import type { ApexOptions } from "../options";
 import type { Controller, View } from "../policy";
@@ -91,6 +93,7 @@ export type CityOptions = Pick<
   | "citySpread"
   | "structurePolicy"
   | "exposureWide"
+  | "nukeModel"
 >;
 
 /**
@@ -357,6 +360,7 @@ function upgradeTarget(
   me: Player,
   minDepth: number,
   maxLevel: number,
+  accept?: (c: Unit) => boolean,
 ): { unit: Unit; depth: number } | null {
   let best: { unit: Unit; depth: number } | null = null;
   for (const c of me.units(UnitType.City)) {
@@ -366,6 +370,7 @@ function upgradeTarget(
     // sites.
     const depth = borderDepth(game, me, c.tile(), DEPTH_CAP * minDepth);
     if (depth < minDepth) continue;
+    if (accept !== undefined && !accept(c)) continue;
     if (
       best === null ||
       c.level() > best.unit.level() ||
@@ -412,12 +417,16 @@ export function planCity(
   game: Game,
   me: Player,
   o: CityOptions,
+  nukes?: NukePlan,
 ): CityAction | CityIdle {
   if (!o.cities) return "off";
   if (o.structurePolicy === "never") return "policy";
   const gold = me.gold();
   const cost = game.config().unitInfo(UnitType.City).cost(game, me);
   if (gold < cost) return "gold";
+  if (o.nukeModel && nukes !== undefined && o.structurePolicy === "exposure") {
+    return planCityModel(game, me, o, nukes, gold, cost);
+  }
   const exposure = o.structurePolicy === "exposure";
   const maxLevel = levelCap(o);
   let exposed = false;
@@ -462,6 +471,442 @@ export function planCity(
   return exposed ? "exposed" : "noSite";
 }
 
+// ── Package B3: nukes and SAMs (spec §2.9, §5.1 item 5; chapter 13 §2.11,
+//    §5.10) ─────────────────────────────────────────────────────────────
+// With o.nukeModel (and structurePolicy "exposure"), NukeModel replaces
+// exposedSite: a site or an upgrade is exposed only to a *threat*, a nation
+// whose nuke ladder names us (NukeModel.exposures, latent ones with
+// o.nukeLatent; with o.nukeRankGuard also an unfriendly silo owner in the
+// land top 3 while we are in the top 2), that owns a silo and pays, or
+// nearly pays, the bomb it would pick; and only if that bomb has an aim
+// point at the site (NukeModel.nukeable: rings clear, no SAM reaching it).
+// Arena quick@20 and showcase-m2 (package B3 notes): 16 of the 19 bombs at
+// apex came from the land leader aiming at us as its runner-up, each one
+// taking the city it was aimed at; exposedSite, which blocks on any nation
+// with a silo and bomb gold, also held 1.2M of idle gold on average from
+// minute 3 in games where no nation aimed at us.
+//
+// The SAM hub (o.samHub). While threatened by atoms only, one SAM farther
+// than an atom's outer radius from every structure of ours, and new cities
+// in its covered ring: an aim point within an atom's outer radius of a
+// city there is within the SAM's range, so its trajectory is interceptable
+// and the nation skips it (NNB :197-204); finding no aim point it throws an
+// atom salvo at the SAM instead (maybeDestroyEnemySam, :836-1061: level + 1
+// bombs, from ready silo slots, at the real price, or it upgrades a silo
+// first), and a blast deletes only units strictly inside its outer radius
+// (NukeExecution.ts:467-483), so the ring's cities survive it. Hub cities
+// keep o.citySpread's spacing (one bomb, one city once the SAM is gone).
+// No SAM against a nation that can pay a hydrogen bomb: it outranges SAMs
+// below level 5 and scores them 100k a level (NNB :750-775).
+
+/** A nation that could nuke a structure of ours (see nukeThreats). */
+export interface NukeThreat {
+  nation: Player;
+  /** The bomb it would pick (hydrogen if its gold covers the perceived
+   *  price, else atom). */
+  bomb: Bomb;
+  reason: NukeReason;
+  /** Named below the rung that answers now, or by the rank guard. */
+  latent: boolean;
+  /** Ready launch slots of its finished silos. */
+  slots: number;
+}
+
+/** The model and this check's threats. */
+export interface NukePlan {
+  model: NukeModel;
+  threats: NukeThreat[];
+}
+
+/** What the B3 rules read of ApexOptions. */
+export type NukeOptions = Pick<
+  ApexOptions,
+  | "nukeModel"
+  | "nukeLatent"
+  | "nukePayShare"
+  | "nukeRankGuard"
+  | "nukeMemory"
+  | "samHub"
+  | "samMax"
+  | "samMinLevels"
+  | "samSlotGate"
+  | "cityMinDepth"
+  | "citySpread"
+>;
+
+/**
+ * This check's threats: every exposure (NukeModel.exposures) with a silo,
+ * current or (o.nukeLatent) latent, whose gold covers the bomb it would
+ * pick or at least o.nukePayShare of its perceived atom price; with
+ * o.nukeMemory, as latent, every nation whose ladder named us within that
+ * many ticks; with o.nukeRankGuard, while we rank first or second in land
+ * among humans and nations (tribes, which the crown rungs also rank, are
+ * eaten first), every other unfriendly nation with a silo in their top
+ * three, latent. Latent threats count only with o.nukeLatent.
+ */
+export function nukeThreats(
+  game: Game,
+  me: Player,
+  model: NukeModel,
+  o: NukeOptions,
+): NukeThreat[] {
+  const out: NukeThreat[] = [];
+  const pick = (N: Player): Bomb | null => {
+    const bomb = model.bombFor(N.id());
+    if (bomb !== null) return bomb;
+    const atom = model.perceivedCost(N.id(), UnitType.AtomBomb);
+    const share = BigInt(Math.round(o.nukePayShare * 1000));
+    return N.gold() * 1000n >= atom * share ? UnitType.AtomBomb : null;
+  };
+  for (const e of model.exposures()) {
+    if (!e.hasSilo || (e.latent && !o.nukeLatent)) continue;
+    const N = game.player(e.nation);
+    const bomb = pick(N);
+    if (bomb === null) continue;
+    out.push({
+      nation: N,
+      bomb,
+      reason: e.reason,
+      latent: e.latent,
+      slots: e.slots,
+    });
+  }
+  const latent = (N: Player, reason: NukeReason): void => {
+    if (N === me || !N.isAlive() || N.type() !== PlayerType.Nation) return;
+    if (N.isFriendly(me) || out.some((t) => t.nation === N)) return;
+    const s = model.slots(N);
+    if (s.silos === 0) return;
+    const bomb = pick(N);
+    if (bomb === null) return;
+    out.push({ nation: N, bomb, reason, latent: true, slots: s.now });
+  };
+  if (o.nukeLatent && o.nukeMemory > 0) {
+    for (const n of model.namedSince(game.ticks() - o.nukeMemory)) {
+      if (game.hasPlayer(n.nation)) latent(game.player(n.nation), n.reason);
+    }
+  }
+  if (o.nukeLatent && o.nukeRankGuard) {
+    const rank = model.nonBotRank();
+    const ours = rank.indexOf(me);
+    if (ours === 0 || ours === 1) {
+      for (const N of rank.slice(0, 3)) {
+        latent(N, ours === 0 ? "crownLead" : "runnerUp");
+      }
+    }
+  }
+  return out;
+}
+
+/** The first threat whose bomb has an aim point at `tile`, or null. */
+export function threatAt(plan: NukePlan, tile: TileRef): NukeThreat | null {
+  for (const t of plan.threats) {
+    if (plan.model.nukeable([tile], t.bomb, t.nation)) return t;
+  }
+  return null;
+}
+
+/**
+ * The covered ring of a SAM of `level` (config.samRange): a city there is
+ * outside the atom salvo aimed at the SAM (distance ≥ outer radius + 1),
+ * and every aim point within an atom's outer radius of it is within the
+ * SAM's range (distance ≤ range − outer radius).
+ */
+export function hubRing(game: Game, level = 1): { min: number; max: number } {
+  const config = game.config();
+  const outer = config.nukeMagnitudes(UnitType.AtomBomb).outer;
+  return { min: outer + 1, max: Math.floor(config.samRange(level)) - outer };
+}
+
+/** Integer offsets (dx, dy) with min ≤ |(dx, dy)| ≤ max, in raster order,
+ *  every `stride`-th. */
+function ringOffsets(
+  min: number,
+  max: number,
+  stride: number,
+): [number, number][] {
+  const out: [number, number][] = [];
+  let i = 0;
+  for (let dy = -max; dy <= max; dy++) {
+    for (let dx = -max; dx <= max; dx++) {
+      const d2 = dx * dx + dy * dy;
+      if (d2 < min * min || d2 > max * max) continue;
+      if (i++ % stride === 0) out.push([dx, dy]);
+    }
+  }
+  return out;
+}
+
+/** Ring samples per SAM or city for hub sites (about 60 of the ring's
+ *  ~2,000 tiles at level 1). */
+const HUB_SAMPLES = 60;
+
+/**
+ * City sites in the covered ring (hubRing, of each SAM's level) of our
+ * finished SAMs: ours, at least o.cityMinDepth deep, and with o.citySpread
+ * farther than twice an atom's outer radius from our other cities; deepest
+ * first (ties: lowest tile).
+ */
+export function hubSites(
+  game: Game,
+  me: Player,
+  o: Pick<ApexOptions, "cityMinDepth" | "citySpread">,
+): { tile: TileRef; depth: number }[] {
+  const sams = me
+    .units(UnitType.SAMLauncher)
+    .filter((u) => !u.isUnderConstruction() && u.isActive());
+  if (sams.length === 0) return [];
+  const us = me.smallID();
+  const spread = 2 * game.config().nukeMagnitudes(UnitType.AtomBomb).outer;
+  const cities = o.citySpread
+    ? me.units(UnitType.City).map((c) => c.tile())
+    : [];
+  const seen = new Set<TileRef>();
+  const out: { tile: TileRef; depth: number }[] = [];
+  for (const sam of sams) {
+    const ring = hubRing(game, sam.level());
+    const all = ringOffsets(ring.min, ring.max, 1).length;
+    const offsets = ringOffsets(
+      ring.min,
+      ring.max,
+      Math.max(1, Math.floor(all / HUB_SAMPLES)),
+    );
+    const sx = game.x(sam.tile());
+    const sy = game.y(sam.tile());
+    for (const [dx, dy] of offsets) {
+      const x = sx + dx;
+      const y = sy + dy;
+      if (!game.isValidCoord(x, y)) continue;
+      const t = game.ref(x, y);
+      if (seen.has(t) || game.ownerID(t) !== us) continue;
+      seen.add(t);
+      if (
+        cities.some((c) => game.euclideanDistSquared(c, t) <= spread * spread)
+      ) {
+        continue;
+      }
+      const depth = borderDepth(game, me, t, DEPTH_CAP * o.cityMinDepth);
+      if (depth >= o.cityMinDepth) out.push({ tile: t, depth });
+    }
+  }
+  out.sort((a, b) => b.depth - a.depth || a.tile - b.tile);
+  return out.slice(0, EXACT_SITES);
+}
+
+/**
+ * planCity under the model (o.nukeModel): with no threat, the usual sites
+ * and upgrades, unchecked; with threats, only an upgrade of a city no
+ * threat can aim at, or a build at such a site: hub sites first (hubSites),
+ * then the usual ones. Never a new city within hubRing().min of a SAM of
+ * ours: the salvo a SAM draws would take it.
+ */
+function planCityModel(
+  game: Game,
+  me: Player,
+  o: CityOptions,
+  plan: NukePlan,
+  gold: bigint,
+  cost: bigint,
+): CityAction | CityIdle {
+  const threatened = plan.threats.length > 0;
+  let exposed = false;
+  const safe = (t: TileRef): boolean => {
+    if (!threatened) return true;
+    if (threatAt(plan, t) === null) return true;
+    exposed = true;
+    return false;
+  };
+  const maxLevel = levelCap(o);
+  if (o.cityUpgradeFirst) {
+    const up = upgradeTarget(game, me, o.cityMinDepth, maxLevel, (c) =>
+      safe(c.tile()),
+    );
+    if (up !== null) {
+      const room = maxLevel - up.unit.level();
+      const { amount, cost: total } = affordableLevels(game, me, gold, room);
+      return {
+        kind: "upgrade",
+        unitId: up.unit.id(),
+        amount: Math.max(1, amount),
+        cost: total,
+        level: up.unit.level(),
+        depth: up.depth,
+      };
+    }
+  }
+  const sams = me.units(UnitType.SAMLauncher).map((u) => u.tile());
+  const salvoR2 = hubRing(game).min ** 2;
+  const clearOfSams = (t: TileRef) =>
+    sams.every((sam) => game.euclideanDistSquared(sam, t) >= salvoR2);
+  const sites = (
+    threatened
+      ? [...hubSites(game, me, o), ...citySites(game, me, o)]
+      : citySites(game, me, o)
+  ).filter((site) => clearOfSams(site.tile));
+  let probes = 0;
+  for (const site of sites) {
+    if (probes >= BUILD_PROBES) break;
+    probes++;
+    const spawn = me.canBuild(UnitType.City, site.tile);
+    if (spawn === false) continue;
+    const depth =
+      spawn === site.tile
+        ? site.depth
+        : borderDepth(game, me, spawn, site.depth);
+    if (depth < o.cityMinDepth) continue;
+    if (!clearOfSams(spawn) || !safe(spawn)) continue;
+    return { kind: "build", tile: spawn, cost, depth };
+  }
+  return exposed ? "exposed" : "noSite";
+}
+
+/** A SAM build of the hub rule. */
+export interface SamAction {
+  kind: "sam";
+  tile: TileRef;
+  cost: bigint;
+  /** Finished city levels in its covered ring. */
+  covered: number;
+  depth: number;
+}
+
+/** Why the hub rule builds no SAM (logs and tests). */
+export type SamIdle =
+  | "off"
+  | "noThreat"
+  | "hydro"
+  | "max"
+  | "salvo"
+  | "gold"
+  | "small"
+  | "noSite";
+
+/**
+ * The SAM hub rule (o.samHub): with threats, none able to pay a hydrogen
+ * bomb, fewer than o.samMax SAMs of ours (finished or not), and gold for
+ * one, the site farther than hubRing().min from every structure of ours
+ * (a salvo at it spares them) whose covered ring holds the most finished
+ * city levels (then the deepest, then the lowest tile), at least
+ * o.cityMinDepth deep; built only if it covers o.samMinLevels levels or our
+ * gold also pays the next city level. With o.samSlotGate, none while a
+ * current threat could salvo it at once: two ready slots and real gold for
+ * two atoms, or one of each while nothing else of ours is nukeable (a SAM
+ * under construction covers nothing, so one bomb takes it).
+ */
+export function planSam(
+  game: Game,
+  me: Player,
+  o: CityOptions & NukeOptions,
+  plan: NukePlan,
+): SamAction | SamIdle {
+  if (!o.samHub) return "off";
+  if (plan.threats.length === 0) return "noThreat";
+  if (plan.threats.some((t) => t.bomb === UnitType.HydrogenBomb)) {
+    return "hydro";
+  }
+  if (me.units(UnitType.SAMLauncher).length >= o.samMax) return "max";
+  const config = game.config();
+  if (o.samSlotGate) {
+    const scored = me
+      .units(Structures.types)
+      .filter(
+        (u) => u.type() !== UnitType.SAMLauncher && !u.isUnderConstruction(),
+      )
+      .map((u) => u.tile());
+    for (const t of plan.threats) {
+      if (t.latent) continue;
+      const atom = config.unitInfo(UnitType.AtomBomb).cost(game, t.nation);
+      const gold = t.nation.gold();
+      if (t.slots >= 2 && gold >= 2n * atom) return "salvo";
+      if (
+        t.slots >= 1 &&
+        gold >= atom &&
+        !plan.model.nukeable(scored, t.bomb, t.nation)
+      ) {
+        return "salvo";
+      }
+    }
+  }
+  const cost = config.unitInfo(UnitType.SAMLauncher).cost(game, me);
+  const gold = me.gold();
+  if (gold < cost) return "gold";
+  const ring = hubRing(game, 1);
+  const structures = me.units(Structures.types).map((u) => u.tile());
+  const cities = me
+    .units(UnitType.City)
+    .filter((c) => !c.isUnderConstruction());
+  const clear = (t: TileRef) =>
+    structures.every(
+      (s) => game.euclideanDistSquared(s, t) >= ring.min * ring.min,
+    );
+  const covered = (t: TileRef): number => {
+    let levels = 0;
+    for (const c of cities) {
+      const d2 = game.euclideanDistSquared(c.tile(), t);
+      if (d2 >= ring.min * ring.min && d2 <= ring.max * ring.max) {
+        levels += c.level();
+      }
+    }
+    return levels;
+  };
+  const us = me.smallID();
+  const cands = new Map<TileRef, number>();
+  const consider = (t: TileRef) => {
+    if (cands.has(t) || game.ownerID(t) !== us || !clear(t)) return;
+    cands.set(t, covered(t));
+  };
+  // Around each finished city (it is then in the ring), and the deepest
+  // sites clear of our structures (a hub to fill).
+  const all = ringOffsets(ring.min, ring.max, 1).length;
+  const around = ringOffsets(
+    ring.min,
+    ring.max,
+    Math.max(1, Math.floor(all / 24)),
+  );
+  for (const c of cities) {
+    const cx = game.x(c.tile());
+    const cy = game.y(c.tile());
+    for (const [dx, dy] of around) {
+      if (game.isValidCoord(cx + dx, cy + dy)) {
+        consider(game.ref(cx + dx, cy + dy));
+      }
+    }
+  }
+  for (const s of interiorSites(game, me, o.cityMinDepth, clear)) {
+    consider(s.tile);
+  }
+  const ranked: { tile: TileRef; covered: number; depth: number }[] = [];
+  for (const [tile, levels] of cands) {
+    const depth = borderDepth(game, me, tile, DEPTH_CAP * o.cityMinDepth);
+    if (depth >= o.cityMinDepth) ranked.push({ tile, covered: levels, depth });
+  }
+  ranked.sort(
+    (a, b) => b.covered - a.covered || b.depth - a.depth || a.tile - b.tile,
+  );
+  const next = config.unitInfo(UnitType.City).cost(game, me);
+  let probes = 0;
+  let small = false;
+  for (const r of ranked) {
+    if (probes >= BUILD_PROBES) break;
+    if (r.covered < o.samMinLevels && gold < cost + next) {
+      small = true;
+      break;
+    }
+    probes++;
+    const spawn = me.canBuild(UnitType.SAMLauncher, r.tile);
+    if (spawn === false) continue;
+    if (spawn !== r.tile && !clear(spawn)) continue;
+    const depth =
+      spawn === r.tile
+        ? r.depth
+        : borderDepth(game, me, spawn, DEPTH_CAP * o.cityMinDepth);
+    if (depth < o.cityMinDepth) continue;
+    const levels = spawn === r.tile ? r.covered : covered(spawn);
+    if (levels < o.samMinLevels && gold < cost + next) continue;
+    return { kind: "sam", tile: spawn, cost, covered: levels, depth };
+  }
+  return small ? "small" : "noSite";
+}
+
 /**
  * Cities from loot (spec §3.8); the SAM rule from M3 (§5.1.5). Enabled by
  * `o.economy`; cities by `o.cities`, upgrade-first by `o.cityUpgradeFirst`,
@@ -475,8 +920,29 @@ export class EconomyController implements Controller {
     const { o } = v;
     if (!o.cities || o.structurePolicy === "never") return;
     if (v.tick - s.timers.lastCity < o.cityEvery) return;
-    const plan = planCity(v.game, v.me, o);
+    // Package B3: the nuke model's threats, and the SAM hub before cities
+    // (spec §5.0 gold priority: the SAM first).
+    const nukes =
+      o.nukeModel && v.nukes !== undefined && o.structurePolicy === "exposure"
+        ? {
+            model: v.nukes,
+            threats: nukeThreats(v.game, v.me, v.nukes, o),
+          }
+        : undefined;
+    if (nukes !== undefined && this.sam(v, s, nukes)) return;
+    const plan = planCity(v.game, v.me, o, nukes);
     if (typeof plan === "string") {
+      // Once a minute (the first check in it), why a threat blocks cities.
+      if (
+        nukes !== undefined &&
+        nukes.threats.length > 0 &&
+        Math.floor(v.tick / 600) !== Math.floor(s.timers.lastCity / 600)
+      ) {
+        v.log?.(
+          `${v.tick} city ${plan}: threats ${threatList(nukes)} ` +
+            `sam=${planSam(v.game, v.me, o, nukes) as string} gold=${v.me.gold()}`,
+        );
+      }
       s.timers.lastCity = v.tick;
       return;
     }
@@ -512,13 +978,59 @@ export class EconomyController implements Controller {
     if (plan.kind === "upgrade") {
       v.log?.(
         `${v.tick} city upgrade #${plan.unitId} L${plan.level}+${plan.amount} ` +
-          `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels + plan.amount}`,
+          `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels + plan.amount}` +
+          (nukes !== undefined && nukes.threats.length > 0
+            ? ` threats ${threatList(nukes)}`
+            : ""),
       );
     } else {
       v.log?.(
         `${v.tick} city build at ${v.game.x(plan.tile)},${v.game.y(plan.tile)} ` +
-          `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels}`,
+          `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels}` +
+          (nukes !== undefined && nukes.threats.length > 0
+            ? ` threats ${threatList(nukes)}`
+            : ""),
       );
     }
   }
+
+  /** The SAM hub rule (planSam): offers the SAM and returns true if it was
+   *  accepted. */
+  private sam(v: View, s: ApexState, nukes: NukePlan): boolean {
+    const plan = planSam(v.game, v.me, v.o, nukes);
+    if (typeof plan === "string") return false;
+    const accepted = v.scheduler.offer({
+      intent: {
+        type: "build_unit",
+        unit: UnitType.SAMLauncher,
+        tile: plan.tile,
+      },
+      prio: Prio.Build,
+      cls: "build",
+      key: "build:sam",
+    });
+    if (!accepted) return false;
+    s.timers.lastCity = v.tick;
+    v.log?.(
+      `${v.tick} sam build at ${v.game.x(plan.tile)},${v.game.y(plan.tile)} ` +
+        `covered=${plan.covered} depth=${plan.depth} cost=${plan.cost} ` +
+        `gold=${v.me.gold()} threats ${threatList(nukes)}`,
+    );
+    return true;
+  }
+}
+
+/** The threats for a log line: name, rung, bomb, slots. */
+function threatList(plan: NukePlan): string {
+  return (
+    "[" +
+    plan.threats
+      .map(
+        (t) =>
+          `${t.nation.name()}:${t.reason}${t.latent ? "~" : ""}:` +
+          `${t.bomb === UnitType.HydrogenBomb ? "H" : "A"}${t.slots}`,
+      )
+      .join(",") +
+    "]"
+  );
 }

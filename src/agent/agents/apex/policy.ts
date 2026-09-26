@@ -10,6 +10,7 @@ import { Ledger } from "../../lib/Ledger";
 import { Lookahead, RolloutPolicy, SimView } from "../../lib/Lookahead";
 import { createModels, Models } from "../../lib/Models";
 import { NationModel, relationTracker } from "../../lib/NationModel";
+import { NukeModel } from "../../lib/NukeModel";
 import {
   buildRaceGrid,
   OwnerGrid,
@@ -51,6 +52,9 @@ export interface View {
   /** The scan of the last decision (at most thinkEvery − 1 ticks old). */
   wm: WorldModel;
   nm: NationModel;
+  /** Package B3: the nuke-rule replica (spec §2.9), observed every tick
+   *  while o.nukeModel is on. Optional so hand-built Views stay valid. */
+  nukes?: NukeModel;
   /** Not in spec §2.10's View; the allocator reads stacks and plans from it
    *  (§3.6.2-3.6.3, §3.6.7). */
   ledger: Ledger;
@@ -220,6 +224,7 @@ interface Runtime {
   me: Player;
   models: Models;
   nm: NationModel;
+  nukes: NukeModel;
   ledger: Ledger;
   scheduler: Scheduler;
   lookahead: Lookahead | null;
@@ -381,6 +386,7 @@ export class ApexPolicy {
     // Step 2 (scheduler.begin below).
     rt.ledger.observe(env.me, t, env.game);
     rt.nm.observe(t);
+    if (o.nukeModel) rt.nukes.observe();
 
     // Step 4's scanWorld, HomeTarget and Purse, moved ahead of step 3:
     // scheduler.begin takes the Purse, which needs this decision's floors,
@@ -478,6 +484,7 @@ export class ApexPolicy {
       me: env.me,
       models,
       nm,
+      nukes: new NukeModel(env.game, env.me, nm),
       ledger: Ledger.fromData(s.ledger),
       scheduler: new Scheduler(o, env.game.config().msPerTick()),
       lookahead:
@@ -510,6 +517,7 @@ export class ApexPolicy {
       models: rt.models,
       wm,
       nm: rt.nm,
+      nukes: rt.nukes,
       ledger: rt.ledger,
       race: rt.race,
       owners: rt.owners,

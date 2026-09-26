@@ -186,7 +186,8 @@ export interface MidPlan {
   keep: PlayerID[];
   /** dmid of every reachable nation (logs and tests). */
   dmid: Record<PlayerID, number>;
-  /** Alliances the midgame web may hold: A_max (webSlotsMax) or A_ext. */
+  /** Alliances the midgame web keeps: A_max (webSlotsMax), else A_ext
+   *  less the spare (webSlotSpare). */
   slots: number;
   /** Ranked unallied nations left out of keep: a request now could not be
    *  sent or would be refused (o.webKeepFeasible). */
@@ -575,7 +576,9 @@ export class DiplomacyController implements Controller {
       if (v.o.web) {
         this.requests(v, s, mem, mid.keep, this.midRoom(v, mid, slots));
       }
-      if (v.o.extensions) this.extensions(v, s, mem, slots, mid.keep);
+      if (v.o.extensions) {
+        this.extensions(v, s, mem, slots, mid.keep, v.o.webExtendLead);
+      }
       if (v.o.webRenew) this.noteRenew(v, mem, mid);
       return;
     }
@@ -584,7 +587,15 @@ export class DiplomacyController implements Controller {
         v.me.alliances().length + v.me.outgoingAllianceRequests().length;
       this.requests(v, s, mem, s.web.allySet, slots.webTarget - held);
     }
-    if (v.o.extensions) this.extensions(v, s, mem, slots, s.web.allySet);
+    if (v.o.extensions) {
+      // o.webExtendOpening: the midgame's lead already, between webFrom and
+      // the first midgame plan.
+      const lead =
+        v.o.webExtendOpening && midActive(v)
+          ? v.o.webExtendLead
+          : v.o.extendLead;
+      this.extensions(v, s, mem, slots, s.web.allySet, lead);
+    }
   }
 
   /** o.webRenew: records the expiry of every kept alliance (entries of
@@ -807,7 +818,10 @@ export class DiplomacyController implements Controller {
    * rank         = reach_mid ∧ value ≥ webDangerMin, no strike plan on it,
    *                most valuable first
    * keep         = the first `slots` of rank (A_max with webSlotsMax, else
-   *                A_ext) that are allied or asked, or (webKeepFeasible)
+   *                A_ext − ⌊webSlotSpare·A_max⌋, at least 1: A_max shrinks
+   *                as nations die, 15-30% within an alliance's term from
+   *                minute 3, and every extension fails while we hold more
+   *                than A_ext) that are allied or asked, or (webKeepFeasible)
    *                that a request sent now would win (forecast ≥ allyMinP,
    *                or refused only by the spawn guard or our slot count;
    *                MID_FORECASTS a plan, the rest kept unchecked);
@@ -892,7 +906,9 @@ export class DiplomacyController implements Controller {
     rows.sort((a, b) => b.value - a.value || a.sid - b.sid);
     const allSlots = allySlots(game, me, o.allySlotsReserve);
     const slots =
-      o.webSlotsMax || allSlots.ext === 0 ? allSlots.max : allSlots.ext;
+      o.webSlotsMax || allSlots.ext === 0
+        ? allSlots.max
+        : Math.max(1, allSlots.ext - Math.floor(o.webSlotSpare * allSlots.max));
     const rank = rows.map((r) => r.id);
     let keep: PlayerID[] = [];
     const infeasible: PlayerID[] = [];
@@ -1211,9 +1227,9 @@ export class DiplomacyController implements Controller {
     mem: DiplomacyMemory,
     slots: AllySlots,
     keep: readonly PlayerID[],
+    lead: number,
   ): void {
     const { o, me, tick: t } = v;
-    const lead = midActive(v) ? o.webExtendLead : o.extendLead;
     for (const a of me.alliances()) {
       const N = a.other(me);
       const id = N.id();

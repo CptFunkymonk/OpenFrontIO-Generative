@@ -40,11 +40,15 @@ import { BORDER_JITTER } from "./ExpansionController";
 //   (not in the spec)      attacks on us, S troops in all, are deleted by
 //                          an attack of ceil(S·detCounterSize) + 1 on it
 //                          (AttackExecution.ts:157-170), when home after it
-//                          keeps max(detCounterKeep·cap, H_vw, every other
-//                          nation's deterrence line); see counterWins
+//                          keeps max(detCounterKeep·cap, H_vw) and exposes
+//                          us to no other nation; see counterWins. Harmful
+//                          in the A/B (it starts a war of attrition): off
 //   defense posts          o.detPosts (package B1): a post on the front
 //   (not in the spec)      with a bordering unallied nation that attacks us
-//                          or that our home cannot deter; see posts
+//                          or that our home cannot deter; see posts. No
+//                          survival gain in the A/B: off
+//   floor log              o.deterrence: a line when the deterrence floor
+//                          moves (logFloor)
 //   counter (not in the    o.counter: after absorbing a fresh land attack of
 //   spec)                  an unallied nation estimated to take counterShare
 //                          of our tiles or more, while home idles at
