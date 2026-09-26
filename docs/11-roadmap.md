@@ -323,10 +323,12 @@ Every game records `standings` at minutes 1, 2, 3, 5, 7, 10, 15, 20, 25, 30,
 `attacks`, our own attack log (target, troops sent and lost, tiles gained,
 how it ended). Summaries turn them into the milestone rates: ≥ median and ≥
 top nation at minute 3 (M2), eliminated before minute 20 and top 3 at minute
-10 (M3), and the median minute of our wins (M5). An attack's `tilesGained`
-counts tiles that moved from its target to us while it ran, so it includes
-enclosed pockets and misses tiles taken from players we were not attacking
-(`tilesUncredited` keeps the rest).
+10 (M3), and the median minute of our wins (M5). M3's rate stays "eliminated"
+(`out < 20 min`); beside it, `lost < 20 min` also counts a game a nation won
+before minute 20 while we still held land, which M3's rate reads as survival.
+An attack's `tilesGained` counts tiles that moved from its target to us while
+it ran, so it includes enclosed pockets and misses tiles taken from players we
+were not attacking (`tilesUncredited` keeps the rest).
 
 ### Comparisons
 

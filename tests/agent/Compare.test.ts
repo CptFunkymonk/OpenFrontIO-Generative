@@ -366,6 +366,7 @@ describe("the report", () => {
       expect(d.ties).toBe(6);
     }
     expect(r.wins).toMatchObject({ aOnly: 0, bOnly: 0, signTestP: 1 });
+    expect(r.lostBefore20).toMatchObject({ aOnly: 0, bOnly: 0, signTestP: 1 });
     expect(r.worst).toEqual([]);
     expect(r.milestones.b).toEqual({
       ...r.milestones.a,
@@ -374,6 +375,116 @@ describe("the report", () => {
     expect(compareMarkdown(r)).toContain(
       "no difference shown (the interval includes 0)",
     );
+  });
+
+  test("lost before minute 20 counts a nation's early win, pair by pair", () => {
+    // At a 20-minute cap: a nation won at minute 7 while the seat held land
+    // (lost, not out), alive at the cap (neither), out at minute 12 (both).
+    const nationWon: Seat = { result: "loss", peakShare: 0.05 };
+    const capped: Seat = { result: "timeout", peakShare: 0.1 };
+    const out12 = out(7200, 0.05);
+    const length = (s: Seat) =>
+      s === nationWon ? 4200 : s === capped ? 12000 : 7200;
+    // In game 5 a nation beat B at minute 7 where A was out at minute 12:
+    // B looks better on out < 20 min and is worse on lost < 20 min.
+    const A = [nationWon, capped, out12, capped, capped, out12];
+    const B = [capped, nationWon, out12, nationWon, capped, nationWon];
+    const cap = ["--max-minutes", "20"];
+    writeRun(dir("a"), ["--agent", "baseline", ...POOL, ...cap], {
+      seat: (job) => A[job.game],
+      ticks: (job) => length(A[job.game]),
+    });
+    writeRun(
+      dir("b"),
+      ["--agent", 'baseline:{"expandTrigger":0.3}', ...POOL, ...cap],
+      { seat: (job) => B[job.game], ticks: (job) => length(B[job.game]) },
+    );
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(6);
+    expect(r.pairs.map((p) => [p.a.lostBefore20, p.b.lostBefore20])).toEqual([
+      [true, false],
+      [false, true],
+      [true, true],
+      [false, true],
+      [false, false],
+      [true, true],
+    ]);
+    expect(r.milestones.a).toMatchObject({
+      eliminatedBefore20: 2 / 6,
+      lostBefore20: 3 / 6,
+      lostBefore20Games: 6,
+    });
+    expect(r.milestones.b).toMatchObject({
+      eliminatedBefore20: 1 / 6,
+      lostBefore20: 4 / 6,
+      lostBefore20Games: 6,
+    });
+    expect(r.lostBefore20).toEqual({
+      games: 6,
+      a: 3,
+      b: 4,
+      aOnly: 1,
+      bOnly: 2,
+      signTestP: 1,
+    });
+
+    // The milestone table has the column beside out < 20 min.
+    const md = compareMarkdown(r);
+    const lines = md.split("\n");
+    const cells = (line: string) =>
+      line
+        .split("|")
+        .slice(1, -1)
+        .map((c) => c.trim());
+    const at = lines.findIndex((l) => l.startsWith("| entrant |"));
+    const header = cells(lines[at]);
+    const rates = (row: number) =>
+      ["out < 20 min", "lost < 20 min"].map(
+        (name) => cells(lines[at + 2 + row])[header.indexOf(name)],
+      );
+    expect(rates(0)).toEqual(["33.3% of 6", "50.0% of 6"]);
+    expect(rates(1)).toEqual(["16.7% of 6", "66.7% of 6"]);
+    expect(md).toContain(
+      "A 3, B 4 of the 6 pairs known on both sides. " +
+        "Discordant: A only 1, B only 2; sign test p = 1.",
+    );
+  });
+
+  test("a pair counts toward lost before 20 only where both sides know", () => {
+    // Capped at 4 minutes, as opening work runs: a seat alive at the cap
+    // cannot say, even where the other side was out at minute 3.
+    const args = ["--agent", "baseline", ...POOL, "--max-minutes", "4"];
+    writeRun(dir("a"), args, {
+      seat: (job) => (job.game === 0 ? out(1800, 0.01) : alive(0.05)),
+      ticks: (job) => (job.game === 0 ? 1800 : 2400),
+    });
+    writeRun(dir("b"), args, { ticks: () => 2400 });
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(6);
+    expect(r.milestones.a).toMatchObject({
+      lostBefore20: 1,
+      lostBefore20Games: 1,
+    });
+    expect(r.milestones.b).toMatchObject({
+      lostBefore20: null,
+      lostBefore20Games: 0,
+    });
+    expect(r.lostBefore20).toEqual({
+      games: 0,
+      a: 0,
+      b: 0,
+      aOnly: 0,
+      bOnly: 0,
+      signTestP: 1,
+    });
   });
 
   test("a game crashed on both sides is unpaired, not left out", () => {

@@ -11,7 +11,8 @@
  *
  * For B − A: wins, with an exact sign test on the discordant games; mean
  * Δprogress, Δpeak land and Δsurvival with seeded bootstrap 95% intervals
- * and the better/worse/tie split; the milestone metrics of both; breakdowns
+ * and the better/worse/tie split; the milestone metrics of both, and losses
+ * before minute 20 for any cause with a sign test like the wins'; breakdowns
  * by map category and by map; the games B lost most in, with the command
  * that reruns each with images; and which code each side ran, with a warning
  * when it had local changes or is not HEAD. A game that crashed, or stopped
@@ -30,6 +31,7 @@ import {
   CrashedGame,
   DECISIVE_PATHS,
   EntrantSummary,
+  lostBefore20,
   mean,
   pct,
   progress,
@@ -305,6 +307,9 @@ export interface Outcome {
   /** Game minutes until eliminated: a seat never eliminated survived the
    *  whole game, a winner the whole cap. */
   survivalMinutes: number;
+  /** Lost before minute 20 for any cause (Summary.ts lostBefore20); null if
+   *  the game cannot say. */
+  lostBefore20: boolean | null;
 }
 
 export interface PairRow {
@@ -381,6 +386,19 @@ export interface CompareReport {
     bOnly: number;
     signTestP: number;
   };
+  /** Games lost before minute 20 for any cause (Outcome.lostBefore20), over
+   *  the pairs known on both sides, tested like wins. Unlike M3's
+   *  eliminated-before-20 it counts a game a nation won early as lost. */
+  lostBefore20: {
+    /** Pairs where both sides' value is known. */
+    games: number;
+    a: number;
+    b: number;
+    /** Discordant games: lost before minute 20 by one side only. */
+    aOnly: number;
+    bOnly: number;
+    signTestP: number;
+  };
   progress: DeltaStats;
   peakShare: DeltaStats;
   survivalMinutes: DeltaStats;
@@ -415,6 +433,7 @@ function outcome(g: SideGame, capMinutes: number | null): Outcome {
         : s.result === "win"
           ? Math.max(capMinutes ?? 0, g.game.gameMinutes)
           : g.game.gameMinutes,
+    lostBefore20: lostBefore20(g.game, g.seat),
   };
 }
 
@@ -645,6 +664,14 @@ export function compareRuns(
   const winB = (r: PairRow) => r.b.result === "win";
   const aOnly = rows.filter((r) => winA(r) && !winB(r)).length;
   const bOnly = rows.filter((r) => winB(r) && !winA(r)).length;
+  // A pair where either side cannot say (a cap before minute 20) is left out.
+  const lostKnown = rows.filter(
+    (r) => r.a.lostBefore20 !== null && r.b.lostBefore20 !== null,
+  );
+  const lostA = (r: PairRow) => r.a.lostBefore20 === true;
+  const lostB = (r: PairRow) => r.b.lostBefore20 === true;
+  const lostAOnly = lostKnown.filter((r) => lostA(r) && !lostB(r)).length;
+  const lostBOnly = lostKnown.filter((r) => lostB(r) && !lostA(r)).length;
 
   const categoryOrder = (c: string) => {
     const i = (mapCategoryOrder as readonly string[]).indexOf(c);
@@ -699,6 +726,14 @@ export function compareRuns(
       aOnly,
       bOnly,
       signTestP: signTest(aOnly, bOnly),
+    },
+    lostBefore20: {
+      games: lostKnown.length,
+      a: lostKnown.filter(lostA).length,
+      b: lostKnown.filter(lostB).length,
+      aOnly: lostAOnly,
+      bOnly: lostBOnly,
+      signTestP: signTest(lostAOnly, lostBOnly),
     },
     progress: deltaStats(rows, "progress"),
     peakShare: deltaStats(rows, "peakShare"),
@@ -813,6 +848,7 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     "Δ",
     "B better / worse / tie",
   ];
+  const lost = r.lostBefore20;
 
   const out: string[] = [
     `# ${r.b.label} (B) against ${r.a.label} (A)`,
@@ -854,6 +890,12 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     `## Milestones (paired games)`,
     "",
     summaryTable([r.milestones.a, r.milestones.b]),
+    "",
+    `Lost before minute 20 for any cause (eliminated, or alive when another ` +
+      `player won, which out < 20 min counts as survival): A ${lost.a}, ` +
+      `B ${lost.b} of the ${lost.games} pair${lost.games === 1 ? "" : "s"} ` +
+      `known on both sides. Discordant: A only ${lost.aOnly}, B only ` +
+      `${lost.bOnly}; sign test p = ${pValue(lost.signTestP)}.`,
     "",
     `## By map category`,
     "",

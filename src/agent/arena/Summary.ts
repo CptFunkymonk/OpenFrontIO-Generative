@@ -116,6 +116,22 @@ export function standingAt(
   return null;
 }
 
+/**
+ * Whether a seat lost before minute 20 (tick 12000), for any cause: it was
+ * eliminated before then, or another player won before then while it was
+ * still in the game, which M3's eliminated-before-20 counts as survival.
+ * Otherwise false if it won or the game reached minute 20, and null
+ * (unknown) if the game stopped earlier without a result: a shorter cap, an
+ * error.
+ */
+export function lostBefore20(r: SummaryGame, seat: number): boolean | null {
+  const s = r.seats[seat];
+  const tick = 20 * TICKS_PER_MINUTE;
+  if (s.eliminatedAtTick !== null && s.eliminatedAtTick < tick) return true;
+  if (s.result === "loss" && r.ticks < tick) return true;
+  return s.result === "win" || r.ticks >= tick ? false : null;
+}
+
 /** Fraction of the known values that are true, and how many were known. */
 function known(values: (boolean | null)[]): {
   rate: number | null;
@@ -163,6 +179,12 @@ export interface EntrantSummary {
    *  when the game reached minute 20, or when it was won or lost. */
   eliminatedBefore20: number | null;
   eliminatedBefore20Games: number;
+  /** Lost before minute 20 for any cause (lostBefore20): eliminated, or
+   *  still in when another player won before minute 20, which
+   *  eliminatedBefore20 counts as survival. Known in the same games, so the
+   *  two compare directly. */
+  lostBefore20: number | null;
+  lostBefore20Games: number;
   /** M3: rank ≤ 3 among nations and humans by land at minute 10. */
   top3At10: number | null;
   top3At10Games: number;
@@ -207,6 +229,7 @@ export function summarize(
       return over || r.ticks >= tick ? false : null;
     }),
   );
+  const lost20 = known(rows.map(({ r, seat }) => lostBefore20(r, seat)));
   return {
     label,
     games: rows.length,
@@ -236,6 +259,8 @@ export function summarize(
     m3Games: aboveMedian.games,
     eliminatedBefore20: out20.rate,
     eliminatedBefore20Games: out20.games,
+    lostBefore20: lost20.rate,
+    lostBefore20Games: lost20.games,
     top3At10: top3.rate,
     top3At10Games: top3.games,
     medianWinMinutes: median(
@@ -281,15 +306,17 @@ const rateOf = (rate: number | null, games: number) =>
   rate === null ? "–" : `${pct(rate)} of ${games}`;
 
 /**
- * The summary as a Markdown table, one row per entrant. "errored" counts the
- * games among `games` that stopped early on an error, "crashed" the jobs
- * whose worker died. An entrant with no games (another entrant's --game
- * rerun) shows "–" where a mean over nothing would read as a result.
+ * The summary as a Markdown table, one row per entrant. "out < 20 min" is
+ * M3's rate (eliminated), "lost < 20 min" also counts the games another
+ * player won before minute 20. "errored" counts the games among `games` that
+ * stopped early on an error, "crashed" the jobs whose worker died. An
+ * entrant with no games (another entrant's --game rerun) shows "–" where a
+ * mean over nothing would read as a result.
  */
 export function summaryTable(summaries: readonly EntrantSummary[]): string {
   const header =
     "| entrant | games | wins | win rate (95% CI) | progress | peak land | final land | placement | eliminated | " +
-    "≥ median @3 | ≥ top @3 | top 3 @10 | out < 20 min | win time | agent errors | errored | crashed | think p95 |";
+    "≥ median @3 | ≥ top @3 | top 3 @10 | out < 20 min | lost < 20 min | win time | agent errors | errored | crashed | think p95 |";
   const rule = `|${header
     .split("|")
     .slice(1, -1)
@@ -303,6 +330,7 @@ export function summaryTable(summaries: readonly EntrantSummary[]): string {
       `${some(s.meanPlacement.toFixed(1))} | ${s.eliminated} | ` +
       `${rateOf(s.m3AboveMedian, s.m3Games)} | ${rateOf(s.m3AboveTop, s.m3Games)} | ` +
       `${rateOf(s.top3At10, s.top3At10Games)} | ${rateOf(s.eliminatedBefore20, s.eliminatedBefore20Games)} | ` +
+      `${rateOf(s.lostBefore20, s.lostBefore20Games)} | ` +
       `${s.medianWinMinutes === null ? "–" : `${s.medianWinMinutes.toFixed(1)} min`} | ` +
       `${s.agentErrors} | ${s.errored} | ${s.crashed} | ${some(`${s.thinkMsP95Max.toFixed(1)} ms`)} |`
     );

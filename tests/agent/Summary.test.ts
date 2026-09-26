@@ -5,6 +5,7 @@ import path from "path";
 import {
   codeFingerprint,
   EntrantSummary,
+  lostBefore20,
   median,
   provenance,
   readRun,
@@ -111,6 +112,9 @@ describe("summarize", () => {
     // Out before 20 minutes: known in all but the 5-minute cap.
     expect(s.eliminatedBefore20Games).toBe(5);
     expect(s.eliminatedBefore20).toBeCloseTo(2 / 5);
+    // No nation won a game early, so lost before 20 says the same.
+    expect(s.lostBefore20Games).toBe(5);
+    expect(s.lostBefore20).toBeCloseTo(2 / 5);
     expect(s.medianWinMinutes).toBe(8);
     expect(s.eliminated).toBe(2);
     expect(s.meanSurvivalMinutes).toBeCloseTo((15 + 2.5) / 2);
@@ -156,6 +160,47 @@ describe("summarize", () => {
     });
   });
 
+  test("lost before minute 20 counts a nation's early win; out < 20 does not", () => {
+    // A nation won at minute 7 while our seat still held land; alive at a
+    // 20-minute cap; eliminated at minute 12, which stopped the game.
+    const nationWon = game(seat({ result: "loss" }), 7 * 600);
+    const capped = game(seat({ result: "timeout" }), 20 * 600);
+    const out12 = game(
+      seat({ result: "loss", eliminatedAtTick: 12 * 600 }),
+      12 * 600,
+    );
+    const games = [nationWon, capped, out12];
+    expect(games.map((g) => lostBefore20(g, 0))).toEqual([true, false, true]);
+    const s = summarize("x", rows(games), 0);
+    expect(s).toMatchObject({
+      eliminatedBefore20: 1 / 3,
+      eliminatedBefore20Games: 3,
+      lostBefore20: 2 / 3,
+      lostBefore20Games: 3,
+    });
+    const [header, , row] = summaryTable([s])
+      .split("\n")
+      .map((l) => l.split("|").map((c) => c.trim()));
+    const out = header.indexOf("out < 20 min");
+    expect(header[out + 1]).toBe("lost < 20 min");
+    expect(row.slice(out, out + 2)).toEqual(["33.3% of 3", "66.7% of 3"]);
+
+    // The edges. Minute 20 is tick 12000: a game still on then reached it.
+    const lost = (fields: Partial<SummarySeat>, ticks: number) =>
+      lostBefore20(game(seat(fields), ticks), 0);
+    expect(lost({ result: "loss" }, 11999)).toBe(true);
+    expect(lost({ result: "loss" }, 12000)).toBe(false);
+    expect(lost({ result: "win" }, 4800)).toBe(false);
+    // --play-out goes on past an elimination: its tick decides.
+    expect(lost({ result: "loss", eliminatedAtTick: 7200 }, 18000)).toBe(true);
+    expect(lost({ result: "loss", eliminatedAtTick: 12000 }, 18000)).toBe(
+      false,
+    );
+    // Stopped earlier without a result (a 4-minute cap, an error): unknown.
+    expect(lost({ result: "timeout" }, 2400)).toBeNull();
+    expect(lost({ result: "error" }, 900)).toBeNull();
+  });
+
   test("games that stopped on an error are counted apart", () => {
     const stopped: SummaryGame = {
       ...game(seat({ result: "error" }), 50),
@@ -196,6 +241,8 @@ describe("summarize", () => {
       // Survival does not need standings.
       eliminatedBefore20: 0,
       eliminatedBefore20Games: 1,
+      lostBefore20: 0,
+      lostBefore20Games: 1,
     });
     const empty = summarize("none", [], 0);
     expect(empty.winRate).toBe(0);
