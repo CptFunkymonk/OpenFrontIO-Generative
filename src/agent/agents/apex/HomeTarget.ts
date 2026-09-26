@@ -3,6 +3,7 @@ import {
   Deterrence,
   deterrence,
   DeterrenceTerm,
+  HeldLine,
   NO_DETERRENCE,
 } from "../../lib/Deterrence";
 import { HomeFloors } from "../../lib/Scheduler";
@@ -16,9 +17,8 @@ declare module "../../lib/Scheduler" {
   interface HomeFloors {
     /** o.deterrence (package B1): the deterrence floor included in H (0
      *  when off or when no nation needs it), the nation behind it, and
-     *  every kept line (lib/Deterrence.ts), for controllers that spend
-     *  below H, e.g. the counter, which keeps every other nation's line.
-     *  Declared here (Scheduler.ts belongs to another package). */
+     *  every kept line (lib/Deterrence.ts; the DefenseController logs
+     *  them). Declared here (Scheduler.ts belongs to another package). */
     det?: number;
     detBy?: PlayerID | null;
     detTerms?: readonly DeterrenceTerm[];
@@ -33,6 +33,9 @@ declare module "./state" {
      *  homeFloors, which the policy calls before the scan reaches the
      *  controllers. Plain data. */
     deterrence?: { cands: PlayerID[]; at: number };
+    /** o.detHold (package B1): the land lines held (lib/Deterrence.ts
+     *  HeldLine), by nation. Plain data. */
+    detHeld?: Record<PlayerID, HeldLine>;
   }
 }
 
@@ -150,12 +153,23 @@ function deterrenceFloor(
           .filter((n) => n.type === PlayerType.Nation)
           .map((n) => n.id)
       : (s.deterrence?.cands ?? []);
-  return deterrence(v.me, v.nm, v.models, v.tick, low, cands, {
-    margin: o.detMargin,
-    maxShare: o.detMaxShare,
-    capLines: o.detCapLines,
-    betrayShare: o.detBetrayShare,
-    targetCheck: o.detTargetCheck,
-    tribeSlack: o.detTribeSlack,
-  });
+  const held = o.detHold > 0 ? (s.detHeld ??= {}) : null;
+  return deterrence(
+    v.me,
+    v.nm,
+    v.models,
+    v.tick,
+    low,
+    cands,
+    {
+      margin: o.detMargin,
+      maxShare: o.detMaxShare,
+      capLines: o.detCapLines,
+      betrayShare: o.detBetrayShare,
+      targetCheck: o.detTargetCheck,
+      tribeSlack: o.detTribeSlack,
+      hold: o.detHold,
+    },
+    held,
+  );
 }

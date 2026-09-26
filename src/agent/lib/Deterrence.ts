@@ -1,4 +1,10 @@
-import { Game, Player, PlayerID, Relation } from "../../core/game/Game";
+import {
+  Game,
+  Player,
+  PlayerID,
+  PlayerType,
+  Relation,
+} from "../../core/game/Game";
 import { TileRef } from "../../core/game/GameMap";
 import { Models } from "./Models";
 import { NationModel } from "./NationModel";
@@ -43,6 +49,20 @@ export interface DeterrenceParams {
    *  fast (arena quick@20 Yellow Sea: Hebei attacked with one tribe left,
    *  our home 0.5 of its line). */
   tribeSlack: number;
+  /** Ticks a nation's land line is held after it was last computed
+   *  (0: off). While held, the line is the highest computed in that time:
+   *  a nation's own attack or a tribe it turns to lowers or drops its line
+   *  for a few decisions, the spending that frees brings our home down
+   *  just as it regrows (arena quick Onion: the line fell to 0 five times
+   *  in 1,000 ticks, each followed by a burst of tribe attacks and the
+   *  next invasion). */
+  hold: number;
+}
+
+/** A land line kept for DeterrenceParams.hold (plain data, in state). */
+export interface HeldLine {
+  floor: number;
+  until: number;
 }
 
 export type DeterrenceKind = "land" | "betray";
@@ -92,8 +112,12 @@ export const NO_DETERRENCE: Deterrence = Object.freeze({
  *   strategy list): betrayShare·T(d).
  * Terms above maxShare·cap are dropped (capLines: held at maxShare·cap).
  * Nations that free land or a tribe
- * with a structure locks at d add nothing. In smallID order, so the result
- * is deterministic.
+ * with a structure locks at d add nothing. With p.hold > 0 and a `held`
+ * map (the caller's state), a land line is kept for p.hold ticks after it
+ * was last computed, at the highest value computed since it was set (a
+ * line computed lower does not lower it; one computed higher, or after
+ * the hold, resets it); an ally's held line is dropped. In smallID order,
+ * so the result is deterministic.
  */
 export function deterrence(
   me: Player,
@@ -103,8 +127,14 @@ export function deterrence(
   low: number,
   cands: readonly PlayerID[],
   p: DeterrenceParams,
+  held: Record<PlayerID, HeldLine> | null = null,
 ): Deterrence {
   const safe = nm.sendCapSafe();
+  if (held !== null) {
+    for (const id of Object.keys(held).sort()) {
+      if (held[id].until <= tick) delete held[id];
+    }
+  }
   if (!Number.isFinite(safe) || cands.length === 0) return NO_DETERRENCE;
   const cap = models.cap(me);
   const max = p.maxShare * cap;
@@ -126,22 +156,26 @@ export function deterrence(
     const d = nm.nextDecision(id, tick + 1);
     let term: DeterrenceTerm;
     if (allies.has(id)) {
+      if (held !== null) delete held[id];
       if (p.betrayShare <= 0) continue;
       const g = nm.gates(id, d);
       if (g === "locked" || g === "belowReserve") continue;
       const T = nm.troopsAt(id, d);
       term = { id, kind: "betray", d, T, floor: p.betrayShare * T };
     } else {
-      if (!nm.canLandAttackUs(id, low, d)) continue;
-      if (
-        p.targetCheck &&
-        nm.get(id)!.affordableTribes > p.tribeSlack &&
-        nm.wouldTargetUs(id, low) === null
-      ) {
-        continue;
-      }
+      const line = landLine(nm, id, low, d, safe, p);
+      const h = held !== null && p.hold > 0 ? held[id] : undefined;
+      if (line === null && h === undefined) continue;
       const T = nm.troopsAt(id, d);
-      term = { id, kind: "land", d, T, floor: ((T + 1) / safe) * p.margin };
+      let floor = line ?? 0;
+      if (held !== null && p.hold > 0) {
+        if (line !== null && (h === undefined || line >= h.floor)) {
+          held[id] = { floor: line, until: tick + p.hold };
+        } else if (h !== undefined) {
+          floor = Math.max(floor, h.floor);
+        }
+      }
+      term = { id, kind: "land", d, T, floor };
     }
     if (term.floor > max) {
       dropped++;
@@ -161,14 +195,117 @@ export function deterrence(
   return { floor, by, terms, dropped };
 }
 
-/** The largest line in `terms` of a nation other than `id` (0 with none). */
-export function floorWithout(
-  terms: readonly DeterrenceTerm[] | undefined,
+/** Nation id's land line at its decision d, (T(d) + 1)/safe·margin, if it
+ *  could land-attack us at the probe home `low` (and, with targetCheck,
+ *  its list picks us there or it has at most tribeSlack affordable
+ *  tribes); else null. */
+function landLine(
+  nm: NationModel,
   id: PlayerID,
+  low: number,
+  d: number,
+  safe: number,
+  p: DeterrenceParams,
+): number | null {
+  if (!nm.canLandAttackUs(id, low, d)) return null;
+  if (
+    p.targetCheck &&
+    nm.get(id)!.affordableTribes > p.tribeSlack &&
+    nm.wouldTargetUs(id, low) === null
+  ) {
+    return null;
+  }
+  return ((nm.troopsAt(id, d) + 1) / safe) * p.margin;
+}
+
+/**
+ * The land attack N could send us at its decision d with our home at
+ * `home`: min(T(d) − reserve·M, troopSendCap) (AiAttackBehavior.ts:1041-
+ * 1074), the cap NationModel.sendCap at N's troops now shifted by its
+ * regrowth to d. 0 at Easy and Medium's uncapped sends is not special-
+ * cased: callers gate on canLandAttackUs first.
+ */
+export function potentialSend(
+  nm: NationModel,
+  models: Models,
+  N: Player,
+  home: number,
+  d: number,
 ): number {
-  let f = 0;
-  for (const t of terms ?? []) if (t.id !== id && t.floor > f) f = t.floor;
-  return f;
+  const id = N.id();
+  const T = nm.troopsAt(id, d);
+  const reserve = nm.params(id).reserve * models.cap(N);
+  const cap = nm.sendCap(id, home) + (T - N.troops());
+  return Math.max(0, Math.min(T - reserve, cap));
+}
+
+/** Ids of the living nations, in smallID order (deterministic). */
+export function nationIds(game: Game): PlayerID[] {
+  return game
+    .players()
+    .filter((p) => p.type() === PlayerType.Nation)
+    .sort((a, b) => a.smallID() - b.smallID())
+    .map((p) => p.id());
+}
+
+/** Why lowering our home would expose us to a nation (unlockedBy). */
+export interface Unlock {
+  id: PlayerID;
+  /** "land": it cannot land-attack us at the home we have but could at the
+   *  lower one; "betray": a bordering ally at or above its reserve that
+   *  the lower home puts under its betrayal line betrayShare·T(d). */
+  kind: DeterrenceKind;
+}
+
+/**
+ * The first nation of `cands` (other than `except`, in the given order)
+ * that lowering our home from `home` to `after` would expose us to, at its
+ * next decision d, or null:
+ * - unallied, sharing a border with us in NationModel's last full refresh:
+ *   canLandAttackUs is false at `home` and true at `after` (a nation that
+ *   can already attack us is not counted: the lower home only raises its
+ *   send, T − ceil(0.9·H));
+ * - allied (betrayShare > 0), bordering, not locked or below its reserve at
+ *   d: home ≥ betrayShare·T(d) > after (NationAllianceBehavior.ts:404-491
+ *   betrays a bordering ally under a third of its troops; docs/13 §2.9).
+ * Read-only. The arena showed why (quick Alps, package B1): two counters on
+ * Ticino took home from 3.57M to 2.0M, under St. Gallen's line, and St.
+ * Gallen's 1.84M invasion took half our land. It is not enough for
+ * counters: a nation that can already attack us but picks another player
+ * is not counted, and the lower home can make us its juiciest target
+ * (H ≤ 0.75·T; quick World: Siberia joined Japan's invasion so).
+ */
+export function unlockedBy(
+  me: Player,
+  nm: NationModel,
+  tick: number,
+  cands: readonly PlayerID[],
+  except: PlayerID | null,
+  home: number,
+  after: number,
+  betrayShare: number,
+): Unlock | null {
+  if (after >= home) return null;
+  if (!Number.isFinite(nm.sendCapSafe())) return null;
+  const allies = new Set<PlayerID>();
+  for (const a of me.allies()) allies.add(a.id());
+  for (const id of cands) {
+    if (id === except) continue;
+    const st = nm.get(id);
+    if (st === undefined || !st.full || !st.sharesBorderWithUs) continue;
+    const d = nm.nextDecision(id, tick + 1);
+    if (allies.has(id)) {
+      if (betrayShare <= 0) continue;
+      const g = nm.gates(id, d);
+      if (g === "locked" || g === "belowReserve") continue;
+      const line = betrayShare * nm.troopsAt(id, d);
+      if (home >= line && after < line) return { id, kind: "betray" };
+      continue;
+    }
+    if (nm.canLandAttackUs(id, home, d)) continue;
+    if (nm.canLandAttackUs(id, after, d)) return { id, kind: "land" };
+  }
+  return null;
 }
 
 /**

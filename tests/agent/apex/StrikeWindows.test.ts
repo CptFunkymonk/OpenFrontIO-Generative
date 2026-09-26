@@ -3,7 +3,9 @@ import {
   isVulture,
   minimumStack,
   planStrike,
+  postLossFactor,
   retaliationBound,
+  retreatReason,
   STRIKE_WINDOW_NAMES,
   StrikeSizing,
   strikeTopUp,
@@ -190,5 +192,29 @@ describe("StrikeWindows: the stack", () => {
       Math.floor(need - 500_000),
     );
     expect(strikeTopUp(500_000, 600_000, 0, 0, 10_000, o)).toBe(10_000);
+  });
+});
+
+describe("StrikeWindows: posts and reviews (o.strikePosts, o.strikeRetreat)", () => {
+  test("postLossFactor: the posted share of the front costs bonus× a tile", () => {
+    expect(postLossFactor(0, 5)).toBe(1);
+    expect(postLossFactor(1, 5)).toBe(5);
+    expect(postLossFactor(0.5, 5)).toBe(3);
+    // Clamped to [0, 1].
+    expect(postLossFactor(-1, 5)).toBe(1);
+    expect(postLossFactor(2, 5)).toBe(5);
+  });
+
+  test("retreatReason: never while the stack can kill; posts first, then a hopeless ratio", () => {
+    const o = { postCover: 0.5, ratio: 1.5 };
+    const r = { cover: 0, T: 1_000_000, A: 1_000_000, kill: false };
+    expect(retreatReason(r, o)).toBeNull();
+    expect(retreatReason({ ...r, cover: 0.5 }, o)).toBe("posts");
+    expect(retreatReason({ ...r, cover: 0.49 }, o)).toBeNull();
+    expect(retreatReason({ ...r, T: 1_500_000 }, o)).toBe("ratio");
+    expect(retreatReason({ ...r, T: 1_499_999 }, o)).toBeNull();
+    expect(retreatReason({ ...r, cover: 1, T: 9e9, kill: true }, o)).toBeNull();
+    // Nothing of ours left to call back.
+    expect(retreatReason({ ...r, cover: 1, A: 0 }, o)).toBeNull();
   });
 });

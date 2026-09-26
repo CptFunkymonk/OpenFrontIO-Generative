@@ -30,6 +30,10 @@
  * has two non-bot neighbours), with the nation's PlayerExecution running so
  * relations decay as in a game.
  */
+import {
+  friendPoints,
+  goldChunk,
+} from "../../../src/agent/agents/apex/controllers/DiplomacyController";
 import { Config } from "../../../src/core/configuration/Config";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
 import { NationExecution } from "../../../src/core/execution/NationExecution";
@@ -254,5 +258,79 @@ describe("a timed troop gift beats the extension trap", () => {
     expect(onTime).toBeGreaterThanOrEqual(12);
     expect(onTime).toBeLessThanOrEqual(28);
     expect(early).toBe(0);
+  });
+});
+
+/**
+ * Gives gold worth `points` (friendPoints' multiple of 5) the way apex
+ * o.webFriendGold prices it: points/5 chunks of goldChunk at the tick after
+ * the one it pays in (sent now, it pays in the next turn).
+ */
+function giveGold(w: World, points: number): void {
+  const t = w.game.ticks();
+  const gold = BigInt(points / 5) * goldChunk(w.game, t + 2);
+  w.us.addGold(gold);
+  send(w, { type: "donate_gold", recipient: NATION_ID, gold: Number(gold) });
+}
+
+describe("gold for friendship (apex o.webFriendGold)", () => {
+  test("gold priced by goldChunk buys exactly its points when it pays (DonateGoldExecution.calculateRelationUpdate), early and late in a term", () => {
+    // Up to 3,400: the alliance (formed near 700) lasts 3,000 ticks, and a
+    // gift needs an ally (canDonateGold).
+    for (const at of [800, 2_000, 3_400]) {
+      for (const points of [55, 60, 100]) {
+        const w = world(`gold-${at}-${points}`);
+        trapped(w);
+        while (w.game.ticks() < at) {
+          // Held where it cannot betray us (isSafeToBetray under 1/3).
+          w.nation.setTroops(20_000);
+          tick(w);
+        }
+        expect(w.us.isAlliedWith(w.nation)).toBe(true);
+        expect(relationValue(w.nation, w.us)).toBe(0);
+        const sentAt = w.game.ticks();
+        giveGold(w, points);
+        const gold0 = w.us.gold();
+        tick(w); // the intent's turn: init
+        tick(w); // the next: it pays, after that turn's decay
+        expect(relationValue(w.nation, w.us)).toBe(points);
+        // All of it left us (we have no income here; the nation has).
+        expect(gold0 - w.us.gold()).toBe(
+          BigInt(points / 5) * goldChunk(w.game, sentAt + 2),
+        );
+      }
+    }
+  });
+
+  test("friendPoints: 50 − r + 0.05 per tick of Friendly wanted, in fives, at most 100", () => {
+    expect(friendPoints(0, 1000, 1090)).toBe(55);
+    expect(friendPoints(0, 1000, 1190)).toBe(60);
+    expect(friendPoints(20, 1000, 1190)).toBe(40);
+    // A 0.01 margin against the decay's float drift: exactly on a
+    // multiple of 5 takes the next.
+    expect(friendPoints(0, 1000, 1100)).toBe(60);
+    expect(friendPoints(0, 1000, 2100)).toBeNull();
+  });
+
+  test("a gift that keeps it Friendly for 200 ticks gets the trapped extension agreed in nearly every game (67% at each of its 4-6 decisions)", () => {
+    const SEEDS = 30;
+    let extended = 0;
+    for (let i = 0; i < SEEDS; i++) {
+      const w = world(`gold-trap-${i}`);
+      const expires = trapped(w);
+      const alliance = w.us.allianceWith(w.nation)!;
+      const t = w.game.ticks();
+      giveGold(w, friendPoints(0, t + 1, t + 201)!);
+      tick(w, 2);
+      expect(w.nation.relation(w.us)).toBe(Relation.Friendly);
+      for (let k = 0; k < 200; k++) {
+        // Held where the trap is its only refusal (as the no-gift case).
+        w.nation.setTroops(20_000);
+        tick(w);
+      }
+      if (alliance.expiresAt() !== expires) extended++;
+    }
+    // 1 − 0.33^4 = 0.988 at worst (4 decisions of rate ≤ 49 in 200 ticks).
+    expect(extended).toBeGreaterThanOrEqual(26);
   });
 });

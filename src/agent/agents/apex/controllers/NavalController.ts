@@ -19,6 +19,7 @@ import {
   RaceGrid,
   VoyageField,
   voyageField,
+  voyageRoute,
 } from "../../../lib/RaceField";
 import { Prio } from "../../../lib/Scheduler";
 import type { ApexOptions } from "../options";
@@ -91,24 +92,37 @@ import {
 // food near us is gone, what is left lies on landmasses farther than
 // o.boatMaxVoyage (quick@20: Four Islands and Bering Strait held 50-235k
 // tribe tiles 500-1,300 tiles of sea away while 1-2.4M of our troops sat
-// at the cap). With it:
+// at the cap). Measured since (DIAG reruns of quick@20 and showcase-m2):
+// a landmass with a nation on it is eaten by that nation long before a
+// 500+-tile voyage lands. The Four Islands nations ate the other three
+// islands (about 100k tribe tiles each at tick 1,229) by tick 2,156; the
+// Bering Strait nations ate 200-240k in 1,000-1,300 ticks, their fronts
+// reaching tribes 400+ tiles from them in about 500 ticks (a saturated
+// attack paces 0.63 tiles a tick per border tile, chapter 13 §5.3, and
+// annexing sub-100-tile tribes jumps ahead). 8 of 8 far candidates that
+// passed a 0.33-tile-a-tick front and 3 of 7 far tribe boats of the first
+// screen (2.1M troops) were lost: eaten, turned back or sunk. With it:
 // - far targets (RaceField FarReach), up to o.boatMidMaxVoyage: the
 //   landmass's free plus tribe land, projected from its trend over the
 //   OwnerGrid history (s.naval.foodSeen over o.boatMidRateTicks, the loss
 //   rate times o.boatMidRateMargin), still holds o.boatMidMinFood
 //   FAR_LAND_SLACK + o.boatMidHold ticks after the landing, and no nation's
 //   land lies within o.boatMidFront × (voyage + FAR_LAND_SLACK +
-//   o.boatMidHold) tiles of the landing (RaceField.nationLandDistance).
-//   Measured on Four Islands, Bering Strait and Yellow Sea in minutes 1-4:
-//   a tribe sample d tiles by land from the nearest nation survives T
-//   ticks in 75-95% of cases once d >= T/3 (0.33 tiles a tick), and faster
-//   fronts later (at 0.15, 3 of 3 far boats found their landing eaten).
-//   A boat whose landing flips to a nation is turned back
-//   (o.boatCancelOnFlip); a landing on a dead tribe finds nothing to take
-//   and retreats in full (AttackExecution.ts:302-306); a live beachhead
-//   hands the land allocator the tribes around it;
+//   o.boatMidHold) tiles of the landing (RaceField.nationLandDistance). At
+//   the default front (0.65 tiles a tick) that leaves, in practice,
+//   landmasses no nation holds. A boat whose landing flips to a nation is
+//   turned back (o.boatCancelOnFlip); a landing on a dead tribe finds
+//   nothing to take and retreats in full (AttackExecution.ts:302-306);
+// - the warship guard (o.boatAvoidWarships) also checks the estimated sea
+//   route (RaceField.voyageRoute: down the voyage field from the landing to
+//   our shore) instead of the straight line alone: river and coastal routes
+//   bend, and the first screen's far boats were sunk on a 918-tile river
+//   route (2 boats, 495k troops, Mississippi River) the straight line
+//   cleared;
 // - a "surplus" trigger: the Purse still holds o.boatMidSurplus of the cap
-//   for boats after the land allocator decided;
+//   for boats after the land allocator decided. Its boats go to tribes the
+//   allocator cannot reach (no border with us) before nations eat them: the
+//   best trade of the first screen, 51.7 tiles per 1,000 troops lost;
 // - a far tribe is sized for its regrowth during the voyage; in stall mode
 //   (troops idle at the cap) a tribe may cost up to o.boatMidStallPrice
 //   times the price limit.
@@ -171,6 +185,8 @@ export interface NavalMemory {
     prechecks: number;
     /** Far boats sent (o.boatsMidgame). */
     far: number;
+    /** Targets skipped for a warship near their sea route (o.boatsMidgame). */
+    routes: number;
   };
 }
 
@@ -186,10 +202,18 @@ export function navalMemory(s: ApexState): NavalMemory {
     launch: {},
     cancelled: {},
     foodSeen: [],
-    stats: { cancels: 0, eaten: 0, headroom: 0, prechecks: 0, far: 0 },
+    stats: {
+      cancels: 0,
+      eaten: 0,
+      headroom: 0,
+      prechecks: 0,
+      far: 0,
+      routes: 0,
+    },
   };
   s.naval.foodSeen ??= [];
   s.naval.stats.far ??= 0;
+  s.naval.stats.routes ??= 0;
   return s.naval;
 }
 
@@ -423,6 +447,16 @@ export class NavalController implements Controller {
         // (The landing may lie in a neighbour of its sample's cell.)
         if (skip(t.comp, t.tribeSmallID ?? 0, cell)) continue;
         if (nearWarship(game, guard, t.tile, t.tile, reach)) {
+          markGuarded(cell);
+          continue;
+        }
+        if (
+          o.boatsMidgame &&
+          guard.length > 0 &&
+          voyage !== undefined &&
+          routeNearWarship(game, race, voyage.field, t.tile, guard, reach)
+        ) {
+          mem.stats.routes++;
           markGuarded(cell);
           continue;
         }
@@ -732,6 +766,45 @@ export function nearWarship(
     const ex = px - u * dx;
     const ey = py - u * dy;
     if (ex * ex + ey * ey <= r2) return true;
+  }
+  return false;
+}
+
+/** Route cells between two warship checks: a check every
+ *  ROUTE_CHECK_EVERY·cell tiles misses no warship by more than that. */
+const ROUTE_CHECK_EVERY = 4;
+/** Longest route walked, in cells (past it the rest is left unchecked). */
+const ROUTE_MAX_CELLS = 2000;
+
+/**
+ * o.boatsMidgame: whether a warship of `ws` (x, y pairs, hostileWarships)
+ * lies within `range` (Euclidean, as its targeting) of the estimated sea
+ * route to `tile` (RaceField.voyageRoute on the voyage field), checked every
+ * ROUTE_CHECK_EVERY cells from the landing's cell, the range widened by the
+ * cells skipped between checks. False without a route.
+ */
+export function routeNearWarship(
+  game: Game,
+  grid: RaceGrid,
+  f: VoyageField,
+  tile: TileRef,
+  ws: readonly number[],
+  range: number,
+): boolean {
+  if (ws.length === 0) return false;
+  const route = voyageRoute(f, grid, cellOf(grid, game, tile), ROUTE_MAX_CELLS);
+  const { cell, cw } = grid;
+  const r = range + ROUTE_CHECK_EVERY * cell;
+  const r2 = r * r;
+  for (let k = 0; k < route.length; k += ROUTE_CHECK_EVERY) {
+    const c = route[k];
+    const x = (c % cw) * cell + cell / 2;
+    const y = Math.floor(c / cw) * cell + cell / 2;
+    for (let i = 0; i < ws.length; i += 2) {
+      const dx = ws[i] - x;
+      const dy = ws[i + 1] - y;
+      if (dx * dx + dy * dy <= r2) return true;
+    }
   }
   return false;
 }

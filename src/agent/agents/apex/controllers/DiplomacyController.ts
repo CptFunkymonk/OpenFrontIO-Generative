@@ -37,6 +37,17 @@ import { inStall } from "./ExpansionController";
 //                          o.extendLead ticks before expiry
 //   §3.4.6 never           breakAlliance, requests to tribes, targetPlayer or
 //                          insulting emojis: this controller sends none
+//   §5.1.1 midgame web     (o.webMidgame, from o.webFrom; package B2) the plan
+//                          keeps the reachable nations of highest dmid (their
+//                          stack against the home we hold, a peak with
+//                          hysteresis) allied, up to A_ext: requests (the slot
+//                          above A_ext only while every other ally lapses
+//                          first), early extensions, a renew request at a
+//                          lapse, gold for friendship before a refused
+//                          extension of a dangerous bordering ally expires,
+//                          counter-accepts that leave room for the kept; every
+//                          other ally lapses (never a break). The logs name
+//                          every alliance change (`dip ally+/~/-`).
 //
 // The recall (§3.3.2) is the DefenseController's; both take the dedupe key
 // `ally:<id>`, so no nation gets two requests in a tick. Slots: requests from
@@ -68,10 +79,42 @@ const FRIEND_DIVISOR: Record<Difficulty, number> = {
   [Difficulty.Hard]: 7,
   [Difficulty.Impossible]: 5,
 };
+/** o.webFriend: the relation a large enough troop donation buys
+ *  (DonateTroopExecution.ts:73). */
+const TROOP_GIFT_POINTS = 50;
 /** o.webFriend: the donation is cut to the recipient's cap headroom at
  *  its init (DonateTroopExecution.ts:52-56); keep this much slack for the
  *  regrowth before then. */
 const FRIEND_HEADROOM = 1.05;
+/** o.webFriendGold: DonateGoldExecution.getGoldChunkSize
+ *  (DonateGoldExecution.ts:101-115), the gold one +5 buys before the time
+ *  multiplier, per difficulty (private there, not in Config). */
+const GOLD_CHUNK: Record<Difficulty, number> = {
+  [Difficulty.Easy]: 2_500,
+  [Difficulty.Medium]: 5_000,
+  [Difficulty.Hard]: 12_500,
+  [Difficulty.Impossible]: 25_000,
+};
+/** DonateGoldExecution.calculateRelationUpdate (:117-133): +5 per whole
+ *  chunk, at most +100; the chunk grows by chunk·t/(3,000 +
+ *  numSpawnPhaseTurns()), t the tick it pays in. */
+const GOLD_POINTS = 5;
+const GOLD_MAX_POINTS = 100;
+const GOLD_PERIOD = 3_000;
+/** Relation decay per tick toward 0 (PlayerImpl.decayRelations), and the
+ *  value from which a relation is Friendly (PlayerImpl.relationFromValue). */
+const RELATION_DECAY = 0.05;
+const FRIENDLY_FROM = 50;
+/** o.webFriendGold: Friendly is bought until this many ticks past the
+ *  expiry, for the renew sent the tick we see the lapse and answered at
+ *  the nation's next decision (at most 49 ticks later). */
+const FRIEND_PAST_EXPIRY = 60;
+/** o.webKeepFeasible: request forecasts per plan (each may do one lazy full
+ *  NationModel refresh); candidates past them are kept unchecked
+ *  (requests forecast again before sending). */
+const MID_FORECASTS = 4;
+/** Ticks between two `dip mid` lines while the keep set stays the same. */
+const MID_LOG_EVERY = 300;
 /** o.webRenew: ticks past an alliance's expiry that its renew entry waits
  *  while the alliance is still seen. */
 const RENEW_WAIT = 10;
@@ -103,6 +146,17 @@ export interface DiplomacyMemory {
   /** o.webRenew: the expiry of each kept alliance, for the renew request
    *  at its lapse (set each decision from the alliances held). */
   renew?: Record<PlayerID, number>;
+  /** o.webFriendGold: the expiry each ally got its gift for (one a term). */
+  gifts?: Record<PlayerID, number>;
+  /** o.webFriendGold: gifts sent and not yet seen: the send tick and the
+   *  relation they buy (RelationTracker.onEvent once seen, see onTick). */
+  giftsPending?: Record<PlayerID, { at: number; points: number }>;
+  /** o.webFriendGold: the expiry an unaffordable gift was logged for. */
+  giftsSkipped?: Record<PlayerID, number>;
+  /** The keep set of the last `dip mid` line, and its tick (logs only). */
+  midLogged?: { keep: string; at: number };
+  /** o.webPeakKeep: each nation's peak dmid, as of the last plan. */
+  peak?: Record<PlayerID, number>;
   stats: {
     plans: number;
     requests: number;
@@ -116,6 +170,9 @@ export interface DiplomacyMemory {
     renews?: number;
     /** o.webFriend donations sent. */
     gifts?: number;
+    /** o.webFriendGold donations sent, and their gold. */
+    goldGifts?: number;
+    goldGiven?: number;
   };
 }
 
@@ -131,6 +188,9 @@ export interface MidPlan {
   dmid: Record<PlayerID, number>;
   /** Alliances the midgame web may hold: A_max (webSlotsMax) or A_ext. */
   slots: number;
+  /** Ranked unallied nations left out of keep: a request now could not be
+   *  sent or would be refused (o.webKeepFeasible). */
+  infeasible: PlayerID[];
 }
 
 /** Whether the midgame web runs at tick t (o.webMidgame from o.webFrom). */
@@ -139,9 +199,38 @@ export function midActive(v: Pick<View, "o" | "tick">): boolean {
 }
 
 /** Whether a strike feature that eats nations is on (o.webLapseTarget
- *  lets a kept ally lapse only then). */
+ *  lets a kept ally lapse only then): the window strikes (o.strikes), the
+ *  stall strike or the spec's strike windows. */
 function strikesOn(v: Pick<View, "o">): boolean {
-  return v.o.stallStrike || v.o.strikeWindows.length > 0;
+  return v.o.strikes || v.o.stallStrike || v.o.strikeWindows.length > 0;
+}
+
+/** o.webFriendGold: the gold chunk that buys +5 when a donation pays at
+ *  tick `paid` (DonateGoldExecution.calculateRelationUpdate). */
+export function goldChunk(game: View["game"], paid: number): bigint {
+  const cfg = game.config();
+  const base = GOLD_CHUNK[cfg.gameConfig().difficulty];
+  const mult = paid / (GOLD_PERIOD + cfg.numSpawnPhaseTurns());
+  return BigInt(Math.round(base + base * mult));
+}
+
+/**
+ * o.webFriendGold: the relation points (a multiple of 5, at most 100) that
+ * keep a nation at relation `r` when paid Friendly through tick `until`
+ * (decay 0.05 a tick from `paid`), or null if +100 is not enough.
+ */
+export function friendPoints(
+  r: number,
+  paid: number,
+  until: number,
+): number | null {
+  const need =
+    FRIENDLY_FROM - r + RELATION_DECAY * Math.max(0, until - paid) + 0.01;
+  const points = Math.max(
+    GOLD_POINTS,
+    Math.ceil(need / GOLD_POINTS) * GOLD_POINTS,
+  );
+  return points > GOLD_MAX_POINTS ? null : points;
 }
 
 /** SmallIDs of the players owning an OwnerGrid block whose race cell, or
@@ -218,10 +307,115 @@ export class DiplomacyController implements Controller {
   onTick(v: View, s: ApexState): void {
     if (midActive(v)) {
       const mem = diplomacyMemory(s);
+      if (mem.giftsPending !== undefined) this.seeGifts(v, mem);
       if (v.o.webRenew) this.renew(v, s, mem);
-      if (v.o.webFriend && mem.mid !== undefined) this.friends(v, mem, mem.mid);
+      if (mem.mid !== undefined) {
+        if (v.o.webFriendGold) this.goldFriends(v, mem, mem.mid);
+        if (v.o.webFriend) this.friends(v, mem, mem.mid);
+      }
     }
     this.counterAccept(v, s);
+  }
+
+  /**
+   * o.webFriendGold (every tick): a bordering kept ally with dmid ≥
+   * webFriendMinDanger, webFriendLead ticks or fewer before its expiry,
+   * whose extension we asked and it has not agreed to, with the extension
+   * forecast at its next decision below webFriendMinP for a reason
+   * friendship fixes (the trap or a draw of checkAlreadyEnoughAlliances,
+   * not similarly strong; "tooMany" too: the extension cannot pass then,
+   * but the renew at the lapse, one alliance fewer, can), while its
+   * relation band is Neutral, gets a gold donation worth friendPoints: the
+   * relation it pays in turn t + 1 (DonateGoldExecution.tick, seen from
+   * t + 2) keeps it Friendly (≥ 50, decay 0.05 a tick) until
+   * FRIEND_PAST_EXPIRY ticks past the expiry. Friendly is decided before
+   * checkAlreadyEnoughAlliances and the strength tests
+   * (NationAllianceBehavior.getAllianceDecision): 67% at every decision
+   * left, and at the renew's. One gift a term, from at most
+   * webFriendGoldShare of our gold; `donate:<id>` dedupes it with the troop
+   * gift in a tick.
+   */
+  private goldFriends(v: View, mem: DiplomacyMemory, mid: MidPlan): void {
+    const { o, me, nm, game, tick: t } = v;
+    const gifts = (mem.gifts ??= {});
+    for (const a of me.alliances()) {
+      const N = a.other(me);
+      const id = N.id();
+      const e = a.expiresAt();
+      if (N.type() !== PlayerType.Nation || !mid.keep.includes(id)) continue;
+      if (e - t > o.webFriendLead || e <= t || gifts[id] === e) continue;
+      if ((mid.dmid[id] ?? 0) < o.webFriendMinDanger) continue;
+      if (!v.wm.nations.some((n) => n.id === id)) continue;
+      if (!a.agreedToExtend(me) || a.agreedToExtend(N)) continue;
+      if (N.relation(me) !== Relation.Neutral) continue;
+      if (me.hasEmbargoAgainst(N) || !me.canDonateGold(N)) continue;
+      const f = nm.acceptsAlliance(id, {
+        kind: "extension",
+        createdAt: t,
+        atTick: nm.nextDecision(id, t + 1),
+        embargoStoppedBy: null,
+      });
+      if (f.p >= o.webFriendMinP) continue;
+      if (f.branch === "traitor" || f.branch === "spawnPhase") continue;
+      const paid = t + 1;
+      const r = Math.min(
+        FRIENDLY_FROM - 1,
+        Math.max(0, nm.relations.value(id, paid)),
+      );
+      const points = friendPoints(r, paid, e + FRIEND_PAST_EXPIRY);
+      if (points === null) continue;
+      // Priced one tick late: the chunk only grows, so the gold buys at
+      // least `points` whenever it pays.
+      const gold = BigInt(points / GOLD_POINTS) * goldChunk(game, paid + 1);
+      if (Number(gold) > o.webFriendGoldShare * Number(me.gold())) {
+        if ((mem.giftsSkipped ??= {})[id] !== e) {
+          mem.giftsSkipped[id] = e;
+          v.log?.(
+            `${t} dip gift ${N.name()} unaffordable: ${gold} gold for +${points} ` +
+              `(have ${me.gold()}, ext p=${f.p.toFixed(2)} ${f.branch})`,
+          );
+        }
+        continue;
+      }
+      const ok = v.scheduler.offer({
+        intent: { type: "donate_gold", recipient: id, gold: Number(gold) },
+        prio: Prio.Diplomacy,
+        cls: "diplomacy",
+        key: `donate:${id}`,
+      });
+      if (!ok) continue;
+      gifts[id] = e;
+      (mem.giftsPending ??= {})[id] = { at: t, points };
+      mem.stats.goldGifts = (mem.stats.goldGifts ?? 0) + 1;
+      mem.stats.goldGiven = (mem.stats.goldGiven ?? 0) + Number(gold);
+      v.log?.(
+        `${t} dip gift ${N.name()} ${gold} gold for +${points} (relation ~${r.toFixed(1)}, ` +
+          `ext p=${f.p.toFixed(2)} ${f.branch}, expires ${e}, dmid ${(mid.dmid[id] ?? 0).toFixed(2)})`,
+      );
+    }
+  }
+
+  /**
+   * o.webFriendGold, o.webFriend: a gift is first visible at ctx tick sent + 2. If the
+   * nation is Friendly then and our RelationTracker does not know it yet,
+   * the gift's points go in as a "donation" event (the forecasts then count
+   * its Friendly branch); otherwise it is logged as not seen (the alliance
+   * lapsed first, or the relation was lower than estimated).
+   */
+  private seeGifts(v: View, mem: DiplomacyMemory): void {
+    const { me, nm, game, tick: t } = v;
+    const pending = mem.giftsPending!;
+    for (const [id, g] of Object.entries(pending)) {
+      if (t < g.at + 2) continue;
+      delete pending[id];
+      if (!game.hasPlayer(id)) continue;
+      const N = game.player(id);
+      const friendly = N.isAlive() && N.relation(me) === Relation.Friendly;
+      if (friendly && nm.relations.band(id, t) !== Relation.Friendly) {
+        nm.relations.onEvent(id, g.at + 2, g.points, "donation");
+      }
+      if (!friendly) v.log?.(`${t} dip gift ${N.name()} not seen`);
+    }
   }
 
   /**
@@ -256,6 +450,7 @@ export class DiplomacyController implements Controller {
       if ((mid.dmid[id] ?? 0) < o.webFriendMinDanger) continue;
       if (!a.agreedToExtend(me) || a.agreedToExtend(N)) continue;
       if (a.expiresAt() - t > o.webFriendLead) continue;
+      if (mem.gifts?.[id] === a.expiresAt()) continue;
       if (nm.params(id).source !== "gameID") continue;
       if (nm.nextDecision(id, t + 1) !== t + 2) continue;
       if (N.relation(me) !== Relation.Neutral) continue;
@@ -286,6 +481,8 @@ export class DiplomacyController implements Controller {
       });
       if (!ok) continue;
       mem.stats.gifts = (mem.stats.gifts ?? 0) + 1;
+      // DonateTroopsExecution's +50, for the forecasts once seen (seeGifts).
+      (mem.giftsPending ??= {})[id] = { at: t, points: TROOP_GIFT_POINTS };
       v.log?.(
         `${t} dip friend ${N.name()} gift ${D} (M=${Math.round(M)}) for its ` +
           `extension (p=${f.p.toFixed(2)} ${f.branch}, expires ${a.expiresAt()}, ` +
@@ -375,13 +572,17 @@ export class DiplomacyController implements Controller {
     const slots = allySlots(v.game, v.me, v.o.allySlotsReserve);
     const mid = midActive(v) ? mem.mid : undefined;
     if (mid !== undefined) {
-      if (v.o.web) this.requests(v, s, mem, mid.keep, mid.slots);
+      if (v.o.web) {
+        this.requests(v, s, mem, mid.keep, this.midRoom(v, mid, slots));
+      }
       if (v.o.extensions) this.extensions(v, s, mem, slots, mid.keep);
       if (v.o.webRenew) this.noteRenew(v, mem, mid);
       return;
     }
     if (v.o.web && t >= from) {
-      this.requests(v, s, mem, s.web.allySet, slots.webTarget);
+      const held =
+        v.me.alliances().length + v.me.outgoingAllianceRequests().length;
+      this.requests(v, s, mem, s.web.allySet, slots.webTarget - held);
     }
     if (v.o.extensions) this.extensions(v, s, mem, slots, s.web.allySet);
   }
@@ -434,10 +635,7 @@ export class DiplomacyController implements Controller {
         continue;
       }
       const d = nm.nextDecision(id, t + 1);
-      let stoppedBy: number | null = null;
-      if (o.embargoStop && me.hasEmbargoAgainst(N)) {
-        stoppedBy = stopInFlight(s, id, t) ? (s.defense?.stops[id] ?? t) : t;
-      }
+      const stoppedBy = this.stoppedBy(v, s, N);
       const f = nm.acceptsAlliance(id, {
         kind: "request",
         createdAt: t,
@@ -603,11 +801,17 @@ export class DiplomacyController implements Controller {
    * dmid(N)      = max(T_N + out_N, trigger_N·M_N^+) / (safe·H_ref),
    *                times webBoatDiscount when reached by boat only;
    *                H_ref = max(H^+ of §3.4.2, min(home, cap))
-   * rank         = reach_mid ∧ dmid ≥ webDangerMin, no strike plan on it,
-   *                most dangerous first
-   * keep         = the top `slots` of rank (A_max with webSlotsMax, else
-   *                A_ext); webLapseTarget drops one bordering ally (see the
-   *                option)
+   * peak(N)      = max(dmid(N), webPeakKeep·peak(N) of the last plan)
+   * value(N)     = peak(N), times webKeepBonus while allied or asked
+   *                (either way): hysteresis
+   * rank         = reach_mid ∧ value ≥ webDangerMin, no strike plan on it,
+   *                most valuable first
+   * keep         = the first `slots` of rank (A_max with webSlotsMax, else
+   *                A_ext) that are allied or asked, or (webKeepFeasible)
+   *                that a request sent now would win (forecast ≥ allyMinP,
+   *                or refused only by the spawn guard or our slot count;
+   *                MID_FORECASTS a plan, the rest kept unchecked);
+   *                webLapseTarget drops one bordering ally (see the option)
    * s.web.allySet gains keep (strikes skip it, the refresh list covers it)
    * and s.web.food loses it.
    *
@@ -645,8 +849,21 @@ export class DiplomacyController implements Controller {
       shore = new Set(mem.shore.ids);
     }
     const usShore = shore !== null && shore.has(me.smallID());
-    const rows: { id: PlayerID; sid: number; d: number }[] = [];
+    const asked = new Set<PlayerID>();
+    for (const r of me.outgoingAllianceRequests())
+      asked.add(r.recipient().id());
+    for (const r of me.incomingAllianceRequests())
+      asked.add(r.requestor().id());
+    const rows: {
+      N: Player;
+      id: PlayerID;
+      sid: number;
+      value: number;
+      held: boolean;
+    }[] = [];
     const dmid: Record<PlayerID, number> = {};
+    const peakBefore = mem.peak ?? {};
+    const peak: Record<PlayerID, number> = {};
     for (const N of c.nations) {
       if (!N.isAlive()) continue;
       const sid = N.smallID();
@@ -665,15 +882,50 @@ export class DiplomacyController implements Controller {
       const Tplus = Math.max(N.troops() + out, nm.params(id).trigger * Mplus);
       const d = (Tplus / (c.safe * Href)) * (boat ? o.webBoatDiscount : 1);
       dmid[id] = Math.round(d * 1000) / 1000;
+      const top = Math.max(d, o.webPeakKeep * (peakBefore[id] ?? 0));
+      peak[id] = Math.round(top * 1000) / 1000;
       if (v.ledger.plan(sid)?.kind === "strike") continue;
-      if (d >= o.webDangerMin) rows.push({ id, sid, d });
+      const held = me.isAlliedWith(N) || asked.has(id);
+      const value = held ? top * o.webKeepBonus : top;
+      if (value >= o.webDangerMin) rows.push({ N, id, sid, value, held });
     }
-    rows.sort((a, b) => b.d - a.d || a.sid - b.sid);
+    rows.sort((a, b) => b.value - a.value || a.sid - b.sid);
     const allSlots = allySlots(game, me, o.allySlotsReserve);
     const slots =
       o.webSlotsMax || allSlots.ext === 0 ? allSlots.max : allSlots.ext;
     const rank = rows.map((r) => r.id);
-    let keep = rank.slice(0, slots);
+    let keep: PlayerID[] = [];
+    const infeasible: PlayerID[] = [];
+    let forecasts = 0;
+    for (const r of rows) {
+      if (keep.length >= slots) break;
+      if (!r.held && o.webKeepFeasible) {
+        if (!me.canSendAllianceRequest(r.N)) {
+          infeasible.push(r.id);
+          continue;
+        }
+        if (forecasts < MID_FORECASTS) {
+          forecasts++;
+          const f = nm.acceptsAlliance(r.id, {
+            kind: "request",
+            createdAt: t,
+            atTick: nm.nextDecision(r.id, t + 1),
+            embargoStoppedBy: this.stoppedBy(v, s, r.N),
+          });
+          // Refused for now by the clock or our slots only (the spawn
+          // guard, hasTooManyAlliances): still ours to keep.
+          const passing =
+            f.p >= o.allyMinP ||
+            f.branch === "spawnPhase" ||
+            f.branch === "tooMany";
+          if (!passing) {
+            infeasible.push(r.id);
+            continue;
+          }
+        }
+      }
+      keep.push(r.id);
+    }
     let dropped: PlayerID | null = null;
     if (o.webLapseTarget && strikesOn(v) && inStall(s, t, o)) {
       // Boxed in: every bordering nation is kept allied, so nothing is
@@ -694,21 +946,75 @@ export class DiplomacyController implements Controller {
         keep = keep.filter((id) => id !== dropped);
       }
     }
-    mem.mid = { at: t, rank, keep, dmid, slots };
+    mem.mid = { at: t, rank, keep, dmid, slots, infeasible };
+    mem.peak = peak;
     const inWeb = new Set(s.web.allySet);
     for (const id of keep) if (!inWeb.has(id)) s.web.allySet.push(id);
     const kept = new Set(keep);
     s.web.food = s.web.food.filter((id) => !kept.has(id));
+    if (v.log === undefined) return;
     const names = keep
       .map((id) => {
         const N = game.player(id);
         return `${N.name()}:${dmid[id].toFixed(2)}${me.isAlliedWith(N) ? "*" : ""}`;
       })
       .join(",");
-    v.log?.(
+    const key = keep.join(",");
+    const last = mem.midLogged;
+    if (last !== undefined && last.keep === key && t - last.at < MID_LOG_EVERY)
+      return;
+    mem.midLogged = { keep: key, at: t };
+    const out = infeasible.map((id) => game.player(id).name()).join(",");
+    v.log(
       `${t} dip mid slots=${slots} rank=${rank.length} H_ref=${Math.round(Href / 1000)}k ` +
-        `keep=[${names}]${dropped !== null ? ` lapse-for-target=${game.player(dropped).name()}` : ""}`,
+        `keep=[${names}]${out !== "" ? ` refused=[${out}]` : ""}` +
+        `${dropped !== null ? ` lapse-for-target=${game.player(dropped).name()}` : ""}`,
     );
+  }
+
+  /** The embargo stop a request to N sent now carries (§3.3.2): the one in
+   *  flight, or one sent with it; null when we do not embargo N. */
+  private stoppedBy(v: View, s: ApexState, N: Player): number | null {
+    if (!v.o.embargoStop || !v.me.hasEmbargoAgainst(N)) return null;
+    return stopInFlight(s, N.id(), v.tick)
+      ? (s.defense?.stops[N.id()] ?? v.tick)
+      : v.tick;
+  }
+
+  /**
+   * o.webMidgame: requests the kept nations may still get now:
+   * - kept: slots − (kept allies + kept nations asked);
+   * - all: A_ext − (alliances + our pending requests), so the extensions of
+   *   kept allies see at most A_ext alliances; with webSlotBorrow, A_max −
+   *   the same while every ally outside the keep set lapses webSlotMargin
+   *   ticks or more before the first kept alliance expires, a new one
+   *   (now + allianceDuration) included.
+   */
+  midRoom(v: View, mid: MidPlan, slots: AllySlots): number {
+    const { me, o, game, tick: t } = v;
+    const keep = new Set(mid.keep);
+    let kept = 0;
+    let total = 0;
+    let otherLast = -Infinity;
+    let keptFirst = t + game.config().allianceDuration();
+    for (const a of me.alliances()) {
+      total++;
+      const id = a.other(me).id();
+      if (keep.has(id)) {
+        kept++;
+        keptFirst = Math.min(keptFirst, a.expiresAt());
+      } else {
+        otherLast = Math.max(otherLast, a.expiresAt());
+      }
+    }
+    for (const r of me.outgoingAllianceRequests()) {
+      total++;
+      if (keep.has(r.recipient().id())) kept++;
+      else otherLast = Math.max(otherLast, keptFirst);
+    }
+    const borrow = o.webSlotBorrow && otherLast + o.webSlotMargin <= keptFirst;
+    const all = (borrow ? slots.max : slots.ext) - total;
+    return Math.min(mid.slots - kept, all);
   }
 
   /**
@@ -824,10 +1130,11 @@ export class DiplomacyController implements Controller {
   // ── §3.4.3 Requests ────────────────────────────────────────────────────
 
   /**
-   * To allySet nations in rank order that are unallied and requestable
-   * (canSendAllianceRequest: nothing pending, the 300-tick cooldown over),
-   * whose forecast at their answering decision is at least allyMinP; while
-   * alliances + pending requests < webTarget, at most allyPerSecond a
+   * To `list` nations in order (allySet, or the midgame keep set) that are
+   * unallied and requestable (canSendAllianceRequest: nothing pending, the
+   * 300-tick cooldown over), whose forecast at their answering decision is
+   * at least allyMinP; at most `room` requests (webTarget − alliances −
+   * pending requests; the midgame's midRoom), at most allyPerSecond a
    * second. A nation we embargo gets the stop with the request, and the
    * forecast counts it (§3.3.2).
    */
@@ -836,11 +1143,9 @@ export class DiplomacyController implements Controller {
     s: ApexState,
     mem: DiplomacyMemory,
     list: readonly PlayerID[],
-    limit: number,
+    room: number,
   ): void {
     const { o, me, nm, game, tick: t } = v;
-    let room =
-      limit - me.alliances().length - me.outgoingAllianceRequests().length;
     if (room <= 0) return;
     const second = Math.max(1, Math.round(1000 / game.config().msPerTick()));
     let recent = 0;
@@ -856,10 +1161,7 @@ export class DiplomacyController implements Controller {
       if (me.isAlliedWith(N) || !me.canSendAllianceRequest(N)) continue;
       if (s.web.food.includes(id)) continue;
       const d = nm.nextDecision(id, t + 1);
-      let stoppedBy: number | null = null;
-      if (o.embargoStop && me.hasEmbargoAgainst(N)) {
-        stoppedBy = stopInFlight(s, id, t) ? (s.defense?.stops[id] ?? t) : t;
-      }
+      const stoppedBy = this.stoppedBy(v, s, N);
       const f = nm.acceptsAlliance(id, {
         kind: "request",
         createdAt: t,

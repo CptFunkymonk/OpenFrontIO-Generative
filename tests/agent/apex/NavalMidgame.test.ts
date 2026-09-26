@@ -6,7 +6,9 @@ import {
   LandmassFood,
   NavalController,
   navalMemory,
+  nearWarship,
   recordFood,
+  routeNearWarship,
   surplus,
 } from "../../../src/agent/agents/apex/controllers/NavalController";
 import { homeFloors } from "../../../src/agent/agents/apex/HomeTarget";
@@ -32,6 +34,7 @@ import {
   ownerGrid,
   RaceGrid,
   voyageField,
+  voyageRoute,
 } from "../../../src/agent/lib/RaceField";
 import {
   createPurse,
@@ -50,6 +53,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../../src/core/game/Game";
 import { createGame } from "../../../src/core/game/GameImpl";
 import { GameMapImpl } from "../../../src/core/game/GameMap";
@@ -59,7 +63,8 @@ import { GameConfig } from "../../../src/core/Schemas";
 // Package A2, the naval midgame (o.boatsMidgame; spec §3.7, §5.4; chapter
 // 13 §2.12, §5.11). Far targets past boatMaxVoyage when their landmass keeps
 // food and no nation's land can reach the landing first, the "surplus"
-// trigger, the food trend, and the far tribe's sizing. Synthetic maps as in
+// trigger, the food trend, the far tribe's sizing, and the warship guard on
+// the estimated sea route (voyageRoute). Synthetic maps as in
 // Naval.test.ts: the real Config at Impossible; no PlayerExecution runs, so
 // troops stay where the test puts them. Tests may mutate the game; the
 // agent never does.
@@ -457,9 +462,11 @@ describe("naval midgame (o.boatsMidgame)", () => {
     const game = farGame();
     for (const [over, want] of [
       [{}, 0],
-      [{ boatsMidgame: true, boatMidMinFood: 500 }, 1],
-      // Its 2,000 tiles never reach the default boatMidMinFood.
-      [{ boatsMidgame: true }, 0],
+      [{ boatsMidgame: true }, 1],
+      // Its 2,000 tiles never reach a boatMidMinFood of 2,500.
+      [{ boatsMidgame: true, boatMidMinFood: 2500 }, 0],
+      // A voyage (about 590 tiles) past boatMidMaxVoyage.
+      [{ boatsMidgame: true, boatMidMaxVoyage: 500 }, 0],
     ] as const) {
       const r = rig(game, over);
       r.me.setTroops(100_000);
@@ -555,5 +562,116 @@ describe("naval midgame (o.boatsMidgame)", () => {
     };
     expect(sent(1)).toBe(0);
     expect(sent(100)).toBe(1);
+  });
+
+  test("voyageRoute and routeNearWarship: the sea route bends around land; a warship off the straight line but on the route guards it", () => {
+    // 600×300: us x 0-19; a nation's wall x 270-329, y 0-209; a free
+    // island x 540-599, y 0-29. The sea route from the island runs west
+    // along its south shore, south past the wall's east face (x 330), then
+    // west under it (y 210+), far from the straight line along the top.
+    const game = synthGame(
+      600,
+      300,
+      (x, y) =>
+        x < 20 || (x >= 270 && x < 330 && y < 210) || (x >= 540 && y < 30),
+    );
+    const me = game.player(MY_ID);
+    fill(game, me, 0, 20, 0, 300);
+    const wall = game.addPlayer(
+      new PlayerInfo("navy", PlayerType.Nation, null, "NATION01"),
+    );
+    fill(game, wall, 270, 330, 0, 210);
+    const race = buildRaceGrid(game, parseApexOptions());
+    const shore: number[] = [];
+    for (let y = 0; y < 300; y += 5) shore.push(game.ref(19, y));
+    const field = voyageField(game, race, shore);
+    const landing = game.ref(560, 29);
+    const c = cellOf(race, game, landing);
+    const route = voyageRoute(field, race, c, 2000);
+    expect(route.length).toBeGreaterThan(10);
+    // Each step is a 4-neighbour one cell nearer our shore, down to 0.
+    for (let k = 1; k < route.length; k++) {
+      const d = Math.abs(route[k] - route[k - 1]);
+      expect(d === 1 || d === race.cw).toBe(true);
+      expect(field.dist[route[k]]).toBe(field.dist[route[k - 1]] - race.cell);
+    }
+    expect(field.dist[route[route.length - 1]]).toBe(0);
+    // It passes under the wall.
+    expect(route.some((q) => Math.floor(q / race.cw) * race.cell >= 210)).toBe(
+      true,
+    );
+    // At most maxSteps cells; nothing for a cell the field does not reach.
+    expect(voyageRoute(field, race, c, 5)).toHaveLength(5);
+    expect(
+      voyageRoute(field, race, cellOf(race, game, game.ref(300, 100)), 50),
+    ).toEqual([]);
+    // A warship 30 tiles east of the wall's east face: off the straight
+    // line from our shore at the top (90 tiles away), on the route.
+    const ws = [360, 120];
+    expect(nearWarship(game, ws, game.ref(19, 29), landing, 40)).toBe(false);
+    expect(routeNearWarship(game, race, field, landing, ws, 40)).toBe(true);
+    // Far from both.
+    expect(routeNearWarship(game, race, field, landing, [590, 290], 40)).toBe(
+      false,
+    );
+    expect(routeNearWarship(game, race, field, landing, [], 40)).toBe(false);
+  });
+
+  test("with the flag a boat whose sea route passes a hostile warship is not sent", () => {
+    const sent = (flag: boolean, at: [number, number]) => {
+      const game = synthGame(
+        600,
+        300,
+        (x, y) =>
+          x < 20 || (x >= 270 && x < 330 && y < 210) || (x >= 540 && y < 30),
+      );
+      const r = rig(game, {
+        boatsMidgame: flag,
+        boatMidMinFood: 500,
+        boatMaxVoyage: 2400,
+      });
+      fill(game, r.me, 0, 20, 0, 300);
+      r.me.setSpawnTile(game.ref(10, 150));
+      r.me.setTroops(400_000);
+      const navy = game.addPlayer(
+        new PlayerInfo("navy", PlayerType.Nation, null, "NATION01"),
+      );
+      fill(game, navy, 270, 330, 0, 210);
+      const sea = game.ref(at[0], at[1]);
+      expect(game.isWater(sea)).toBe(true);
+      navy.buildUnit(UnitType.Warship, sea, { patrolTile: sea });
+      decideOnce(r);
+      return {
+        boats: boats(r).length,
+        routed: navalMemory(r.s).stats.routes > 0,
+      };
+    };
+    // Under the wall's south end: over 150 tiles from the landing and from
+    // the line along the top, next to the route.
+    expect(sent(true, [400, 250])).toEqual({ boats: 0, routed: true });
+    // Without the flag only the straight line is checked: the boat goes.
+    expect(sent(false, [400, 250])).toEqual({ boats: 1, routed: false });
+    // The SE corner guards nothing.
+    expect(sent(true, [590, 290])).toEqual({ boats: 1, routed: false });
+  });
+
+  test("at the default front a far landmass a nation holds gets no boat; a nation-free one does", () => {
+    const sent = (nation: boolean) => {
+      const game = farGame();
+      if (nation) {
+        // A nation on the island's east end, about 80 tiles by land from
+        // its west shore, where every landing lies.
+        const n = game.addPlayer(
+          new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+        );
+        fill(game, n, 680, 700, 0, 20);
+      }
+      const r = rig(game, { boatsMidgame: true, boatMidMinFood: 500 });
+      r.me.setTroops(100_000);
+      decideOnce(r);
+      return boats(r).length;
+    };
+    expect(sent(false)).toBe(1);
+    expect(sent(true)).toBe(0);
   });
 });

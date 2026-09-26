@@ -2,6 +2,8 @@ import { AgentIntent } from "../../../src/agent/Agent";
 import {
   BETRAY_SHARE,
   deterrenceFloor,
+  postCover,
+  STRIKE_REST,
   StrikeController,
   strikeMemory,
   TOPUP_LEAD,
@@ -28,6 +30,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../../src/core/game/Game";
 import { Field, field, GAME_ID, own, rect, submit } from "./Field";
 
@@ -424,5 +427,167 @@ describe("apex window strikes (§5.2, package A1)", () => {
       BETRAY_SHARE * B.troops(),
       6,
     );
+  });
+
+  test("postCover: the share of the contact within 30 tiles of the target's finished defense posts", async () => {
+    const sc = await scene();
+    const { game, me } = sc.f;
+    const info = () =>
+      scanWorld(game, me, null).nations.find((n) => n.id === NATION_ID)!;
+    // Our column x = 99 meets its column x = 100 in each of the 60 rows.
+    expect(info().contact).toBe(60);
+    expect(postCover(game, me, sc.nation, info().contact)).toBe(0);
+    // A post 19 columns behind the front covers rows 0..28 of it (19² +
+    // dy² ≤ 30²): 29 of 60 pairs.
+    const far = sc.nation.buildUnit(UnitType.DefensePost, game.ref(119, 5), {});
+    expect(postCover(game, me, sc.nation, info().contact)).toBeCloseTo(
+      29 / 60,
+      9,
+    );
+    // Under construction it covers nothing (AttackExecution counts only
+    // finished posts).
+    far.setUnderConstruction(true);
+    expect(postCover(game, me, sc.nation, info().contact)).toBe(0);
+    far.setUnderConstruction(false);
+    // A second post 10 columns behind the front adds rows 29..58; a tile in
+    // range of both counts once.
+    sc.nation.buildUnit(UnitType.DefensePost, game.ref(110, 30), {});
+    expect(postCover(game, me, sc.nation, info().contact)).toBeCloseTo(
+      59 / 60,
+      9,
+    );
+  });
+
+  test("retreat: one tick after its decision, a strike into a posted front that cannot kill is called back; nothing meets it, most comes home, and the nation rests", async () => {
+    const sc = await scene();
+    const { game, me } = sc.f;
+    const r = run(sc, stalled());
+    const launch = untilLaunch(sc, r, STRIKES, 0.08, 3 * sc.rate);
+    expect(launch).not.toBeNull();
+    // The nation posts the whole front (as it does against any attack above
+    // 35% of its troops).
+    sc.nation.buildUnit(UnitType.DefensePost, game.ref(110, 30), {});
+    sc.nation.buildUnit(UnitType.DefensePost, game.ref(110, 5), {});
+    sc.nation.buildUnit(UnitType.DefensePost, game.ref(110, 55), {});
+    const RETREAT = parseApexOptions({ strikes: true, strikeRetreat: true });
+    let cancelAt = -1;
+    let stack = 0;
+    for (let i = 0; i < sc.rate + 2 && cancelAt < 0; i++) {
+      const tick = game.ticks();
+      stack = ourAttackOn(me, sc.nation).reduce((x, a) => x + a.troops(), 0);
+      const sent = strikeTick(sc, RETREAT, r);
+      if (sent.some((x) => x.type === "cancel_attack")) cancelAt = tick;
+      game.executeNextTick();
+    }
+    expect(cancelAt).toBeGreaterThan(0);
+    // At d + 1: it decided in the turn before.
+    expect((cancelAt - 1) % sc.rate).toBe(sc.phase);
+    expect(
+      r.logs.some((l) => l.includes("wretreat") && l.includes("posts")),
+    ).toBe(true);
+    expect(strikeMemory(r.s).stats.retreats).toBe(1);
+    const before = me.troops();
+    // The retreat takes 20 ticks and ends before its next decision.
+    for (let i = 0; i < 25; i++) {
+      strikeTick(sc, RETREAT, r);
+      game.executeNextTick();
+    }
+    expect(game.ticks()).toBeLessThan(cancelAt + sc.rate);
+    expect(ourAttackOn(me, sc.nation)).toEqual([]);
+    expect(sc.answers).toEqual([]);
+    // 75% of the stack came home (less our regrowth-free cap clamp: well
+    // above half of it).
+    expect(me.troops() - before).toBeGreaterThan(0.5 * stack);
+    // No new strike on it while it rests.
+    const mem = strikeMemory(r.s);
+    expect(mem.rest[NATION_ID]).toBe(cancelAt);
+    const skips = mem.stats.skips.rest ?? 0;
+    while (game.ticks() < cancelAt + 2 * sc.rate + 2) {
+      sc.nation.setTroops(Math.round(0.08 * sc.f.config.maxTroops(sc.nation)));
+      expect(
+        strikeTick(sc, RETREAT, r).filter((x) => x.type === "attack"),
+      ).toEqual([]);
+      game.executeNextTick();
+    }
+    expect(mem.stats.skips.rest ?? 0).toBeGreaterThan(skips);
+    expect(game.ticks()).toBeLessThan(cancelAt + STRIKE_REST);
+  });
+
+  test("posts: no top-up into a front posted at strikePostCover that the stack cannot kill", async () => {
+    for (const posted of [false, true]) {
+      const sc = await scene();
+      const { game, me, config } = sc.f;
+      const r = run(sc, stalled());
+      const o = parseApexOptions({ strikes: true, strikePosts: true });
+      const M = config.maxTroops(sc.nation);
+      expect(untilLaunch(sc, r, STRIKES, 0.08, 3 * sc.rate)).not.toBeNull();
+      if (posted) {
+        sc.nation.buildUnit(UnitType.DefensePost, game.ref(110, 30), {});
+      }
+      // As in the top-up test: its troops rise, our stack falls short.
+      sc.nation.setTroops(Math.round(0.25 * M));
+      me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+      let topUps = 0;
+      for (let i = 0; i < sc.rate + 2; i++) {
+        topUps += strikeTick(sc, o, r).length;
+        game.executeNextTick();
+      }
+      expect(topUps).toBe(posted ? 0 : 1);
+    }
+  });
+
+  test("strikeMinContact and strikeDetHorizon", async () => {
+    const sc = await scene();
+    const { game } = sc.f;
+    // A 60-pair front: 61 asked, no launch.
+    const r = run(sc, stalled());
+    const narrow = parseApexOptions({ strikes: true, strikeMinContact: 61 });
+    expect(untilLaunch(sc, r, narrow, 0.08, sc.rate + 2)).toBeNull();
+    expect(strikeMemory(r.s).stats.skips.contact).toBeGreaterThan(0);
+    // The horizon reads a third nation's troops at its decision that many
+    // ticks ahead: its regrowth raises the line.
+    const f = await field({ width: 80, height: 40 });
+    const { me, config } = f;
+    own(me, rect(f.game, 0, 0, 40, 40));
+    const add = (id: string, y0: number) => {
+      const n = f.game.addPlayer(
+        new PlayerInfo(id, PlayerType.Nation, null, id),
+      );
+      own(n, rect(f.game, 40, y0, 80, y0 + 20));
+      return n;
+    };
+    const A = add("NATIONA1", 0);
+    const B = add("NATIONB1", 20);
+    f.game.addExecution(new PlayerExecution(B));
+    for (let i = 0; i < 60; i++) f.game.executeNextTick();
+    A.setTroops(Math.round(0.2 * config.maxTroops(A)));
+    B.setTroops(Math.round(0.62 * config.maxTroops(B)));
+    me.setTroops(Math.round(0.9 * config.maxTroops(me)));
+    const nm = new NationModel(f.game, me, GAME_ID, createModels(f.game));
+    const tick = f.game.ticks();
+    nm.observe(tick);
+    const v = (h: number) => ({
+      o: parseApexOptions({ strikes: true, strikeDetHorizon: h }),
+      wm: scanWorld(f.game, me, null),
+      nm,
+      game: f.game,
+      me,
+      tick,
+    });
+    const d0 = nm.nextDecision(B.id(), tick);
+    const d150 = nm.nextDecision(B.id(), tick + 150);
+    expect(nm.gates(B.id(), d150)).toBe("open");
+    expect(deterrenceFloor(v(0), A.id())).toBeCloseTo(
+      (nm.troopsAt(B.id(), d0) + 1) / nm.sendCapSafe(),
+      6,
+    );
+    expect(deterrenceFloor(v(150), A.id())).toBeCloseTo(
+      (nm.troopsAt(B.id(), d150) + 1) / nm.sendCapSafe(),
+      6,
+    );
+    expect(deterrenceFloor(v(150), A.id())).toBeGreaterThan(
+      deterrenceFloor(v(0), A.id()),
+    );
+    void game;
   });
 });

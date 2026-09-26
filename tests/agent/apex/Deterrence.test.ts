@@ -40,9 +40,11 @@ import {
   counterTroops,
   deterrence,
   DeterrenceParams,
-  floorWithout,
   frontTiles,
+  nationIds,
   postSites,
+  potentialSend,
+  unlockedBy,
 } from "../../../src/agent/lib/Deterrence";
 import { createModels, Models } from "../../../src/agent/lib/Models";
 import {
@@ -148,6 +150,7 @@ const PARAMS: DeterrenceParams = {
   betrayShare: 0.34,
   targetCheck: true,
   tribeSlack: 1,
+  hold: 0,
 };
 
 const line = (T: number) => ((T + 1) / 1.1) * 1.05;
@@ -302,16 +305,79 @@ describe("deterrence floor: which nations add a line (stand-ins)", () => {
     ).toBe(0);
   });
 
-  test("floorWithout and counterTroops", () => {
-    const terms = [
-      { id: "A", kind: "land" as const, d: 1, T: 1, floor: 50 },
-      { id: "B", kind: "land" as const, d: 1, T: 1, floor: 70 },
-    ];
-    expect(floorWithout(terms, "B")).toBe(50);
-    expect(floorWithout(terms, "A")).toBe(70);
-    expect(floorWithout(undefined, "A")).toBe(0);
+  test("counterTroops", () => {
     expect(counterTroops(1000, 1.02)).toBe(1021);
     expect(counterTroops(1000, 0.97)).toBe(971);
+  });
+});
+
+describe("deterrence floor: the hold (stand-ins)", () => {
+  // One nation whose troops and ability to attack the test sets per call.
+  function world() {
+    const n = { T: 60_000, can: true, allied: false };
+    const me = {
+      allies: () => (n.allied ? [{ id: () => "A" }] : []),
+    } as unknown as Player;
+    const nm = {
+      sendCapSafe: () => sendCapSafe(Difficulty.Impossible),
+      get: () =>
+        ({
+          id: "A",
+          smallID: 1,
+          full: true,
+          sharesBorderWithUs: true,
+          affordableTribes: 0,
+        }) as unknown as NationState,
+      nextDecision: (_id: string, from: number) => from + 7,
+      gates: () => "open" as Gate,
+      troopsAt: () => n.T,
+      canLandAttackUs: () => n.can,
+      wouldTargetUs: () => "weakest" as TargetReason,
+    } as unknown as NationModel;
+    const models = { cap: () => CAP } as unknown as Models;
+    const held: Record<string, { floor: number; until: number }> = {};
+    const at = (tick: number, hold = 100) =>
+      deterrence(me, nm, models, tick, 30_000, ["A"], { ...PARAMS, hold }, held)
+        .floor;
+    return { n, held, at };
+  }
+
+  test("off (hold 0): the line goes when the nation cannot attack us, and falls with its troops", () => {
+    const w = world();
+    expect(w.at(100, 0)).toBeCloseTo(line(60_000));
+    w.n.T = 40_000;
+    expect(w.at(110, 0)).toBeCloseTo(line(40_000));
+    w.n.can = false;
+    expect(w.at(120, 0)).toBe(0);
+    expect(w.held).toEqual({});
+  });
+
+  test("on: kept for hold ticks at the highest line since it was set; a higher line resets it; an ally's is dropped", () => {
+    const w = world();
+    expect(w.at(100)).toBeCloseTo(line(60_000));
+    expect(w.held.A).toEqual({ floor: line(60_000), until: 200 });
+    // Its attack spent its troops: the line computed now is lower, and
+    // then it cannot attack us at all; the held line stays.
+    w.n.T = 30_000;
+    expect(w.at(120)).toBeCloseTo(line(60_000));
+    w.n.can = false;
+    expect(w.at(150)).toBeCloseTo(line(60_000));
+    // Regrown past it: the line rises and the hold restarts.
+    w.n.can = true;
+    w.n.T = 70_000;
+    expect(w.at(180)).toBeCloseTo(line(70_000));
+    expect(w.held.A.until).toBe(280);
+    // Expired: gone.
+    w.n.can = false;
+    expect(w.at(279)).toBeCloseTo(line(70_000));
+    expect(w.at(280)).toBe(0);
+    expect(w.held).toEqual({});
+    // An ally holds no land line.
+    w.n.can = true;
+    expect(w.at(300)).toBeGreaterThan(0);
+    w.n.allied = true;
+    w.at(310);
+    expect(w.held).toEqual({});
   });
 });
 
@@ -393,6 +459,7 @@ describe("deterrence floor in homeFloors (stand-ins)", () => {
 // ── The floor against a real NationExecution ─────────────────────────────
 
 const NATION_ID = "NATION01";
+const SECOND_ID = "NATION02";
 const LAND = 0x80 | 5;
 
 interface NationInternals {
@@ -558,7 +625,9 @@ interface Live {
   h: Harness;
 }
 
-function live(options: Record<string, unknown>): Live {
+/** Our field: the nation on x 0-19, us on the rest; with `second`, a
+ *  second nation on x 80-99 (it borders us, not the first). */
+function live(options: Record<string, unknown>, second = false): Live {
   const width = 100;
   const height = 20;
   const t = new Uint8Array(width * height).fill(LAND);
@@ -570,9 +639,18 @@ function live(options: Record<string, unknown>): Live {
     new Cell(0, 0),
     new PlayerInfo("nation", PlayerType.Nation, null, NATION_ID),
   );
+  const nations = [nationObj];
+  if (second) {
+    nations.push(
+      new Nation(
+        new Cell(99, 0),
+        new PlayerInfo("second", PlayerType.Nation, null, SECOND_ID),
+      ),
+    );
+  }
   const game = createGame(
     [new PlayerInfo("agent", PlayerType.Human, AGENT_CLIENT, AGENT_ID)],
-    [nationObj],
+    nations,
     map,
     mini,
     config,
@@ -580,9 +658,12 @@ function live(options: Record<string, unknown>): Live {
   game.endSpawnPhase();
   const us = game.player(AGENT_ID);
   const nation = game.player(NATION_ID);
+  const other = second ? game.player(SECOND_ID) : null;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      (x < 20 ? nation : us).conquer(game.ref(x, y));
+      (x < 20 ? nation : other !== null && x >= 80 ? other : us).conquer(
+        game.ref(x, y),
+      );
     }
   }
   const f: Field = {
@@ -700,7 +781,7 @@ describe("winning counter (o.detCounter) through the live policy", () => {
     // With keep 0 it goes (home still keeps H_vw = 0.17·cap).
     const bold = live({ detCounter: true, detCounterKeep: 0 });
     expect(countersIn(invade(bold, 0.4, 0.6).sent)).toHaveLength(1);
-    // A stack of 1% of home is under detCounterMin (2%).
+    // A stack of 1% of home is under detCounterMin (5%).
     const small = live({ detCounter: true });
     expect(countersIn(invade(small, 0.01).sent)).toEqual([]);
     // A recall to it awaiting its answer (the DefenseController's own; a
@@ -723,6 +804,105 @@ describe("winning counter (o.detCounter) through the live policy", () => {
     // Not decisive-gated: the counter goes either way.
     const any = live({ detCounter: true });
     expect(countersIn(invade(any, 0.4, 1, 6).sent)).toHaveLength(1);
+  });
+
+  test("detCounterNoUnlock: no counter that would let a second, deterred nation attack us", () => {
+    // The second nation holds 0.8 of our cap: against our home at the cap
+    // its send cap T − ceil(0.9·H) is 0, against home − X (0.59·cap) it
+    // passes the 20% floor (the real NationModel.canLandAttackUs).
+    const run = (opts: Record<string, unknown>, share: number) => {
+      const w = live({ detCounter: true, ...opts }, true);
+      w.game.player(SECOND_ID).setTroops(Math.floor(share * capOf(w)));
+      return { w, sent: countersIn(invade(w, 0.4).sent) };
+    };
+    const guarded = run({}, 0.8);
+    expect(guarded.sent).toEqual([]);
+    expect(
+      guarded.w.s.log.some((l) =>
+        l.includes("def counterskip nation unlocks second (land)"),
+      ),
+    ).toBe(true);
+    // Without the guard the counter goes.
+    expect(run({ detCounterNoUnlock: false }, 0.8).sent).toHaveLength(1);
+    // A second nation that cannot attack us at home − X either: it goes.
+    expect(run({}, 0.3).sent).toHaveLength(1);
+  });
+});
+
+describe("unlockedBy (stand-ins)", () => {
+  // canLandAttackUs as the land line: T − ceil(0.9·H) ≥ 0.2·H.
+  function nmOf(
+    nations: Record<
+      string,
+      { T: number; border?: boolean; gate?: Gate; smallID: number }
+    >,
+  ): NationModel {
+    return {
+      sendCapSafe: () => sendCapSafe(Difficulty.Impossible),
+      get: (id: string) =>
+        nations[id] === undefined
+          ? undefined
+          : ({
+              id,
+              smallID: nations[id].smallID,
+              full: true,
+              sharesBorderWithUs: nations[id].border ?? true,
+            } as unknown as NationState),
+      nextDecision: (_id: string, from: number) => from + 7,
+      gates: (id: string) => nations[id].gate ?? "open",
+      troopsAt: (id: string) => nations[id].T,
+      canLandAttackUs: (id: string, H: number) =>
+        nations[id].T - Math.ceil(0.9 * H) >= 0.2 * H,
+    } as unknown as NationModel;
+  }
+  const meWith = (allies: string[]) =>
+    ({
+      allies: () => allies.map((id) => ({ id: () => id })),
+    }) as unknown as Player;
+
+  test("a nation deterred at home but not at the lower home unlocks; one already able to attack, off our border, or the excepted one does not", () => {
+    const nm = nmOf({
+      A: { T: 100_000, smallID: 1 }, // line 90,909
+      B: { T: 200_000, smallID: 2 }, // attacks us at 100k already
+      C: { T: 100_000, smallID: 3, border: false },
+    });
+    const me = meWith([]);
+    // 100k → 95k: A still deterred (95k > 90.9k).
+    expect(
+      unlockedBy(me, nm, 100, ["A", "B", "C"], null, 1e5, 95e3, 0.34),
+    ).toBe(null);
+    // 100k → 80k: A can attack at 80k.
+    expect(
+      unlockedBy(me, nm, 100, ["A", "B", "C"], null, 1e5, 80e3, 0.34),
+    ).toEqual({ id: "A", kind: "land" });
+    expect(unlockedBy(me, nm, 100, ["A", "B", "C"], "A", 1e5, 80e3, 0.34)).toBe(
+      null,
+    );
+    // A raise never unlocks.
+    expect(unlockedBy(me, nm, 100, ["A"], null, 80e3, 1e5, 0.34)).toBe(null);
+  });
+
+  test("an ally at or above its reserve whose betrayal line the lower home crosses; not when locked, below reserve, or with betrayShare 0", () => {
+    const nm = nmOf({
+      A: { T: 300_000, smallID: 1 }, // betrayal line 0.34·300k = 102k
+      L: { T: 300_000, smallID: 2, gate: "locked" },
+      R: { T: 300_000, smallID: 3, gate: "belowReserve" },
+    });
+    const me = meWith(["A", "L", "R"]);
+    expect(
+      unlockedBy(me, nm, 100, ["A", "L", "R"], null, 110e3, 100e3, 0.34),
+    ).toEqual({ id: "A", kind: "betray" });
+    expect(unlockedBy(me, nm, 100, ["L", "R"], null, 110e3, 100e3, 0.34)).toBe(
+      null,
+    );
+    expect(unlockedBy(me, nm, 100, ["A"], null, 110e3, 100e3, 0)).toBe(null);
+    // Already under the line: not counted (the counter does not cross it).
+    expect(unlockedBy(me, nm, 100, ["A"], null, 100e3, 90e3, 0.34)).toBe(null);
+  });
+
+  test("nationIds: the living nations in smallID order", () => {
+    const w = live({}, true);
+    expect(nationIds(w.game)).toEqual([NATION_ID, SECOND_ID]);
   });
 });
 
@@ -804,5 +984,61 @@ describe("defense posts (o.detPosts)", () => {
       capped.us.setTroops(Math.floor(0.3 * capOf(capped)));
       expect(postsSent(capped, 25)).toEqual([]);
     }
+  });
+
+  test("detPostMinShare, detPostMinThreat and detPostLead: none that covers too little of the front or against a small potential send; one against a nation just short of the line with the lead, none without", () => {
+    // Its potential send at our home 0.3·cap is about 1.5 times that home:
+    // over detPostMinThreat 0.15, under 2.
+    // A post must cover detPostMinShare of the front: over 1, none can.
+    const share = live({ detPosts: true, detPostMinShare: 1.1 });
+    share.us.addGold(1_000_000n);
+    share.nation.setTroops(
+      Math.floor(0.9 * share.game.config().maxTroops(share.nation)),
+    );
+    share.us.setTroops(Math.floor(0.3 * capOf(share)));
+    expect(postsSent(share, 25)).toEqual([]);
+    const small = live({ detPosts: true, detPostMinThreat: 2 });
+    small.us.addGold(1_000_000n);
+    small.nation.setTroops(
+      Math.floor(0.9 * small.game.config().maxTroops(small.nation)),
+    );
+    small.us.setTroops(Math.floor(0.3 * capOf(small)));
+    expect(postsSent(small, 25)).toEqual([]);
+    // Our home at 1.05 of its land line T/1.1: deterred now, not at 0.9 of
+    // that home (the default lead).
+    for (const [lead, want] of [
+      [0.1, 1],
+      [0, 0],
+    ] as const) {
+      const w = live({ detPosts: true, detPostLead: lead });
+      w.us.addGold(1_000_000n);
+      const T = Math.floor(0.9 * w.game.config().maxTroops(w.nation));
+      w.nation.setTroops(T);
+      w.us.setTroops(Math.floor((T / 1.1) * 1.05));
+      expect(postsSent(w, 25)).toHaveLength(want);
+    }
+  });
+});
+
+describe("potentialSend (stand-ins)", () => {
+  test("min(T(d) − reserve·M, the send cap at its troops now shifted by its regrowth to d)", () => {
+    const N = { id: () => "N", troops: () => 100_000 } as unknown as Player;
+    const models = { cap: () => 200_000 } as unknown as Models;
+    const nmWith = (T: number, cap: number) =>
+      ({
+        troopsAt: () => T,
+        params: () => ({ reserve: 0.3 }),
+        sendCap: () => cap,
+      }) as unknown as NationModel;
+    // T(d) − reserve·M = 110k − 60k = 50k; the cap 30k + 10k of regrowth.
+    expect(potentialSend(nmWith(110_000, 30_000), models, N, 0, 7)).toBe(
+      40_000,
+    );
+    // The reserve binds.
+    expect(potentialSend(nmWith(110_000, 90_000), models, N, 0, 7)).toBe(
+      50_000,
+    );
+    // Never negative (below its reserve).
+    expect(potentialSend(nmWith(50_000, 0), models, N, 0, 7)).toBe(0);
   });
 });

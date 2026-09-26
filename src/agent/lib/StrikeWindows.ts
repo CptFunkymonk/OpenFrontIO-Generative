@@ -224,6 +224,50 @@ export function planStrike(
 }
 
 /**
+ * The loss per tile over a front of which `cover` (0..1) lies within range
+ * of the defender's finished defense posts, as a factor of the post-free
+ * loss: tiles in range cost `bonus` times as much
+ * (Config.defensePostDefenseBonus, 5) [chapter 13 §5.3]. They also fall
+ * defensePostSpeedBonus (3) times slower, which this leaves out.
+ */
+export function postLossFactor(cover: number, bonus: number): number {
+  const c = Math.min(1, Math.max(0, cover));
+  return 1 + (bonus - 1) * c;
+}
+
+/** A running strike as its d + 1 review reads it. */
+export interface StrikeReview {
+  /** Share of the front within range of its finished defense posts. */
+  cover: number;
+  /** Its troops now, and our live stack on it. */
+  T: number;
+  A: number;
+  /** The stack can still take every tile (the kill, all its gold). */
+  kill: boolean;
+}
+
+/**
+ * Why a running strike should be called back one tick after the target's
+ * decision, or null (package A1, o.strikeRetreat). Called back then, the
+ * retreat (20 ticks, RetreatExecution) ends before its next decision (rate
+ * ≥ 30 ticks), so no answer can cancel the retreating stack, and 75% of it
+ * comes home [PIN AttackMerge: 25% malus against a player]. Never while the
+ * stack can still kill. Else when defense posts cover postCover of the
+ * front (spec §5.2.3: every tile there costs ×5, ×3 slower), or when the
+ * target holds `ratio` times our live stack (each tile costs up to 3.3×
+ * the cheapest, and its next answer may delete the stack whole).
+ */
+export function retreatReason(
+  r: StrikeReview,
+  o: { postCover: number; ratio: number },
+): "posts" | "ratio" | null {
+  if (r.kill || !(r.A > 0)) return null;
+  if (r.cover >= o.postCover) return "posts";
+  if (r.T >= o.ratio * r.A) return "ratio";
+  return null;
+}
+
+/**
  * The top-up of a running strike of A troops before the nation's next
  * decision, where it holds Td troops and answers `answer` (0 in a no-answer
  * window): the conquest stack for that answer, if A is below topUpAt of it.

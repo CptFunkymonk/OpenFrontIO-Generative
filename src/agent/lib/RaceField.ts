@@ -1639,6 +1639,56 @@ export function voyageField(
   return { dist, cell };
 }
 
+/**
+ * Not in spec §2.7 (o.boatsMidgame): the estimated sea route of a boat
+ * landing in cell c, as race-grid cells from c (a land cell starts at its
+ * nearest reached neighbour, as in voyageAt) down the voyage field to our
+ * shore. Each step moves to the first 4-neighbour (W, E, N, S) whose
+ * distance is one cell less, the BFS parent every reached water cell has.
+ * At most maxSteps cells; empty where the field does not reach c.
+ */
+export function voyageRoute(
+  f: VoyageField,
+  grid: RaceGrid,
+  c: number,
+  maxSteps: number,
+): number[] {
+  const { cw } = grid;
+  const n = f.dist.length;
+  if (c < 0 || c >= n) return [];
+  let cur = c;
+  if (f.dist[cur] < 0) {
+    // A land cell: its nearest reached neighbour (voyageAt's choice).
+    const cx = cur % cw;
+    let best = -1;
+    for (const e of [
+      cx > 0 ? cur - 1 : -1,
+      cx + 1 < cw ? cur + 1 : -1,
+      cur >= cw ? cur - cw : -1,
+      cur + cw < n ? cur + cw : -1,
+    ]) {
+      if (e < 0 || f.dist[e] < 0) continue;
+      if (best < 0 || f.dist[e] < f.dist[best]) best = e;
+    }
+    if (best < 0) return [];
+    cur = best;
+  }
+  const route = [cur];
+  while (f.dist[cur] > 0 && route.length < maxSteps) {
+    const want = f.dist[cur] - f.cell;
+    const cx = cur % cw;
+    let next = -1;
+    if (cx > 0 && f.dist[cur - 1] === want) next = cur - 1;
+    else if (cx + 1 < cw && f.dist[cur + 1] === want) next = cur + 1;
+    else if (cur >= cw && f.dist[cur - cw] === want) next = cur - cw;
+    else if (cur + cw < n && f.dist[cur + cw] === want) next = cur + cw;
+    if (next < 0) break;
+    route.push(next);
+    cur = next;
+  }
+  return route;
+}
+
 /** Sea tiles to cell c: its own distance, else one step past its nearest
  *  reached neighbour (a land cell on the shore); −1 if none. */
 export function voyageAt(f: VoyageField, grid: RaceGrid, c: number): number {

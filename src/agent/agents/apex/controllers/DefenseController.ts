@@ -9,9 +9,11 @@ import {
 import {
   attackWhy,
   counterTroops,
-  floorWithout,
   frontTiles,
+  nationIds,
   postSites,
+  potentialSend,
+  unlockedBy,
 } from "../../../lib/Deterrence";
 import { allySlots } from "../../../lib/RaceField";
 import { Prio, Proposal } from "../../../lib/Scheduler";
@@ -91,6 +93,11 @@ const POST_CANDIDATES = 40;
 /** o.detPosts: sites tried with canBuild per check (each floods about 700
  *  tiles). */
 const POST_PROBES = 3;
+/** o.detPosts: threats whose fronts are tried per check. */
+const POST_THREATS = 3;
+/** o.detPosts: a nation that attacked us within this many ticks is a
+ *  threat whatever its list picks now (its next wave comes). */
+const POST_RECENT = 600;
 
 /** Our memory (spec §2.10: controllers keep none of their own). Declared
  *  here rather than in state.ts, which another engineer owns; it is created
@@ -110,6 +117,11 @@ export interface DefenseMemory {
   counters?: Record<PlayerID, number>;
   /** o.detPosts: tick of the last post check. */
   lastPost?: number;
+  /** o.deterrence: the floor last logged (logs only). */
+  lastDet?: { det: number; by: PlayerID | null };
+  /** Tick of the last new attack on us (land or a boat landing) by each
+   *  nation (absent in memories created before it). */
+  lastIn?: Record<PlayerID, number>;
   stats: DefenseStats;
 }
 
@@ -223,28 +235,60 @@ export class DefenseController implements Controller {
     if (attackers.length > 0 && v.o.detCounter) {
       this.counterWins(v, mem, attackers);
     }
-    if (v.o.detPosts) this.posts(v, mem, attackers);
+    if (v.o.detPosts) this.posts(v, s, mem, attackers);
     this.stops(v, s);
+    if (v.o.deterrence && v.log !== undefined) this.logFloor(v, mem);
+  }
+
+  /** o.deterrence: a log line when the deterrence floor moves by a tenth
+   *  of the cap or changes nation (logs only, never read by decisions). */
+  private logFloor(v: View, mem: DefenseMemory): void {
+    const f = v.purse.floors;
+    const det = f.det ?? 0;
+    const by = f.detBy ?? null;
+    const last = mem.lastDet ?? { det: 0, by: null };
+    if (by === last.by && Math.abs(det - last.det) < 0.1 * f.cap) return;
+    mem.lastDet = { det, by };
+    const name = (id: PlayerID) =>
+      v.game.hasPlayer(id) ? v.game.player(id).name() : id;
+    const terms = (f.detTerms ?? [])
+      .map((x) => `${name(x.id)}:${x.kind}:${Math.round(x.floor / 1000)}k`)
+      .join(",");
+    v.log?.(
+      `${v.tick} def floor det=${Math.round(det / 1000)}k ` +
+        `by=${by === null ? "-" : name(by)} home=${Math.round(v.purse.home / 1000)}k ` +
+        `cap=${Math.round(f.cap / 1000)}k [${terms}]`,
+    );
   }
 
   /**
    * o.detPosts (package B1): defense posts. Within defensePostRange (30) of
    * a post of ours an attacker loses ×5 troops per tile and takes ×3 as
-   * long (Config.ts:377-387, AttackExecution.attackLogicInput). Every
+   * long (Config.ts:377-387, AttackExecution.attackLogicInput); an attack
+   * advances on every border tile at once (its queue ignores posts), so a
+   * front covered in full loses about a fifth of the tiles. Every
    * POST_EVERY ticks, with gold for one (min(250k, 50k·(posts + 1))) and
-   * fewer than detPostsMax posts ordered this game: the most dangerous
-   * bordering unallied nation — with detPostReactive one attacking us by
-   * land now (largest stack first), else, with detPostProactive, the one
-   * with most troops that could
-   * land-attack us at our home now and would pick us
-   * (NationModel.canLandAttackUs; wouldTargetUs, or at most detTribeSlack
-   * affordable tribes left) — gets a post detPostDepth tiles behind the
-   * stretch of our front with it that the fewest posts cover
-   * (lib/Deterrence.postSites). In every elimination of arena quick@20 the
-   * agent idled at its cap with 0.07-2.8M gold while a nation above
-   * 1.1× its home invaded.
+   * fewer than detPostsMax posts ordered this game, the threats, most
+   * troops first: with detPostReactive the nations attacking us by land
+   * now, else with detPostProactive every bordering unallied nation that
+   * could land-attack us at our home at its next decision
+   * (NationModel.canLandAttackUs) with a potential send of at least
+   * detPostMinThreat of our home (lib/Deterrence.potentialSend) and, with
+   * detPostTargetCheck, a list that picks us or an attack on us in the
+   * last POST_RECENT ticks; largest potential send first.
+   * The first of up to POST_THREATS fronts with a site covering at least
+   * detPostMinCover uncovered front tiles and detPostMinShare of the front
+   * gets a post detPostDepth tiles behind it (lib/Deterrence.postSites). Why: in the showcase apex idled
+   * at its cap for 15-30 minutes with 0.8-4.5M gold before one wave of
+   * invasions took everything in 3 minutes (Mena: 97k tiles to 353 in 150
+   * ticks, Tunisia 1.2M then 2.66M, Mali 1.33M).
    */
-  private posts(v: View, mem: DefenseMemory, attackers: Attacker[]): void {
+  private posts(
+    v: View,
+    s: ApexState,
+    mem: DefenseMemory,
+    attackers: Attacker[],
+  ): void {
     const { o, me, game, nm, tick: t } = v;
     if (t - (mem.lastPost ?? NEVER) < POST_EVERY) return;
     mem.lastPost = t;
@@ -255,68 +299,89 @@ export class DefenseController implements Controller {
     if ((mem.stats.posts ?? 0) >= o.detPostsMax) return;
     const cost = game.config().unitInfo(UnitType.DefensePost).cost(game, me);
     if (me.gold() < cost) return;
-    let N: Player | null = null;
-    let why = "";
-    let best = 0;
+    // Threats, the largest stack first (their attack's troops, or the
+    // potential send): with detPostReactive, nations attacking us by land
+    // now; with detPostProactive, every bordering unallied nation that
+    // could land-attack us at our home at its next decision (and, with
+    // detPostTargetCheck, whose list would pick us).
+    const threats: { N: Player; stack: number; why: string }[] = [];
     for (const x of o.detPostReactive ? attackers : []) {
       const p = x.player;
       if (p.type() !== PlayerType.Nation || me.isFriendly(p)) continue;
-      if (x.first <= 0 || x.troops <= best) continue;
-      best = x.troops;
-      N = p;
-      why = `attack ${Math.round(x.troops)}`;
+      if (x.first <= 0) continue;
+      threats.push({
+        N: p,
+        stack: x.troops,
+        why: `attack ${Math.round(x.troops)}`,
+      });
     }
-    if (N === null && o.detPostProactive) {
-      const home = me.troops();
+    if (threats.length === 0 && o.detPostProactive) {
+      // Our home as the nations will see it: after an inbound bomb's city
+      // levels are gone (the troops above the lower cap are cut), less
+      // detPostLead, so a post is up before a regrowing nation crosses the
+      // line (a post takes 50 ticks to build and does nothing until then).
+      const nuked = s.nuke !== null ? s.nuke.capAfter : Infinity;
+      const home = Math.min(me.troops(), nuked) * (1 - o.detPostLead);
       for (const n of v.wm.nations) {
         if (n.type !== PlayerType.Nation || n.friendly) continue;
         const st = nm.get(n.id);
         if (st === undefined || !st.full || !st.sharesBorderWithUs) continue;
-        const T = game.player(n.id).troops();
-        if (T <= best) continue;
-        if (!nm.canLandAttackUs(n.id, home, nm.nextDecision(n.id, t + 1))) {
-          continue;
-        }
+        const d = nm.nextDecision(n.id, t + 1);
+        if (!nm.canLandAttackUs(n.id, home, d)) continue;
+        const N = game.player(n.id);
+        const S = potentialSend(nm, v.models, N, home, d);
+        if (S < o.detPostMinThreat * home) continue;
+        const recent = t - (mem.lastIn?.[n.id] ?? NEVER) <= POST_RECENT;
         if (
+          o.detPostTargetCheck &&
+          !recent &&
           st.affordableTribes > o.detTribeSlack &&
           nm.wouldTargetUs(n.id, home) === null
         ) {
           continue;
         }
-        best = T;
-        N = game.player(n.id);
-        why = `threat T=${Math.round(T)}`;
+        threats.push({
+          N,
+          stack: S,
+          why: `threat send=${Math.round(S)}${recent ? " recent" : ""}`,
+        });
       }
     }
-    if (N === null) return;
-    const front = frontTiles(game, me, N);
-    const sites = postSites(
-      game,
-      me,
-      N,
-      front,
-      mine.map((u) => u.tile()),
-      game.config().defensePostRange(),
-      o.detPostDepth,
-      POST_CANDIDATES,
-    );
-    for (let i = 0; i < sites.length && i < POST_PROBES; i++) {
-      const at = me.canBuild(UnitType.DefensePost, sites[i].tile);
-      if (at === false) continue;
-      const ok = v.scheduler.offer({
-        intent: { type: "build_unit", unit: UnitType.DefensePost, tile: at },
-        prio: Prio.Recall,
-        cls: "defense",
-        key: "build:post",
-      });
-      if (!ok) return;
-      mem.stats.posts = (mem.stats.posts ?? 0) + 1;
-      v.log?.(
-        `${t} def post vs ${N.name()} (${why}) at ${game.x(at)},${game.y(at)} ` +
-          `covers ${sites[i].covers}/${front.length} cost=${cost} ` +
-          `gold=${me.gold()} posts=${mine.length + 1}`,
+    threats.sort((a, b) => b.stack - a.stack || a.N.smallID() - b.N.smallID());
+    const posts = mine.map((u) => u.tile());
+    for (let k = 0; k < threats.length && k < POST_THREATS; k++) {
+      const { N, why } = threats[k];
+      const front = frontTiles(game, me, N);
+      const sites = postSites(
+        game,
+        me,
+        N,
+        front,
+        posts,
+        game.config().defensePostRange(),
+        o.detPostDepth,
+        POST_CANDIDATES,
       );
-      return;
+      for (let i = 0; i < sites.length && i < POST_PROBES; i++) {
+        if (sites[i].covers < o.detPostMinCover) break;
+        if (sites[i].covers < o.detPostMinShare * front.length) break;
+        const at = me.canBuild(UnitType.DefensePost, sites[i].tile);
+        if (at === false) continue;
+        const ok = v.scheduler.offer({
+          intent: { type: "build_unit", unit: UnitType.DefensePost, tile: at },
+          prio: Prio.Recall,
+          cls: "defense",
+          key: "build:post",
+        });
+        if (!ok) return;
+        mem.stats.posts = (mem.stats.posts ?? 0) + 1;
+        v.log?.(
+          `${t} def post vs ${N.name()} (${why}) at ${game.x(at)},${game.y(at)} ` +
+            `covers ${sites[i].covers}/${front.length} cost=${cost} ` +
+            `gold=${me.gold()} posts=${mine.length + 1}`,
+        );
+        return;
+      }
     }
   }
 
@@ -343,7 +408,10 @@ export class DefenseController implements Controller {
       seen[a.id()] = first;
       const fresh = first === t;
       const estimate = fresh ? this.logIncoming(v, a, p) : 0;
-      if (fresh) mem.stats.incoming++;
+      if (fresh) {
+        mem.stats.incoming++;
+        (mem.lastIn ??= {})[p.id()] = t;
+      }
       if (a.retreating()) continue;
       incoming += a.troops();
       const x = by.get(sid);
@@ -484,20 +552,31 @@ export class DefenseController implements Controller {
    * home troops, which regrow, and leaves N without the stack it sent
    * (below its trigger it runs its list 1 decision in 10, docs/13 §2.8).
    * Largest stack first, each only if home − X keeps
-   * max(detCounterKeep·cap, H_vw, every other nation's deterrence line),
-   * never while a request of ours to N is pending (the recall comes
-   * first), at most once per COUNTER_EVERY ticks per nation, and not for
-   * stacks under detCounterMin of home (absorbed).
+   * max(detCounterKeep·cap, H_vw) and, with detCounterNoUnlock, exposes us
+   * to no other nation (lib/Deterrence.unlockedBy: none that cannot
+   * land-attack us at home could at home − X, no bordering ally's betrayal
+   * line detBetrayShare·T is crossed); never while a request of ours to N
+   * is pending (the recall comes first), at most once per COUNTER_EVERY
+   * ticks per nation, and not while N's live (not retreating) stacks are
+   * under detCounterMin of home (absorbed: a small stack takes few tiles,
+   * and a counter costs −100 relation). An attack from N that inits in
+   * the same turn as ours is not covered (N decides once per 30-49 ticks).
+   * Without the unlock guard, arena quick Alps lost half its land: two
+   * counters on Ticino took home under St. Gallen's line, and St. Gallen
+   * invaded with 1.84M.
    */
   private counterWins(v: View, mem: DefenseMemory, attackers: Attacker[]) {
-    const { o, me, tick: t } = v;
+    const { o, me, nm, game, tick: t } = v;
     const floors = v.purse.floors;
     const cap = floors.cap;
     if (cap <= 0) return;
-    const stacks = new Map<number, number>();
+    const stacks = new Map<number, { S: number; live: number }>();
     for (const a of me.incomingAttacks()) {
       const sid = a.attacker().smallID();
-      stacks.set(sid, (stacks.get(sid) ?? 0) + a.troops());
+      const x = stacks.get(sid) ?? { S: 0, live: 0 };
+      x.S += a.troops();
+      if (!a.retreating()) x.live += a.troops();
+      stacks.set(sid, x);
     }
     const order = attackers
       .filter(
@@ -506,31 +585,64 @@ export class DefenseController implements Controller {
           x.player.isAlive() &&
           !me.isFriendly(x.player),
       )
-      .map((x) => ({ N: x.player, S: stacks.get(x.player.smallID()) ?? 0 }))
+      .map((x) => ({
+        N: x.player,
+        fresh: x.fresh,
+        ...(stacks.get(x.player.smallID()) ?? { S: 0, live: 0 }),
+      }))
       .sort((a, b) => b.S - a.S || a.N.smallID() - b.N.smallID());
+    if (order.length === 0) return;
     mem.counters ??= {};
-    for (const { N, S } of order) {
+    let cands: PlayerID[] | null = null;
+    for (const { N, fresh, S, live } of order) {
       const id = N.id();
-      if (S <= 0 || S < o.detCounterMin * v.purse.home) continue;
+      const home = v.purse.home;
+      if (live <= 0 || live < o.detCounterMin * home) continue;
       if (t - (mem.counters[id] ?? NEVER) < COUNTER_EVERY) continue;
       if (mem.recalls[id] !== undefined) continue;
       if (me.outgoingAllianceRequests().some((r) => r.recipient() === N)) {
         continue;
       }
       const X = counterTroops(S, o.detCounterSize);
-      const keep = Math.max(
-        o.detCounterKeep * cap,
-        floors.vw,
-        floorWithout(floors.detTerms, id),
-      );
-      if (v.purse.home - X < keep) continue;
+      const after = home - X;
+      const keep = Math.max(o.detCounterKeep * cap, floors.vw);
+      const skip = (why: string) => {
+        if (fresh) {
+          v.log?.(
+            `${t} def counterskip ${N.name()} ${why} (stack ${Math.round(S)}, ` +
+              `home ${Math.round(home)})`,
+          );
+        }
+      };
+      if (after < keep) {
+        skip(`keep ${Math.round(keep)}`);
+        continue;
+      }
+      if (o.detCounterNoUnlock) {
+        cands ??= nationIds(game);
+        const u = unlockedBy(
+          me,
+          nm,
+          t,
+          cands,
+          id,
+          home,
+          after,
+          o.detBetrayShare,
+        );
+        if (u !== null) {
+          skip(`unlocks ${game.player(u.id).name()} (${u.kind})`);
+          continue;
+        }
+      }
       // o.detCounterDecisive: only a counter after which N cannot attack us
       // again at its next decision (its troops already paid for the stack
       // we delete; a send it sized at its reserve leaves it there).
       if (
         o.detCounterDecisive &&
-        v.nm.canLandAttackUs(id, v.purse.home - X, v.nm.nextDecision(id, t + 1))
+        nm.canLandAttackUs(id, after, nm.nextDecision(id, t + 1))
       ) {
+        skip("not decisive");
         continue;
       }
       const ok = v.scheduler.offer({
@@ -541,12 +653,15 @@ export class DefenseController implements Controller {
         spend: { kind: "defense", troops: X },
         meta: { target: N.smallID() },
       });
-      if (!ok) continue;
+      if (!ok) {
+        skip(`refused (${v.scheduler.lastRefusal})`);
+        continue;
+      }
       mem.counters[id] = t;
       mem.stats.counterWins = (mem.stats.counterWins ?? 0) + 1;
       v.log?.(
         `${t} def counterwin ${N.name()} ${X} (stack ${Math.round(S)}, ` +
-          `home ${Math.round(v.purse.home + X)}, keep ${Math.round(keep)})`,
+          `home ${Math.round(home)}, keep ${Math.round(keep)})`,
       );
     }
   }
