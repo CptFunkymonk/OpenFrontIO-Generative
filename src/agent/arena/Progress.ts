@@ -161,7 +161,8 @@ function entrantHtml(e: GalleryEntrant, i: number): string {
   );
 }
 
-function entryHtml(e: ProgressEntry): string {
+/** The newest entry loads eagerly: it is what a first look (or thumbnail) sees. */
+function entryHtml(e: ProgressEntry, newest: boolean): string {
   const where = [
     e.seeds.length > 0 ? `seed ${e.seeds.join(", ")}` : null,
     `${e.maps.length} maps`,
@@ -176,7 +177,7 @@ function entryHtml(e: ProgressEntry): string {
   ${e.notes.length > 0 ? `<ul class="notes">${e.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul>` : ""}
   <figure class="film">
     <button type="button" class="zoom" aria-pressed="false">Actual size</button>
-    <div class="frame"><img src="galleries/${escapeHtml(e.image)}" alt="Territory filmstrips: ${escapeHtml(e.title)}" loading="lazy"></div>
+    <div class="frame"><img src="galleries/${escapeHtml(e.image)}" alt="Territory filmstrips: ${escapeHtml(e.title)}"${newest ? "" : ' loading="lazy"'}></div>
     <figcaption>${escapeHtml(e.maps.join(", "))}</figcaption>
   </figure>
 </article>`;
@@ -223,7 +224,7 @@ export function progressPage(entries: ProgressEntry[]): string {
   h1 { font: 600 30px/1.1 var(--display); margin: 0; text-wrap: balance; }
   .lede .agent { color: var(--accent); font-weight: 600; }
   .lede { color: var(--muted); max-width: 68ch; margin: 0; }
-  .index { list-style: none; margin: 0 0 32px; padding: 0; display: grid; gap: 2px;
+  .index { list-style: none; margin: 0 0 4px; padding: 0; display: grid; gap: 2px;
            border-block: 1px solid var(--rule); padding-block: 10px; }
   .index a { display: flex; gap: 14px; padding: 3px 0; color: var(--ink); text-decoration: none; }
   .index a:hover span, .index a:focus-visible span { color: var(--accent); text-decoration: underline; }
@@ -263,7 +264,7 @@ export function progressPage(entries: ProgressEntry[]): string {
     <p class="lede">Every gallery filed from the headless arena, where the <span class="agent">agent</span> plays against Impossible nations, newest first. Each row of a gallery is one game: the territory at 1, 3, 5, 10, 15 and 20 game minutes and at the end, the agent in magenta with a white outline, captioned with its land share against the top nation's. Rows are labelled with the variables that run changed. Use "Actual size" to read a gallery at full resolution.</p>
   </header>
   <ul class="index">${index}</ul>
-  ${newest.map(entryHtml).join("\n")}
+  ${newest.map((e, i) => entryHtml(e, i === 0)).join("\n")}
 </div>
 <script>
   for (const button of document.querySelectorAll(".zoom")) {

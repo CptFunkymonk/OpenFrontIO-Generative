@@ -1,0 +1,98 @@
+[
+  {
+    "id": "2026-09-26-m0-baseline",
+    "date": "2026-09-26",
+    "commit": "a535bc8",
+    "title": "baseline: defaults (M0, before any building)",
+    "varied": [],
+    "image": "2026-09-26-m0-baseline.jpg",
+    "seeds": ["showcase"],
+    "maps": [
+      "World",
+      "Europe",
+      "Alps",
+      "ArchipelagoSea",
+      "Bering Strait",
+      "Mena"
+    ],
+    "games": 6,
+    "entrants": [
+      {
+        "agent": "baseline",
+        "options": {},
+        "label": ["defaults"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 4,
+        "meanProgress": 0.09,
+        "meanPeakShare": 0.072
+      }
+    ],
+    "notes": [
+      "Level with the top nation at minute 1 on 3 of 6 maps, then half its land by minute 3.",
+      "Tribes hold 37-96% of the land at minute 1 and nations eat most of it by minute 3; the baseline sits that race out.",
+      "Stalls and is eaten between minutes 6 and 14 on 4 of 6 maps; never leaves its home islands on ArchipelagoSea.",
+      "Nations nuke from minutes 4-7 in every game."
+    ]
+  },
+  {
+    "id": "2026-09-26-expand-reserve-sweep",
+    "date": "2026-09-26",
+    "commit": "f959d1f",
+    "title": "baseline: expandTrigger, expandReserve varied",
+    "varied": ["expandTrigger", "expandReserve"],
+    "image": "2026-09-26-expand-reserve-sweep.jpg",
+    "seeds": ["showcase"],
+    "maps": [
+      "World",
+      "Europe",
+      "Alps",
+      "ArchipelagoSea",
+      "Bering Strait",
+      "Mena"
+    ],
+    "games": 18,
+    "entrants": [
+      {
+        "agent": "baseline",
+        "options": {},
+        "label": [
+          "expandTrigger 0.35 (default)",
+          "expandReserve 0.2 (default)"
+        ],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 4,
+        "meanProgress": 0.09,
+        "meanPeakShare": 0.072
+      },
+      {
+        "agent": "baseline",
+        "options": { "expandTrigger": 0.25, "expandReserve": 0.1 },
+        "label": ["expandTrigger 0.25", "expandReserve 0.1"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 4,
+        "meanProgress": 0.126,
+        "meanPeakShare": 0.101
+      },
+      {
+        "agent": "baseline",
+        "options": { "expandTrigger": 0.5, "expandReserve": 0.42 },
+        "label": ["expandTrigger 0.5", "expandReserve 0.42"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 3,
+        "meanProgress": 0.119,
+        "meanPeakShare": 0.095
+      }
+    ],
+    "notes": [
+      "Both variants survive longer than the defaults (Europe: out at 23.7 and 28.1 min against 6.9) but do not grow: peak land stays at 2-5% on World, Europe and Alps.",
+      "Keeping 42% home dies early on ArchipelagoSea (13.5 min; the defaults survive the hour) and on Alps (5.6 min).",
+      "Mena is the exception: keeping 10% home reaches 13.3% before it is eaten at 25.2 min.",
+      "A longer-lived agent slows the nations: with 10% home no nation wins World within the hour, and on Mena the winner changes from Azerbaijan at 17.5 min to Lebanon at 36.6.",
+      "The reserve moves survival, not the stall; the fix is structural (H3 tribe race, H5 strikes), as the 20-game sweep in the ledger found."
+    ]
+  }
+]

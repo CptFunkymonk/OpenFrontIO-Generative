@@ -44,11 +44,13 @@ near enough: the agent has to be the one that snowballs.
 
 ### What the games look like
 
-[`progress/m0-baseline.png`](progress/m0-baseline.png) is the baseline on the
-six `showcase` maps (§11.5), one row per game, frames at minutes 1, 3, 5, 10,
-15 and 20 and at the end:
+[`progress/2026-09-26-m0-baseline.jpg`](progress/2026-09-26-m0-baseline.jpg)
+is the baseline on the six `showcase` maps (§11.5), one row per game, frames
+at minutes 1, 3, 5, 10, 15 and 20 and at the end. Every filed gallery is on
+[OpenFront Arena Filmstrips](https://claude.ai/artifact/H6DNJr7YJfYYCaaiTXxrk4)
+(private to the repository owner until shared).
 
-![The baseline on the six showcase maps](progress/m0-baseline.png)
+![The baseline on the six showcase maps](progress/2026-09-26-m0-baseline.jpg)
 
 - **The first minute is competitive**: level with or ahead of the top nation
   on 3 of 6 maps.
@@ -276,10 +278,10 @@ islands, a two-nation duel, and a crowded map where nations nuke early.
 Until `--suite` exists (§11.7):
 
 ```bash
-npm run arena -- --agent <champion> --agent <challenger> --each-map \
+npm run arena -- --agent CHAMPION --agent CHALLENGER --each-map \
   --maps World,Europe,Alps,ArchipelagoSea,BeringStrait,Mena --seed showcase \
-  --play-out --image-every 1 --out arena-results/showcase-<change>
-npm run arena:gallery -- arena-results/showcase-<change>
+  --play-out --image-every 1 --out arena-results/showcase-CHANGE
+npm run arena:gallery -- arena-results/showcase-CHANGE
 ```
 
 ### Metrics
@@ -312,20 +314,54 @@ what the metrics miss: an agent that takes land it cannot hold, never leaves
 its island, or walks into nukes. Every A/B and every milestone renders the
 `showcase` for both entrants on the same seed, in one gallery:
 
-- `npm run arena:gallery -- <dir> [<dir>…]` writes `gallery.html` and
-  `gallery.png`: one row per game and entrant, the territory at minutes 1, 3,
-  5, 10, 15 and 20 and at the end. The agent is magenta with a white outline,
-  and each frame is captioned with its land share against the top nation's.
-- Look at the PNG before adopting (the Read tool displays images), write two or
-  three observations into the ledger row, and send the PNG to the user.
-- Milestones commit their gallery to `docs/progress/` (~0.6 MB each), so the
-  record of what the agent looked like outlives the containers. The first is
-  [`progress/m0-baseline.png`](progress/m0-baseline.png).
+- `npm run arena:gallery -- <dir> [<dir>…]` writes `gallery.html`,
+  `gallery.json` and `gallery.jpg`: one row per game and entrant, the
+  territory at minutes 1, 3, 5, 10, 15 and 20 and at the end. The agent is
+  magenta with a white outline, and each frame is captioned with its land share
+  against the top nation's.
+- Every row is labelled with what its run changed: only the options that differ
+  between the entrants shown, with the value each ran and "(default)" where it
+  was not overridden, e.g. `expandReserve 0.1` against
+  `expandReserve 0.2 (default)`, led by the agent's name when agents differ.
+  A key at the top gives each entrant's wins, progress, peak land and
+  eliminations, and the default title names what was varied. Agents report
+  their full options through `Agent.options`, so defaults can be shown.
+- Look at the image before adopting (the Read tool displays images), write two
+  or three observations into the ledger row, and send it to the user.
 - When a big suite has a surprising loss, rerun that game with images
   (`--game N`, §11.7) and look at it.
 - Each milestone also runs the browser autopilot once
   (`node .claude/skills/run-openfront/autopilot.mjs <agent> <map> 120`); its
   screenshots confirm the agent plays the real client the same way.
+
+### Where the pictures live
+
+Chat attachments disappear and containers are reclaimed, so the record lives
+in the repository and on one page:
+
+| What                                        | Size                                        | Kept                                                                                     |
+| ------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Territory frames (`images/`, one a minute)  | 10–40 KB each, ~3 MB per `showcase` entrant | never: any game replays exactly from its commit, entrant and seed                        |
+| Screening galleries (`quick`, sweeps)       | JPEG, ~55 KB per row: ~0.35 MB per entrant  | in `arena-results/` only                                                                 |
+| Galleries of adopted changes and milestones | same                                        | filed in `docs/progress/` with an entry in `galleries.json`, and shown on the page below |
+
+File a gallery, then republish the page:
+
+```bash
+npm run arena:progress -- add arena-results/showcase-CHANGE --id CHANGE \
+  --note "what the pictures show" --note "..."
+npm run arena:progress -- page --out arena-results/progress/index.html
+```
+
+`add` copies the image to `docs/progress/DATE-CHANGE.jpg` and records the
+title, what was varied, each entrant's label and numbers, the commit and the
+notes. `page` writes the page and prints the files to publish beside it.
+Publish it with the Artifact tool to the same URL,
+[OpenFront Arena Filmstrips](https://claude.ai/artifact/H6DNJr7YJfYYCaaiTXxrk4),
+passing only the new images in `files` (earlier ones are kept). A session
+that did not create the page reads it first (`action: "read"`), then
+publishes with its `url`. The page holds up to 511 files and 256 MB per
+version, a few hundred galleries.
 
 ### The ledger
 
@@ -370,8 +406,9 @@ adopted only through the same paired test.
 ## 11.7 Tooling backlog (M1)
 
 Landed 2026-09-26: `--each-map [--repeat R]` (every map in the pool once per
-repeat instead of random draws) and `npm run arena:gallery` (§11.5, Looking
-at the games).
+repeat instead of random draws), `npm run arena:gallery` with rows labelled
+by what changed, and `npm run arena:progress` with the gallery page (§11.5,
+Looking at the games and Where the pictures live).
 
 Next, in order, in `src/agent/arena/` unless noted:
 
@@ -424,8 +461,9 @@ Next, in order, in `src/agent/arena/` unless noted:
    not clearly worse, run `dev`, reusing the champion's stored run.
 5. Render the `showcase` gallery for both, look at it, and note what changed.
 6. Adopt only on a clear paired gain that the pictures agree with: append the
-   ledger row with those notes, update §11.6, commit, push, and send the
-   gallery to the user.
+   ledger row with those notes, file the gallery and republish the page (§11.5,
+   Where the pictures live), update §11.6, commit, push, and send the gallery
+   to the user.
 7. Long runs (`dev`, `holdout`, sweeps) go in the background or out to shard
    sessions; commit their summaries to the ledger before the container is
    reclaimed.
