@@ -80,7 +80,9 @@ All user-visible text must go through `translateText()` and have a corresponding
 
 This fork exists to build an AI that beats the built-in Nation AI on any map.
 Guide: `docs/10-agent-interface.md`; game mechanics: `docs/00-overview.md`
-onward (chapter 09 is strategy).
+onward (chapter 09 is strategy). The plan and milestone status are in
+`docs/11-roadmap.md` and results in `docs/12-ledger.md`: read both before agent
+work, and append a ledger row when you adopt a change.
 
 - An agent implements `Agent` (`src/agent/Agent.ts`): it reads `ctx.game`, the
   full simulation state, and acts only through `ctx.send(intent)`, rate
