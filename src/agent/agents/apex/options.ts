@@ -1006,8 +1006,8 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (NukeModel.salvoLine: a 1M silo level per missing launch slot plus
    *  the salvo's atoms) or nukePayShare of its perceived hydrogen price,
    *  read this many ticks ahead (NukeModel.projectedGold; 0 = its gold
-   *  now), or fired a hydrogen bomb or a salvo at our SAMs within
-   *  nukeMemory ticks; hubDoom repeats the test at every city check.
+   *  now), or fired a salvo at our SAMs within nukeMemory ticks; hubDoom
+   *  repeats the test at every city check.
    *  conf1 g39: a latent Alaska took 2 silo upgrades and salvoed the hub
    *  600 ticks after the order. No projection foresaw it (Alaska attacked
    *  no one at the order and had gained nothing for 300 ticks; then it ate

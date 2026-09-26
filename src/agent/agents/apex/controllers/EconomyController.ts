@@ -516,11 +516,11 @@ export function planCity(
 // every threat, latent ones included, with the gold (read o.samHorizon
 // ticks ahead; 0: now) for the salvo line (NukeModel.salvoLine: a level
 // per missing slot plus the salvo's atoms) or o.nukePayShare of its
-// perceived hydrogen price, or that fired a hydrogen bomb or a salvo at
-// our SAMs within o.nukeMemory ticks, refuses the SAM; and once a SAM
-// stands, the same test at every city check (against the hub's
-// interceptors) dooms the hub for o.nukeMemory ticks: no more levels in
-// its ring, and our SAMs exempt no site from the legacy rule. conf1 g39
+// perceived hydrogen price, or that fired a salvo at our SAMs within
+// o.nukeMemory ticks, refuses the SAM; and once a SAM stands, the same
+// test at every city check (against the hub's interceptors) dooms the hub
+// for o.nukeMemory ticks: no more levels in its ring, and our SAMs exempt
+// no site from the legacy rule. conf1 g39
 // (Bering Strait): the SAM, ordered at 1925 against a latent Alaska at
 // 0.35M, drew two silo upgrades (2447, 2496) and a 2-atom salvo (2545)
 // once 31 conquered tribes had raised Alaska to 4M; the hub's cities then
@@ -530,10 +530,13 @@ export function planCity(
 // gained nothing for 300 ticks), and in a shadow run over the 9 games
 // round 1 changed, reading 300 or 600 ticks ahead refused only one more
 // SAM, one that helped (dev216, at 600), so the default reads the gold now.
-// The same run: the new gates refused conf1 g35's SAM (Korpoström had fired
-// a hydrogen bomb 7 ticks earlier) and dev216's two rebuilds under the
-// shooter, and doomed ab3 g3's hub before a 2585 upgrade (Alaska's
-// hydrogen bomb at 2543); they did not refuse conf1 g39's.
+// The same run: the new gates refused conf1 g35's SAM (Korpoström had
+// fired a hydrogen bomb 7 ticks earlier) and dev216's two rebuilds under
+// the shooter; they did not refuse conf1 g39's. A hydrogen bomb fired
+// counts among the shooter's bombs (hub sites, the SAM order), not as a
+// SAM killer by itself: ab3 g3's Alaska had 0.2M left after one, and a
+// doom then refused a city level; that game ended at 19.8% of the land,
+// against 27.3% in round 1.
 
 /** A nation that could nuke a structure of ours (see nukeThreats). */
 export interface NukeThreat {
@@ -568,13 +571,14 @@ export interface NukePlan {
 
 /** A threat able to destroy our SAMs (samKiller): by an atom salvo (its
  *  gold reaches the salvo line), a hydrogen bomb (o.nukePayShare of its
- *  perceived price), or proven by a launch within o.nukeMemory ticks (a
- *  salvo at our SAMs, a hydrogen bomb at anyone). */
+ *  perceived price), or proven by a salvo at our SAMs within o.nukeMemory
+ *  ticks. */
 export interface SamKiller {
   nation: Player;
-  why: "salvo" | "hydro" | "salvoed" | "hydroFired";
-  /** Its gold projected at the horizon, and the line it reaches (0 for
-   *  the launch proofs). */
+  why: "salvo" | "hydro" | "salvoed";
+  /** Its gold projected at the horizon, and the line it reaches: the
+   *  salvo line, or o.nukePayShare of its perceived hydrogen price (0 for
+   *  the launch proof). */
   gold: bigint;
   line: bigint;
 }
@@ -621,7 +625,8 @@ export function nukeThreats(
   const near = (N: Player, t: Bomb) =>
     model.projectedGold(N.id(), o.nukeHorizon) * 1000n >=
       model.perceivedCost(N.id(), t) * share ||
-    // Paid for one within nukeMemory ticks (package B3 review).
+    // Fired one within nukeMemory ticks (package B3 review: a purchase
+    // reads as no income in projectedGold).
     (t === UnitType.HydrogenBomb &&
       o.nukeMemory > 0 &&
       model.hydroSince(N.id(), since));
@@ -705,8 +710,8 @@ export function threatAt(
  * The first threat (plan.threats, latent ones included) able to destroy
  * our SAMs of `levels` interceptors in all within `horizon` ticks, or null
  * (package B3 review, finding 1): one that fired an atom bomb at our SAMs
- * ("salvoed") or a hydrogen bomb at anyone ("hydroFired") within
- * o.nukeMemory ticks; one whose gold projected `horizon` ticks ahead
+ * within o.nukeMemory ticks ("salvoed"); one whose gold projected `horizon`
+ * ticks ahead
  * (NukeModel.projectedGold; 0: its gold now) reaches o.nukePayShare of
  * its perceived hydrogen price ("hydro": it outranges SAMs below level 5)
  * or the salvo line (NukeModel.salvoLine, "salvo"). Without `salvoed`, a
@@ -728,16 +733,14 @@ export function samKiller(
     if (salvoed && o.nukeMemory > 0 && m.salvoSince(n, since)) {
       return { nation: t.nation, why: "salvoed", gold: 0n, line: 0n };
     }
-    if (o.nukeMemory > 0 && m.hydroSince(n, since)) {
-      return { nation: t.nation, why: "hydroFired", gold: 0n, line: 0n };
-    }
     const gold = m.projectedGold(n, horizon);
     const hydro = m.perceivedCost(n, UnitType.HydrogenBomb);
     if (
       !game.config().isUnitDisabled(UnitType.HydrogenBomb) &&
       gold * 1000n >= hydro * share
     ) {
-      return { nation: t.nation, why: "hydro", gold, line: hydro };
+      const line = (hydro * share) / 1000n;
+      return { nation: t.nation, why: "hydro", gold, line };
     }
     const line = m.salvoLine(n, levels);
     if (gold >= line) return { nation: t.nation, why: "salvo", gold, line };

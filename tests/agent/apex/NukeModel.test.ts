@@ -373,14 +373,26 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     const t0 = w.game.ticks();
     expect(m.hydroSince(N.id(), 0)).toBe(false);
     expect(m.salvoSince(N.id(), 0)).toBe(false);
+    // Income: +2M over 100 ticks (8M -> 10M).
+    setGold(N, 8_000_000n);
+    m.exposures();
+    tick(w, 100);
+    setGold(N, 10_000_000n);
+    m.exposures();
+    expect(m.projectedGold(N.id(), 100)).toBe(12_000_000n);
     // An atom at our land away from the SAM: no salvo.
     nuke.sendNuke(w.game.ref(120, 10), UnitType.AtomBomb, H);
     tick(w, 2);
     m.observe();
     expect(m.salvoSince(N.id(), t0)).toBe(false);
+    // A hydrogen bomb: 5M spent reads as no income (round 1's rate),
+    // which hydroSince makes up for.
     nuke.sendNuke(w.game.ref(120, 50), UnitType.HydrogenBomb, H);
     tick(w, 2);
     m.observe();
+    m.exposures();
+    expect(N.gold()).toBe(4_250_000n);
+    expect(m.projectedGold(N.id(), 104)).toBe(4_250_000n);
     const t1 = w.game.ticks();
     expect(m.hydroSince(N.id(), t0)).toBe(true);
     expect(m.hydroSince(N.id(), t1 + 1)).toBe(false);
@@ -389,6 +401,7 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     tick(w, 2);
     m.observe();
     expect(m.salvoSince(N.id(), t1)).toBe(true);
+    expect(m.salvoSince(N.id(), w.game.ticks() + 1)).toBe(false);
     expect(m.launched(N.id())).toEqual({ atoms: 2, hydros: 1 });
   });
 

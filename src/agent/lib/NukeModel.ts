@@ -626,12 +626,14 @@ export class NukeModel {
    * about 300 ticks, then a hydrogen bomb), so the rate is read, not the
    * wages. A purchase reads as no income (package B3 review: Korpoström,
    * 7.9M, fired a hydrogen bomb at 10948 and projected 3.05M at 10955);
-   * hydroSince covers that case. Rates that ignore spending (a gross rate,
-   * or bombs bought added back) and samples taken before a nation's silo
-   * moved the SAM rule both ways in a shadow run over the 9 games round 1
-   * changed (refused 3 of the 5 SAMs that helped, ordered one at 1835 in
-   * the game where round 1's v2 lost its hub to a hydrogen bomb), so the
-   * rate stays round 1's.
+   * hydroSince covers that case in nukeThreats. The rate stays round 1's:
+   * in a shadow run over the 9 games round 1 changed, rates that leave
+   * spending out (a gross rate, bombs bought added back) and samples taken
+   * before a nation's silo moved the SAM rule both ways (they refused 3 of
+   * the 5 SAMs that helped, or ordered one at 1835 in the game where round
+   * 1's v2 lost its hub to a hydrogen bomb), and adding back the hydrogen
+   * bomb alone still missed Korpoström (it had spent 1.6M more since the
+   * window's first sample).
    */
   projectedGold(n: PlayerID, horizon: number): bigint {
     const N = this.game.player(n);

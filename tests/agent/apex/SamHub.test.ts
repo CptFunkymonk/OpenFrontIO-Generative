@@ -566,7 +566,7 @@ describe("B3 round 2: the SAM's lifetime (samHorizon, hubDoom, samRebuild)", () 
     expect(typeof planSam(w.game, H, O2, at())).toBe("object");
   });
 
-  it("a hydrogen bomb at anyone, or a salvo at our SAM, within nukeMemory refuses the next SAM; samRebuild ignores the salvo", () => {
+  it("a salvo at our SAM within nukeMemory refuses the next SAM (no rebuild under the shooter); samRebuild ignores it", () => {
     const w = leaderWorld(1_000_000n, 5, true);
     const { N, H } = w.p;
     const city = H.buildUnit(UnitType.City, w.game.ref(160, 95), {});
@@ -596,16 +596,37 @@ describe("B3 round 2: the SAM's lifetime (samHorizon, hubDoom, samRebuild)", () 
     expect(typeof planSam(w.game, H, rebuild, at(rebuild))).toBe("object");
     tick(w, O2.nukeMemory + 1);
     expect(typeof planSam(w.game, H, O2, at(O2))).toBe("object");
-    // A hydrogen bomb, even at someone else: "hydro" for nukeMemory ticks,
-    // and the threats' bombs carry it.
+  });
+
+  it("a hydrogen bomb fired (even at someone else) keeps its buyer near the next one for nukeMemory ticks: its bombs carry it and the SAM waits; no doom by itself", () => {
+    const w = leaderWorld(1_000_000n, 5, true);
+    const { N, H, B } = w.p;
+    const city = H.buildUnit(UnitType.City, w.game.ref(160, 60), {});
+    city.increaseLevel();
+    city.increaseLevel();
+    setGold(H, 3_000_000n);
+    const m = model(w, "H");
+    const at = () => ({ model: m, threats: nukeThreats(w.game, H, m, O) });
     setGold(N, 6_000_000n);
-    nuke.sendNuke(w.game.ref(10, 10), UnitType.HydrogenBomb, w.p.B);
+    at();
+    const nuke = brain(w, "N", false);
+    // At unowned land in the far corner (a blast at B would take N's own
+    // land around it and the lead with it).
+    nuke.sendNuke(w.game.ref(295, 5), UnitType.HydrogenBomb, B);
     tick(w, 2);
     m.observe();
-    setGold(N, 1_000_000n);
-    const q = at(O2);
+    expect(N.gold()).toBe(1_000_000n);
+    const q = at();
+    // Round 1 read 1M and no income: no hydrogen bomb near.
+    expect(m.projectedGold(N.id(), O.nukeHorizon)).toBe(1_000_000n);
     expect(q.threats[0].bombs).toContain(UnitType.HydrogenBomb);
-    expect(planSam(w.game, H, O2, q)).toBe("hydro");
+    expect(planSam(w.game, H, O, q)).toBe("hydro");
+    // Not a SAM killer by itself (the gold decides): no doom.
+    expect(samKiller(w.game, q, O, 1, 0)).toBe(null);
+    tick(w, O.nukeMemory + 1);
+    const r = at();
+    expect(r.threats[0].bombs).toEqual([UnitType.AtomBomb]);
+    expect(typeof planSam(w.game, H, O, r)).toBe("object");
   });
 
   it("a doomed hub gets no more levels, and our SAM exempts no site from exposedSite", () => {
