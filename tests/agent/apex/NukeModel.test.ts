@@ -1,3 +1,4 @@
+import { salvoBombs } from "../../../src/agent/lib/NukeModel";
 import { PlayerInfo, PlayerType, UnitType } from "../../../src/core/game/Game";
 import { PseudoRandom } from "../../../src/core/PseudoRandom";
 import { boundingBoxTiles } from "../../../src/core/Util";
@@ -10,6 +11,7 @@ import {
   model,
   pastImmunity,
   runs,
+  samAt,
   setGold,
   siloAt,
   tick,
@@ -269,7 +271,7 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     );
   });
 
-  it("projectedGold: the gain since the oldest sample of the window, carried forward; exposures() lists and samples silo owners only", () => {
+  it("projectedGold: the net gain since the oldest sample of the window, carried forward; exposures() lists silo owners only but samples every nation", () => {
     const w = world(
       SIDE,
       SIDE,
@@ -292,13 +294,138 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     // +500k in 100 ticks: +1.5M over the next 300.
     expect(m.projectedGold(N.id(), 300)).toBe(3_000_000n);
     expect(m.projectedGold(N.id(), 0)).toBe(1_500_000n);
-    // No silo, no samples: its gold as it is.
-    expect(m.projectedGold(B.id(), 300)).toBe(9_000_000n);
-    // Spending leaves no rate.
+    // No silo, sampled all the same: B rose 400k over the 100 ticks.
+    setGold(B, 9_400_000n);
+    expect(m.projectedGold(B.id(), 100)).toBe(9_800_000n);
+    // Spending other than on bombs leaves no rate.
     tick(w, 30);
     setGold(N, 200_000n);
     m.exposures();
     expect(m.projectedGold(N.id(), 300)).toBe(200_000n);
+  });
+
+  it("projectedGold: a bomb bought in the window keeps the rate (package B3 review: a hydrogen bomb read its buyer as earning nothing)", () => {
+    const w = world(
+      200,
+      100,
+      { N: PlayerType.Nation, H: PlayerType.Human },
+      columns([
+        ["N", 60],
+        [null, 40],
+        ["H", 100],
+      ]),
+    );
+    const { N, H } = w.p;
+    w.game.addPlayer(new PlayerInfo("X", PlayerType.Nation, null, idOf("X")));
+    w.game.player(idOf("X")).conquer(w.game.ref(80, 0));
+    siloAt(w, N, 10, 50, 5);
+    pastImmunity(w);
+    setGold(N, 8_000_000n);
+    const m = model(w, "H");
+    m.exposures();
+    tick(w, 100);
+    setGold(N, 9_000_000n);
+    m.exposures();
+    expect(m.projectedGold(N.id(), 300)).toBe(12_000_000n);
+    const nuke = brain(w, "N", false);
+    nuke.sendNuke(w.game.ref(150, 50), UnitType.HydrogenBomb, H);
+    tick(w, 2); // init, then the first tick builds the bomb: 5M paid
+    m.observe();
+    m.exposures();
+    expect(N.gold()).toBe(4_000_000n);
+    // Had it kept the 5M: 9M, 1M above the first sample, 102 ticks ago.
+    expect(m.projectedGold(N.id(), 300)).toBe(
+      4_000_000n + (1_000_000n * 300n) / 102n,
+    );
+  });
+
+  it("salvoLine: the salvo's atoms at the real price, a silo level (1M) per missing launch slot, and at least the perceived atom price", () => {
+    const w = world(
+      200,
+      100,
+      { N: PlayerType.Nation, H: PlayerType.Human },
+      columns([
+        ["N", 60],
+        [null, 40],
+        ["H", 100],
+      ]),
+    );
+    const { N, H } = w.p;
+    // Two players left would use the real price: add a bystander.
+    w.game.addPlayer(new PlayerInfo("X", PlayerType.Nation, null, idOf("X")));
+    w.game.player(idOf("X")).conquer(w.game.ref(80, 0));
+    siloAt(w, N, 10, 50);
+    const m = model(w, "H");
+    const atom = w.game.unitInfo(UnitType.AtomBomb).cost(w.game, N);
+    const silo = w.game.unitInfo(UnitType.MissileSilo).cost(w.game, N);
+    expect([atom, silo]).toEqual([750_000n, 1_000_000n]);
+    // Level L of interceptors: L + 1 bombs, and one more per five.
+    expect([1, 2, 3, 4, 9].map(salvoBombs)).toEqual([2, 3, 4, 6, 12]);
+    // One level-1 silo against a level-1 SAM: one upgrade, two atoms.
+    expect(m.salvoLine(N.id(), 1)).toBe(silo + 2n * atom);
+    expect(m.salvoLine(N.id(), 2)).toBe(2n * silo + 3n * atom);
+    // A SAM under construction covers nothing: one atom.
+    expect(m.salvoLine(N.id(), 0)).toBe(atom);
+    // A second silo: the slots are there.
+    siloAt(w, N, 10, 60);
+    expect(m.salvoLine(N.id(), 1)).toBe(2n * atom);
+    // After three atoms the perceived price (750k x 1.5^3) is above the
+    // salvo's: the type choice needs it.
+    pastImmunity(w);
+    setGold(N, 20_000_000n);
+    const nuke = brain(w, "N", false);
+    for (let i = 0; i < 3; i++) {
+      nuke.sendNuke(w.game.ref(150, 50), UnitType.AtomBomb, H);
+      tick(w, 2);
+      m.observe();
+      tick(w, w.config.SiloCooldown());
+    }
+    setGold(N, 1_000_000n);
+    const perceived = nuke.getPerceivedNukeCost(UnitType.AtomBomb);
+    expect(perceived).toBe(2_531_250n);
+    expect(m.salvoLine(N.id(), 1)).toBe(perceived);
+  });
+
+  it("remembers each nation's last hydrogen bomb and its last atom at one of our SAMs (a salvo)", () => {
+    const w = world(
+      200,
+      100,
+      { N: PlayerType.Nation, H: PlayerType.Human },
+      columns([
+        ["N", 60],
+        [null, 40],
+        ["H", 100],
+      ]),
+    );
+    const { N, H } = w.p;
+    w.game.addPlayer(new PlayerInfo("X", PlayerType.Nation, null, idOf("X")));
+    w.game.player(idOf("X")).conquer(w.game.ref(80, 0));
+    siloAt(w, N, 10, 50, 5);
+    const sam = samAt(w, H, 190, 90);
+    pastImmunity(w);
+    setGold(N, 20_000_000n);
+    const nuke = brain(w, "N", false);
+    const m = model(w, "H");
+    const t0 = w.game.ticks();
+    expect(m.hydroSince(N.id(), 0)).toBe(false);
+    expect(m.salvoSince(N.id(), 0)).toBe(false);
+    // An atom at our land away from the SAM: no salvo.
+    nuke.sendNuke(w.game.ref(120, 10), UnitType.AtomBomb, H);
+    tick(w, 2);
+    m.observe();
+    expect(m.salvoSince(N.id(), t0)).toBe(false);
+    nuke.sendNuke(w.game.ref(120, 50), UnitType.HydrogenBomb, H);
+    tick(w, 2);
+    m.observe();
+    const t1 = w.game.ticks();
+    expect(m.hydroSince(N.id(), t0)).toBe(true);
+    expect(m.hydroSince(N.id(), t1 + 1)).toBe(false);
+    // At the SAM's tile: a salvo.
+    nuke.sendNuke(sam.tile(), UnitType.AtomBomb, H);
+    tick(w, 2);
+    m.observe();
+    expect(m.salvoSince(N.id(), t1)).toBe(true);
+    expect(m.launched(N.id())).toEqual({ atoms: 2, hydros: 1 });
   });
 
   it("bombFor: a hydrogen bomb when the gold covers its perceived price, else an atom bomb, else none", () => {

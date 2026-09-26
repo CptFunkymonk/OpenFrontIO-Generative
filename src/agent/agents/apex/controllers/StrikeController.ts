@@ -11,6 +11,7 @@ import { Prio } from "../../../lib/Scheduler";
 import {
   conquestStack,
   isVulture,
+  minimumStack,
   planStrike,
   postLossFactor,
   retaliationBound,
@@ -826,6 +827,26 @@ export class StrikeController implements Controller {
         : 1;
       const size = N.numTilesOwned();
       const cost = strikeCost(v, N, info, inp.T1, o.strikeRatio);
+      // The walk below only lowers the budget and the kill stack, so a
+      // strike that fails at this budget fails after it too, unless a
+      // smaller stack opens W6 (a decoy at least decoyMargin× it, the
+      // stack at least its minimum with no answer): skip the walk then.
+      const plan0 = planStrike(inp, inc, budget, sizing, cost.kill * factor);
+      const decoy =
+        o.strikeW6 &&
+        inp.largestOther >=
+          sizing.decoyMargin * minimumStack(inp.T1, 0, inc, sizing.maxRatio);
+      if (plan0.S <= 0 && !decoy) {
+        const k = (x: number) => `${Math.round(x / 1000)}k`;
+        this.skip(
+          v,
+          mem,
+          info.id,
+          plan0.verdict.window === null ? "window" : "stack",
+          `min=${k(plan0.min)} budget=${k(budget)} T1=${k(inp.T1)}`,
+        );
+        continue;
+      }
       // o.strikeReachModel: the land an attack of ours can reach; no kill
       // stack for a target we cannot reach whole.
       let reach = Infinity;

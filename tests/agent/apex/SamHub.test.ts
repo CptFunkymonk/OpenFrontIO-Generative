@@ -1,6 +1,7 @@
 import { AgentContext, AgentIntent } from "../../../src/agent/Agent";
 import {
   exposedSite,
+  hubLevels,
   hubRing,
   hubSites,
   inHub,
@@ -8,6 +9,7 @@ import {
   nukeThreats,
   planCity,
   planSam,
+  samKiller,
   threatAt,
 } from "../../../src/agent/agents/apex/controllers/EconomyController";
 import {
@@ -439,9 +441,214 @@ describe("B3 the SAM hub (planSam)", () => {
     const p = plan(w, "H");
     expect(p.threats[0].slots).toBe(2);
     expect(planSam(w.game, H, O, p)).toBe("salvo");
-    expect(typeof planSam(w.game, H, { ...O, samSlotGate: false }, p)).toBe(
+    // The lifetime gate (samHorizon) refuses it on its own: the salvo line
+    // of a two-slot nation is two atoms, 1.5M.
+    expect(planSam(w.game, H, { ...O, samSlotGate: false }, p)).toBe("salvo");
+    expect(
+      typeof planSam(
+        w.game,
+        H,
+        { ...O, samSlotGate: false, samHorizon: -1 },
+        p,
+      ),
+    ).toBe("object");
+  });
+});
+
+describe("B3 round 2: the SAM's lifetime (samHorizon, hubDoom, samRebuild)", () => {
+  // nukePayShare 0.8: the hydrogen share (4M) stays above the 2.5M salvo
+  // line of these worlds, so the salvo rule is what refuses.
+  const O2: ApexOptions = { ...O, nukePayShare: 0.8 };
+
+  /** leaderWorld with a finished SAM of ours at (160, 60) and a level-3
+   *  city in its covered ring. */
+  function hubWorld(gold: bigint): { w: World; sam: TileRef } {
+    const w = leaderWorld(gold, 1, true);
+    const { H } = w.p;
+    const sam = samAt(w, H, 160, 60).tile();
+    const city = H.buildUnit(UnitType.City, w.game.ref(160, 95), {});
+    city.increaseLevel();
+    city.increaseLevel();
+    tick(w);
+    return { w, sam };
+  }
+
+  it("one launch slot and 2.5M: the nation upgrades its silo, then salvoes the hub; the model's salvo line is exactly that gold", () => {
+    const { w, sam } = hubWorld(2_500_000n);
+    const { N, H } = w.p;
+    const p = plan(w, "H", O2);
+    expect(hubLevels(w.game, H)).toBe(1);
+    expect(p.model.salvoLine(N.id(), 1)).toBe(2_500_000n);
+    expect(samKiller(w.game, p, O2, 1, 0)).toMatchObject({
+      why: "salvo",
+      gold: 2_500_000n,
+      line: 2_500_000n,
+    });
+    // The real nation: no aim point at the covered city, one slot short.
+    const nuke = brain(w, "N", false);
+    expect(nuke.findBestNukeTarget()).toBe(H);
+    nuke.maybeSendNuke();
+    expect(w.nukes).toHaveLength(0);
+    expect(w.upgrades).toEqual([N]);
+    tick(w);
+    const silo = N.units(UnitType.MissileSilo)[0];
+    expect(silo.level()).toBe(2);
+    expect(N.gold()).toBe(1_500_000n);
+    // The new slot reloads (UnitImpl.increaseLevel queues it), then the
+    // salvo: two atoms at the SAM, all the gold left.
+    tick(w, w.config.SiloCooldown() + 1);
+    w.dryRun = true;
+    nuke.maybeSendNuke();
+    expect(w.nukes.map((n) => [n.type, n.dst])).toEqual([
+      [UnitType.AtomBomb, sam],
+      [UnitType.AtomBomb, sam],
+    ]);
+  });
+
+  it("one gold short of the line: the nation upgrades but cannot fire, and the model finds no killer", () => {
+    const { w } = hubWorld(2_499_999n);
+    const { N } = w.p;
+    const p = plan(w, "H", O2);
+    expect(samKiller(w.game, p, O2, 1, 0)).toBe(null);
+    const nuke = brain(w, "N", false);
+    nuke.maybeSendNuke();
+    expect(w.upgrades).toEqual([N]);
+    tick(w, w.config.SiloCooldown() + 2);
+    w.dryRun = true;
+    nuke.maybeSendNuke();
+    expect(w.nukes).toHaveLength(0);
+  });
+
+  it("the order gate counts latent threats and silo upgrades (round 1 checked current threats' ready slots only)", () => {
+    const w = leaderWorld(2_500_000n, 1, true);
+    const { N, H, B } = w.p;
+    const city = H.buildUnit(UnitType.City, w.game.ref(160, 60), {});
+    city.increaseLevel();
+    city.increaseLevel();
+    setGold(H, 2_000_000n);
+    // Current, one ready slot: round 1 let the SAM through (the city is
+    // nukeable, so no one-bomb salvo at a SAM under construction).
+    expect(planSam(w.game, H, O2, plan(w, "H", O2))).toBe("salvo");
+    const r1 = { ...O2, samHorizon: -1 };
+    expect(typeof planSam(w.game, H, r1, plan(w, "H", r1))).toBe("object");
+    // Latent: B's attack hides N's crown rung.
+    attack(B, N, 5000);
+    const p = plan(w, "H", O2);
+    expect(p.threats.map((t) => [t.nation, t.latent])).toEqual([[N, true]]);
+    expect(planSam(w.game, H, O2, p)).toBe("salvo");
+    expect(typeof planSam(w.game, H, r1, plan(w, "H", r1))).toBe("object");
+  });
+
+  it("with samHorizon > 0 the order gate reads income: 1.5M rising 500k a 100 ticks reaches the 2.5M line", () => {
+    const w = leaderWorld(1_000_000n, 1, true);
+    const { N, H } = w.p;
+    const city = H.buildUnit(UnitType.City, w.game.ref(160, 60), {});
+    city.increaseLevel();
+    city.increaseLevel();
+    setGold(H, 2_000_000n);
+    const m = model(w, "H");
+    const at = () => ({ model: m, threats: nukeThreats(w.game, H, m, O2) });
+    at();
+    tick(w, 100);
+    setGold(N, 1_500_000n);
+    // 1.5M + 500k x 300 / 100 = 3M: past the 2.5M line.
+    expect(planSam(w.game, H, { ...O2, samHorizon: 300 }, at())).toBe("salvo");
+    // 600 ticks: 4.5M, past the hydrogen share too (0.8 x 5M).
+    expect(planSam(w.game, H, { ...O2, samHorizon: 600 }, at())).toBe(
+      "hydro",
+    );
+    // 1.5M + 500k x 50 / 100 = 1.75M: short; so is the gold now (the
+    // default, samHorizon 0).
+    expect(typeof planSam(w.game, H, { ...O2, samHorizon: 50 }, at())).toBe(
       "object",
     );
+    expect(typeof planSam(w.game, H, O2, at())).toBe("object");
+  });
+
+  it("a hydrogen bomb at anyone, or a salvo at our SAM, within nukeMemory refuses the next SAM; samRebuild ignores the salvo", () => {
+    const w = leaderWorld(1_000_000n, 5, true);
+    const { N, H } = w.p;
+    const city = H.buildUnit(UnitType.City, w.game.ref(160, 95), {});
+    city.increaseLevel();
+    city.increaseLevel();
+    const sam = samAt(w, H, 160, 60);
+    tick(w);
+    const m = model(w, "H");
+    const at = (o: ApexOptions) => ({
+      model: m,
+      threats: nukeThreats(w.game, H, m, o),
+    });
+    const nuke = brain(w, "N", false);
+    setGold(N, 6_000_000n);
+    nuke.sendNuke(sam.tile(), UnitType.AtomBomb, H);
+    tick(w, 2);
+    m.observe();
+    // The SAM is gone (the salvo, say); 1M left: no killer by gold.
+    sam.delete(false);
+    setGold(N, 1_000_000n);
+    setGold(H, 3_000_000n);
+    expect(samKiller(w.game, at(O2), O2, 1, O2.samHorizon)).toMatchObject({
+      why: "salvoed",
+    });
+    expect(planSam(w.game, H, O2, at(O2))).toBe("salvoed");
+    const rebuild = { ...O2, samRebuild: true };
+    expect(typeof planSam(w.game, H, rebuild, at(rebuild))).toBe("object");
+    tick(w, O2.nukeMemory + 1);
+    expect(typeof planSam(w.game, H, O2, at(O2))).toBe("object");
+    // A hydrogen bomb, even at someone else: "hydro" for nukeMemory ticks,
+    // and the threats' bombs carry it.
+    setGold(N, 6_000_000n);
+    nuke.sendNuke(w.game.ref(10, 10), UnitType.HydrogenBomb, w.p.B);
+    tick(w, 2);
+    m.observe();
+    setGold(N, 1_000_000n);
+    const q = at(O2);
+    expect(q.threats[0].bombs).toContain(UnitType.HydrogenBomb);
+    expect(planSam(w.game, H, O2, q)).toBe("hydro");
+  });
+
+  it("a doomed hub gets no more levels, and our SAM exempts no site from exposedSite", () => {
+    const { w } = hubWorld(1_000_000n);
+    const { H } = w.p;
+    setGold(H, 2_000_000n);
+    const p = plan(w, "H", O2);
+    // Not doomed: a new city in the ring (the level-3 one is at
+    // cityMaxLevel), where no threat can aim.
+    const act = planCity(w.game, H, O2, p);
+    if (typeof act === "string" || act.kind !== "build") {
+      throw new Error(`no build: ${JSON.stringify(act)}`);
+    }
+    expect(inHub(w.game, H, act.tile)).toBe(true);
+    const doomed = { ...p, doomed: true };
+    expect(planCity(w.game, H, O2, doomed)).toBe("exposed");
+    // exposedSite: the SAM covers (160, 95) unless ignored.
+    const site = w.game.ref(160, 95);
+    expect(exposedSite(w.game, H, site, true)).toBe(false);
+    expect(exposedSite(w.game, H, site, true, true)).toBe(true);
+  });
+
+  it("the live policy dooms its hub once the shooter reaches the salvo line: logged, and no city intent follows", () => {
+    const { w } = hubWorld(1_000_000n);
+    const { N, H } = w.p;
+    setGold(H, 6_000_000n);
+    const before = live(w, "H", O2, 60);
+    expect(before.sent.some((s) => s.intent.type === "upgrade_structure")).toBe(
+      true,
+    );
+    expect(before.logs.some((l) => l.includes("hub doomed"))).toBe(false);
+    setGold(N, 2_500_000n);
+    setGold(H, 6_000_000n);
+    const after = live(w, "H", O2, 120);
+    expect(after.logs.some((l) => l.includes("hub doomed: N:salvo"))).toBe(
+      true,
+    );
+    expect(
+      after.sent.filter(
+        (s) =>
+          s.intent.type === "upgrade_structure" ||
+          (s.intent.type === "build_unit" && s.intent.unit === UnitType.City),
+      ),
+    ).toEqual([]);
   });
 });
 

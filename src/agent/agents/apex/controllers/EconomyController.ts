@@ -282,15 +282,17 @@ export function affordableLevels(
  * With `wide` (o.exposureWide) also a nation with a silo under construction
  * and bomb gold, or with gold for a silo and a bomb: nations built the silo
  * and fired within one check window (arena quick@4: Hokkaido, Rosedale).
+ * With `ignoreSams` (package B3, a doomed hub) our SAMs cover nothing.
  */
 export function exposedSite(
   game: Game,
   me: Player,
   site: TileRef,
   wide = false,
+  ignoreSams = false,
 ): boolean {
   const config = game.config();
-  for (const sam of me.units(UnitType.SAMLauncher)) {
+  for (const sam of ignoreSams ? [] : me.units(UnitType.SAMLauncher)) {
     if (sam.isUnderConstruction()) continue;
     const r = config.samRange(sam.level());
     if (game.euclideanDistSquared(sam.tile(), site) <= r * r) return false;
@@ -478,7 +480,8 @@ export function planCity(
 // *threats*: nations with a silo whose nuke ladder names us (now; latent,
 // remembered for o.nukeMemory ticks, or by o.nukeRankGuard, with
 // o.nukeLatent), and whose gold, projected o.nukeHorizon ticks ahead,
-// reaches o.nukePayShare of a bomb's perceived price. A threat is *firing*
+// reaches o.nukePayShare of a bomb's perceived price (a hydrogen bomb also
+// for o.nukeMemory ticks after the nation fired one). A threat is *firing*
 // when it answers us now, with a finished silo and the gold for a bomb.
 // Arena quick@20 and showcase-m2 (package B3 notes): 16 of the 19 bombs at
 // apex came from the land leader aiming at us as its runner-up, each one
@@ -505,6 +508,27 @@ export function planCity(
 // No SAM while a threat has, or will soon have, the gold for a hydrogen
 // bomb: it outranges SAMs below level 5 and scores them 100k a level (NNB
 // :750-775); one took a whole hub in ab1 and ab2 (Bering Strait).
+//
+// The SAM's lifetime (package B3 review; o.samHorizon, o.hubDoom). One
+// check at the order does not cover the hub's life: a nation short of
+// launch slots buys a silo level (1M, instant) at one decision and salvoes
+// at a later one, and latent threats turn current with no warning. So
+// every threat, latent ones included, with the gold (read o.samHorizon
+// ticks ahead; 0: now) for the salvo line (NukeModel.salvoLine: a level
+// per missing slot plus the salvo's atoms) or o.nukePayShare of its
+// perceived hydrogen price, or that fired a hydrogen bomb or a salvo at
+// our SAMs within o.nukeMemory ticks, refuses the SAM; and once a SAM
+// stands, the same test at every city check (against the hub's
+// interceptors) dooms the hub for o.nukeMemory ticks: no more levels in
+// its ring, and our SAMs exempt no site from the legacy rule. conf1 g39
+// (Bering Strait): the SAM, ordered at 1925 against a latent Alaska at
+// 0.35M, drew two silo upgrades (2447, 2496) and a 2-atom salvo (2545)
+// once 31 conquered tribes had raised Alaska to 4M; the hub's cities then
+// fell to aimed atoms and a hydrogen bomb, and apex was eliminated; the
+// champion lost the same cities earlier and survived. No gold projection
+// foresaw that windfall (Alaska attacked no one at the order), and at 300
+// or 600 ticks one would have refused the SAM in 4 of the 5 round-1 games
+// where it helped, so the default reads the gold now.
 
 /** A nation that could nuke a structure of ours (see nukeThreats). */
 export interface NukeThreat {
@@ -513,8 +537,9 @@ export interface NukeThreat {
    *  hydrogen bomb once its gold covers that perceived price (the type
    *  choice never falls back to atoms, NNB :139-155); else an atom bomb,
    *  and a hydrogen bomb too once its gold reaches o.nukePayShare of that
-   *  price (quick@20 Bering Strait: Alaska went from 2.8M to 6M in 500
-   *  ticks and one hydrogen bomb took a SAM hub, 6 levels). */
+   *  price or it fired one within o.nukeMemory ticks (quick@20 Bering
+   *  Strait: Alaska went from 2.8M to 6M in 500 ticks and one hydrogen bomb
+   *  took a SAM hub, 6 levels). */
   bombs: Bomb[];
   reason: NukeReason;
   /** Named below the rung that answers now, or by the rank guard. */
@@ -531,6 +556,22 @@ export interface NukeThreat {
 export interface NukePlan {
   model: NukeModel;
   threats: NukeThreat[];
+  /** A threat can destroy our SAM hub soon (o.hubDoom, samKiller): no more
+   *  levels in its ring, and our SAMs exempt no site. */
+  doomed?: boolean;
+}
+
+/** A threat able to destroy our SAMs (samKiller): by an atom salvo (its
+ *  gold reaches the salvo line), a hydrogen bomb (o.nukePayShare of its
+ *  perceived price), or proven by a launch within o.nukeMemory ticks (a
+ *  salvo at our SAMs, a hydrogen bomb at anyone). */
+export interface SamKiller {
+  nation: Player;
+  why: "salvo" | "hydro" | "salvoed" | "hydroFired";
+  /** Its gold projected at the horizon, and the line it reaches (0 for
+   *  the launch proofs). */
+  gold: bigint;
+  line: bigint;
 }
 
 /** What the B3 rules read of ApexOptions. */
@@ -546,6 +587,9 @@ export type NukeOptions = Pick<
   | "samMax"
   | "samMinLevels"
   | "samSlotGate"
+  | "samHorizon"
+  | "hubDoom"
+  | "samRebuild"
   | "cityMinDepth"
   | "citySpread"
 >;
@@ -568,9 +612,14 @@ export function nukeThreats(
 ): NukeThreat[] {
   const out: NukeThreat[] = [];
   const share = BigInt(Math.round(o.nukePayShare * 1000));
+  const since = game.ticks() - o.nukeMemory;
   const near = (N: Player, t: Bomb) =>
     model.projectedGold(N.id(), o.nukeHorizon) * 1000n >=
-    model.perceivedCost(N.id(), t) * share;
+      model.perceivedCost(N.id(), t) * share ||
+    // Paid for one within nukeMemory ticks (package B3 review).
+    (t === UnitType.HydrogenBomb &&
+      o.nukeMemory > 0 &&
+      model.hydroSince(N.id(), since));
   const firing = (N: Player, latent: boolean): boolean =>
     !latent &&
     model.bombFor(N.id()) !== null &&
@@ -645,6 +694,72 @@ export function threatAt(
     }
   }
   return null;
+}
+
+/**
+ * The first threat (plan.threats, latent ones included) able to destroy
+ * our SAMs of `levels` interceptors in all within `horizon` ticks, or null
+ * (package B3 review, finding 1): one that fired an atom bomb at our SAMs
+ * ("salvoed") or a hydrogen bomb at anyone ("hydroFired") within
+ * o.nukeMemory ticks; one whose gold projected `horizon` ticks ahead
+ * (NukeModel.projectedGold; 0: its gold now) reaches o.nukePayShare of
+ * its perceived hydrogen price ("hydro": it outranges SAMs below level 5)
+ * or the salvo line (NukeModel.salvoLine, "salvo"). Without `salvoed`, a
+ * past salvo alone does not count (o.samRebuild).
+ */
+export function samKiller(
+  game: Game,
+  plan: NukePlan,
+  o: NukeOptions,
+  levels: number,
+  horizon: number,
+  salvoed = true,
+): SamKiller | null {
+  const m = plan.model;
+  const since = game.ticks() - o.nukeMemory;
+  const share = BigInt(Math.round(o.nukePayShare * 1000));
+  for (const t of plan.threats) {
+    const n = t.nation.id();
+    if (salvoed && o.nukeMemory > 0 && m.salvoSince(n, since)) {
+      return { nation: t.nation, why: "salvoed", gold: 0n, line: 0n };
+    }
+    if (o.nukeMemory > 0 && m.hydroSince(n, since)) {
+      return { nation: t.nation, why: "hydroFired", gold: 0n, line: 0n };
+    }
+    const gold = m.projectedGold(n, horizon);
+    const hydro = m.perceivedCost(n, UnitType.HydrogenBomb);
+    if (
+      !game.config().isUnitDisabled(UnitType.HydrogenBomb) &&
+      gold * 1000n >= hydro * share
+    ) {
+      return { nation: t.nation, why: "hydro", gold, line: hydro };
+    }
+    const line = m.salvoLine(n, levels);
+    if (gold >= line) return { nation: t.nation, why: "salvo", gold, line };
+  }
+  return null;
+}
+
+/** Interceptors a salvo at our weakest finished SAM must beat: the least,
+ *  over our finished SAMs, of the levels of those of ours whose range
+ *  covers it (findEnemySamsCoveringTile), or 0 without one. */
+export function hubLevels(game: Game, me: Player): number {
+  const config = game.config();
+  const sams = me
+    .units(UnitType.SAMLauncher)
+    .filter((u) => !u.isUnderConstruction() && u.isActive());
+  let least = 0;
+  for (const s of sams) {
+    let levels = 0;
+    for (const c of sams) {
+      const r = config.samRange(c.level());
+      if (game.euclideanDistSquared(c.tile(), s.tile()) <= r * r) {
+        levels += c.level();
+      }
+    }
+    if (least === 0 || levels < least) least = levels;
+  }
+  return least;
 }
 
 /**
@@ -755,7 +870,8 @@ export function inHub(game: Game, me: Player, tile: TileRef): boolean {
  * there; with o.nukeCities, the model alone decides, over every threat.
  * Sites: the hub sites first (hubSites), then the usual ones. Never a new
  * city within hubRing().min of a SAM of ours: the salvo a SAM draws would
- * take it.
+ * take it. A doomed hub (plan.doomed, o.hubDoom) is no hub: its ring gets
+ * no levels, and our SAMs exempt no site from exposedSite.
  */
 function planCityModel(
   game: Game,
@@ -767,10 +883,15 @@ function planCityModel(
 ): CityAction | CityIdle {
   let exposed = false;
   const firing = plan.threats.filter((t) => t.firing);
+  const doomed = plan.doomed === true;
   const safe = (t: TileRef): boolean => {
     const hub = inHub(game, me, t);
+    if (doomed && hub) {
+      exposed = true;
+      return false;
+    }
     const legacy = !o.nukeCities && !hub;
-    if (legacy && exposedSite(game, me, t, o.exposureWide)) {
+    if (legacy && exposedSite(game, me, t, o.exposureWide, doomed)) {
       exposed = true;
       return false;
     }
@@ -803,9 +924,10 @@ function planCityModel(
   const salvoR2 = hubRing(game).min ** 2;
   const clearOfSams = (t: TileRef) =>
     sams.every((sam) => game.euclideanDistSquared(sam, t) >= salvoR2);
-  const sites = [...hubSites(game, me, o), ...citySites(game, me, o)].filter(
-    (site) => clearOfSams(site.tile),
-  );
+  const sites = [
+    ...(doomed ? [] : hubSites(game, me, o)),
+    ...citySites(game, me, o),
+  ].filter((site) => clearOfSams(site.tile));
   let probes = 0;
   for (const site of sites) {
     if (probes >= BUILD_PROBES) break;
@@ -840,21 +962,27 @@ export type SamIdle =
   | "hydro"
   | "max"
   | "salvo"
+  | "salvoed"
   | "gold"
   | "small"
   | "noSite";
 
 /**
  * The SAM hub rule (o.samHub): with threats, none with a hydrogen bomb
- * among its bombs (nukeThreats), fewer than o.samMax SAMs of ours (finished or not), and gold for
- * one, the site farther than hubRing().min from every structure of ours
+ * among its bombs (nukeThreats), fewer than o.samMax SAMs of ours
+ * (finished or not), and gold for one, the site farther than
+ * hubRing().min from every structure of ours
  * (a salvo at it spares them) whose covered ring holds the most finished
  * city levels (then the deepest, then the lowest tile), at least
  * o.cityMinDepth deep; built only if it covers o.samMinLevels levels or our
  * gold also pays the next city level. With o.samSlotGate, none while a
  * current threat could salvo it at once: two ready slots and real gold for
  * two atoms, or one of each while nothing else of ours is nukeable (a SAM
- * under construction covers nothing, so one bomb takes it).
+ * under construction covers nothing, so one bomb takes it). With
+ * o.samHorizon ≥ 0, none while samKiller finds a threat, latent ones
+ * included, able to destroy a level-1 SAM with its gold read that many
+ * ticks ahead ("hydro", "salvo"), or one that fired a salvo at our SAMs
+ * within o.nukeMemory ticks, unless o.samRebuild ("salvoed").
  */
 export function planSam(
   game: Game,
@@ -868,6 +996,12 @@ export function planSam(
     return "hydro";
   }
   if (me.units(UnitType.SAMLauncher).length >= o.samMax) return "max";
+  if (o.samHorizon >= 0) {
+    const k = samKiller(game, plan, o, 1, o.samHorizon, !o.samRebuild);
+    if (k !== null) {
+      return k.why === "salvo" || k.why === "salvoed" ? k.why : "hydro";
+    }
+  }
   const config = game.config();
   if (o.samSlotGate) {
     const scored = me
@@ -979,6 +1113,10 @@ export function planSam(
  */
 export class EconomyController implements Controller {
   readonly name = "economy";
+  /** Package B3 (o.hubDoom): the last city check that found a threat able
+   *  to destroy our SAM hub (samKiller), and that threat. */
+  private doomAt = Number.NEGATIVE_INFINITY;
+  private doomBy: SamKiller | null = null;
 
   decide(v: View, s: ApexState): void {
     const { o } = v;
@@ -986,13 +1124,14 @@ export class EconomyController implements Controller {
     if (v.tick - s.timers.lastCity < o.cityEvery) return;
     // Package B3: the nuke model's threats, and the SAM hub before cities
     // (spec §5.0 gold priority: the SAM first).
-    const nukes =
+    const nukes: NukePlan | undefined =
       o.nukeModel && v.nukes !== undefined && o.structurePolicy === "exposure"
         ? {
             model: v.nukes,
             threats: nukeThreats(v.game, v.me, v.nukes, o),
           }
         : undefined;
+    if (nukes !== undefined && o.hubDoom) this.doom(v, nukes);
     if (nukes !== undefined && this.sam(v, s, nukes)) return;
     const plan = planCity(v.game, v.me, o, nukes);
     if (typeof plan === "string") {
@@ -1004,7 +1143,9 @@ export class EconomyController implements Controller {
       ) {
         v.log?.(
           `${v.tick} city ${plan}: threats ${threatList(nukes)} ` +
-            `sam=${planSam(v.game, v.me, o, nukes) as string} gold=${v.me.gold()}`,
+            `sam=${planSam(v.game, v.me, o, nukes) as string}` +
+            (nukes.doomed === true ? ` doom=${killerText(this.doomBy)}` : "") +
+            ` gold=${v.me.gold()}`,
         );
       }
       s.timers.lastCity = v.tick;
@@ -1058,6 +1199,35 @@ export class EconomyController implements Controller {
     }
   }
 
+  /**
+   * The hub's upkeep (o.hubDoom): with a finished SAM of ours, a threat
+   * that samKiller finds able to destroy it (gold read o.samHorizon ticks
+   * ahead, at least 0) dooms the hub for o.nukeMemory ticks (plan.doomed).
+   * Logged when it starts and once a minute while it holds.
+   */
+  private doom(v: View, nukes: NukePlan): void {
+    const { o } = v;
+    const levels = hubLevels(v.game, v.me);
+    if (levels > 0) {
+      const k = samKiller(v.game, nukes, o, levels, Math.max(0, o.samHorizon));
+      if (k !== null) {
+        const fresh = v.tick - this.doomAt > o.nukeMemory;
+        if (
+          fresh ||
+          Math.floor(v.tick / 600) !== Math.floor(this.doomAt / 600)
+        ) {
+          v.log?.(
+            `${v.tick} hub doomed${fresh ? "" : " still"}: ${killerText(k)} ` +
+              `interceptors=${levels} threats ${threatList(nukes)}`,
+          );
+        }
+        this.doomAt = v.tick;
+        this.doomBy = k;
+      }
+    }
+    nukes.doomed = v.tick - this.doomAt <= o.nukeMemory;
+  }
+
   /** The SAM hub rule (planSam): offers the SAM and returns true if it was
    *  accepted. */
   private sam(v: View, s: ApexState, nukes: NukePlan): boolean {
@@ -1082,6 +1252,14 @@ export class EconomyController implements Controller {
     );
     return true;
   }
+}
+
+/** A SamKiller for a log line: name, why, projected gold against the line. */
+function killerText(k: SamKiller | null): string {
+  if (k === null) return "-";
+  return k.line > 0n
+    ? `${k.nation.name()}:${k.why} ${k.gold}>=${k.line}`
+    : `${k.nation.name()}:${k.why}`;
 }
 
 /** The threats for a log line: name, rung, bomb, slots. */

@@ -55,6 +55,23 @@ import { inStall } from "./ExpansionController";
 // reach 0.25·N (hasTooManyAlliances), so only our own acceptances
 // (counter-accepts) can pass A_max, and they are held below it.
 
+/** Package A1 (review F2): a strike of ours runs on the nation, or an
+ *  attack on it was offered this tick. */
+function underStrike(v: View, sid: number): boolean {
+  return (
+    v.ledger.plan(sid)?.kind === "strike" || v.scheduler.hasKey(`attack:${sid}`)
+  );
+}
+
+/** Package A1 (review F2): our troops out on strikes. */
+function strikeTroops(v: View): number {
+  let out = 0;
+  for (const p of v.ledger.allPlans()) {
+    if (p.kind === "strike") out += v.ledger.stackOn(p.targetSmallID);
+  }
+  return out;
+}
+
 /** §3.4.2: land is projected this many ticks ahead. */
 const GROWTH_HORIZON = 600;
 /** Most projected relative growth over the horizon (land at most ×4). The
@@ -694,6 +711,11 @@ export class DiplomacyController implements Controller {
       if (held >= limit) break;
       if (N.type() !== PlayerType.Nation || !N.isAlive()) continue;
       if (me.isAlliedWith(N)) continue;
+      // Package A1 (review F2; not A/B-tested): a nation we strike asks to
+      // stop, and accepting retreats the strike (quick@20 0:12 with the two
+      // lines above and below: 5 of 17 strikes ended so, none by our own
+      // requests any more).
+      if (o.strikes && underStrike(v, N.smallID())) continue;
       // Food-list nations' requests are left to expire (200 ticks).
       if (o.foodList && s.web.food.includes(N.id())) continue;
       if (mid !== undefined) {
@@ -914,6 +936,15 @@ export class DiplomacyController implements Controller {
     if (o.stallDangerHome && inStall(s, t, o)) {
       Hplus = Math.max(Hplus, Math.min(me.troops(), models.cap(me)));
     }
+    // Package A1 (review F2): while our strikes run, their troops count as
+    // home (the launch dropped home and ended stall mode, and every danger
+    // rose with it: quick@20 g27 allySet 1 -> 9, Benin allied mid-strike).
+    if (o.strikes) {
+      const out = strikeTroops(v);
+      if (out > 0) {
+        Hplus = Math.max(Hplus, Math.min(me.troops() + out, models.cap(me)));
+      }
+    }
     const safe = Number.isFinite(nm.sendCapSafe()) ? nm.sendCapSafe() : 1;
     let contact = wm.freeFrontier;
     for (const n of wm.neighbors.values()) contact += n.contact;
@@ -926,6 +957,9 @@ export class DiplomacyController implements Controller {
       const g = this.growth(mem, N, t);
       const sid = N.smallID();
       if (!near.has(sid) && !dist.has(sid)) continue;
+      // Package A1 (review F2): a nation we strike is a target, not an ally
+      // (an accepted alliance retreats the strike).
+      if (o.strikes && underStrike(v, sid)) continue;
       const Mplus = models.capAt(
         PlayerType.Nation,
         project(N.numTilesOwned(), g),
@@ -1373,6 +1407,8 @@ export class DiplomacyController implements Controller {
       if (!N.isAlive() || N.type() !== PlayerType.Nation) continue;
       if (me.isAlliedWith(N) || !me.canSendAllianceRequest(N)) continue;
       if (s.web.food.includes(id)) continue;
+      // Package A1 (review F2).
+      if (o.strikes && underStrike(v, N.smallID())) continue;
       const d = nm.nextDecision(id, t + 1);
       const stoppedBy = this.stoppedBy(v, s, N);
       const f = nm.acceptsAlliance(id, {

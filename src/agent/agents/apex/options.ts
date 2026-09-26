@@ -897,20 +897,25 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  by the stack. Unallied ones at their land line unless below their
    *  reserve at their decision, allies at the betrayal line. Review of A1
    *  (quick@20 g3: Alaska, Russia's neighbour, land-attacked 1.87M 70
-   *  ticks after a 3.05M strike on Russia with the floor at 0). */
+   *  ticks after a 3.05M strike on Russia with the floor at 0). Use it with
+   *  strikeDetNearReach: all of them blocked the strikes that kept apex
+   *  alive (A1 round 2 ab4, quick 0:12: Alps budget 2443k -> 759k, no
+   *  strike, 6 nation attacks and 0.5% land against 0 and 4.5%). */
   strikeDetNearTarget: boolean;
   /** With strikeDetNearTarget, only the target's neighbours next to the
    *  land the stack can reach: a walk from our border through the target
    *  (reachableTiles), as deep as the budget before their lines pays for
-   *  (at most REACH_CAP tiles), at launch and at each top-up. All of them
-   *  blocked the strikes that kept apex alive on quick@20 Alps and World
-   *  (A1 round 2, ab4). */
+   *  (at most REACH_CAP tiles), at launch and at each top-up. A1 round 2
+   *  ab6 (quick 0:12, with strikeLiveCheck, against the same strikes
+   *  without): Bering Strait delays the Russia strike until Alaska's line
+   *  allows it (survival 14.2 -> 19.2 min, peak 30.5% -> 47.1%). */
   strikeDetNearReach: boolean;
   /** A top-up that only saves the stack from an answer that would delete
    *  it goes only where the answer is certain (gate open; below trigger the
    *  list runs 1 decision in 10) and the saved stack keeps strikeMaxRatio
    *  or can kill. Review of A1: 8 of 42 top-ups (3.19M) were such saves,
-   *  all below trigger, leaving stacks at ratio 1.8-20. */
+   *  all below trigger, leaving stacks at ratio 1.8-20. Off: no gain in
+   *  A1 round 2 (ab5 against ab6, quick 0:12: 2 better, 1 worse). */
   strikeSaveOpenOnly: boolean;
   /** The value and kill test read the loss per tile at the stack's real
    *  ratio after the answer (strikePosts did, without posts), and only the
@@ -919,7 +924,11 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  all of it reachable. A kill or a pocket is valued at the answer
    *  expected (1 decision in 10 below the trigger), the stack still sized
    *  for it. Review of A1: 22 strikes predicted a kill, 3 killed; 29 of 42
-   *  ended with the frontier emptied. */
+   *  ended with the frontier emptied. The reach it predicts is exact
+   *  (World: 3790 and 674 predicted, 3790 and 674 taken), but off: under
+   *  strikeMinValue it drops pocket strikes whose worth is not their land
+   *  (A1 round 2 ab6: Onion, the W5 pocket at 2309 skipped, eliminated at
+   *  6537 against 37.2% land). */
   strikeReachModel: boolean;
   /** Launch only while our land touches the target in at least
    *  max(1, strikeMinContact) pairs now (the scan may be thinkEvery − 1
@@ -987,6 +996,28 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  gold for the salvo (2 atoms, 1 while it is under construction and
    *  nothing else of ours is nukeable). */
   samSlotGate: boolean;
+  /** The SAM's lifetime (B3 review, round 2): no SAM while a threat,
+   *  latent ones included, has the gold for the salvo line
+   *  (NukeModel.salvoLine: a 1M silo level per missing launch slot plus
+   *  the salvo's atoms) or nukePayShare of its perceived hydrogen price,
+   *  read this many ticks ahead (NukeModel.projectedGold; 0 = its gold
+   *  now), or fired a hydrogen bomb or a salvo at our SAMs within
+   *  nukeMemory ticks; hubDoom repeats the test at every city check.
+   *  conf1 g39: a latent Alaska took 2 silo upgrades and salvoed the hub
+   *  600 ticks after the order. A projection does not foresee that (0.35M
+   *  flat until it ate 31 tribes) and, at 300 or 600 ticks, would have
+   *  refused the SAM in 4 of the 5 games it helped (shadow run over the 9
+   *  games round 1 changed): 0. -1 = round 1's gate only (samSlotGate). */
+  samHorizon: number;
+  /** The hub's upkeep: once a SAM stands, the samHorizon test at every
+   *  city check (against its interceptors) dooms the hub for nukeMemory
+   *  ticks: no more levels in its ring, and our SAMs exempt no site from
+   *  exposedSite. */
+  hubDoom: boolean;
+  /** Build a SAM again while a nation that salvoed ours within nukeMemory
+   *  ticks is still a threat (off: dev216, two SAMs rebuilt under the
+   *  shooter covered nothing). */
+  samRebuild: boolean;
 
   // ── Endgame (§5.3) ───────────────────────────────────────────────────
   /** The 38% MIRV gate (§5.3.2). M5, off. E16. */
@@ -1273,6 +1304,9 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   samMax: 1,
   samMinLevels: 3,
   samSlotGate: true,
+  samHorizon: 0,
+  hubDoom: true,
+  samRebuild: false,
 
   mirvGate: false,
 

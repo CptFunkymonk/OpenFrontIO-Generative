@@ -693,6 +693,10 @@ class AllocatorRun {
       if (this.stopAll || this.stopped.has("topup")) return;
       const kind = plan.kind;
       if (kind !== "tribe" && kind !== "snipe" && kind !== "strike") continue;
+      // Package A1 (review F3): with window strikes on, the StrikeController
+      // owns strike top-ups (timed before each decision of the target, under
+      // its deterrence floor).
+      if (kind === "strike" && o.strikes) continue;
       const sid = plan.targetSmallID;
       if (sid === 0 || this.touched.has(sid)) continue;
       if (v.tick - plan.lastSend < o.tribeTopUpEvery) continue;
