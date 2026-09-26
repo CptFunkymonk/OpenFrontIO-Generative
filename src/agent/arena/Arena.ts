@@ -39,6 +39,9 @@ Agents
 
 Games
   --games N              Games per entrant (default 8)
+  --each-map             Instead of --games random draws, one game per map in
+                         the pool, in pool order (--maps order if given)
+  --repeat R             With --each-map: play the whole pool R times (default 1)
   --seed S               Run seed: picks maps and game ids (default "arena")
   --maps a,b             Only these maps (enum keys, e.g. Europe,World). The
                          default pool is every map that has nations.
@@ -74,6 +77,8 @@ interface Options {
   entrants: Entrant[];
   together: boolean;
   games: number;
+  eachMap: boolean;
+  repeat: number;
   seed: string;
   maps: GameMapType[];
   difficulty: Difficulty;
@@ -134,6 +139,8 @@ function parseArgs(argv: string[]): Options {
   const o: Omit<Options, "entrants" | "maps" | "out"> = {
     together: false,
     games: 8,
+    eachMap: false,
+    repeat: 1,
     seed: "arena",
     difficulty: Difficulty.Impossible,
     nations: "default",
@@ -180,6 +187,12 @@ function parseArgs(argv: string[]): Options {
         break;
       case "--games":
         o.games = int();
+        break;
+      case "--each-map":
+        o.eachMap = true;
+        break;
+      case "--repeat":
+        o.repeat = Math.max(1, int());
         break;
       case "--seed":
         o.seed = next();
@@ -301,8 +314,13 @@ function gameIDFor(seed: string, index: number): string {
 function makeSpecs(o: Options): { spec: ArenaGameSpec; entrant: number }[] {
   const rng = new PseudoRandom(simpleHash(o.seed));
   const jobs: { spec: ArenaGameSpec; entrant: number }[] = [];
-  for (let g = 0; g < o.games; g++) {
-    const map = o.maps[rng.nextInt(0, o.maps.length)];
+  const games = o.eachMap ? o.maps.length * o.repeat : o.games;
+  for (let g = 0; g < games; g++) {
+    // Random draws only consume the PRNG when used, so existing seeds keep
+    // replaying the same maps.
+    const map = o.eachMap
+      ? o.maps[g % o.maps.length]
+      : o.maps[rng.nextInt(0, o.maps.length)];
     const seats = (entrants: Entrant[]) => entrants.map((e) => e.seat);
     const base = {
       gameID: gameIDFor(o.seed, g),

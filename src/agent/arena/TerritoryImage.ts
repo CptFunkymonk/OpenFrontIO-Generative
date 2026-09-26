@@ -42,10 +42,20 @@ const FALLOUT: [number, number, number] = [90, 110, 40];
 const HIGHLIGHT: [number, number, number] = [255, 40, 200];
 const BOT: [number, number, number] = [160, 150, 130];
 
+/** The fixed colours of `renderTerritory`; nations get hashed colours. */
+export const TERRITORY_LEGEND: [string, [number, number, number]][] = [
+  ["agent", HIGHLIGHT],
+  ["tribe", BOT],
+  ["unowned", LAND],
+  ["fallout", FALLOUT],
+  ["impassable", IMPASSABLE],
+  ["water", WATER],
+];
+
 /**
- * Renders territory: agents (the given smallIDs) in magenta, nations in
- * stable hashed colours, bots in pale grey, unowned land in taupe. Downscaled
- * to at most `maxWidth` pixels wide.
+ * Renders territory: agents (the given smallIDs) in magenta with a white
+ * outline, nations in stable hashed colours, bots in pale grey, unowned land
+ * in taupe. Downscaled to at most `maxWidth` pixels wide.
  */
 export function renderTerritory(
   game: Game,
@@ -55,6 +65,7 @@ export function renderTerritory(
   const scale = Math.max(1, Math.ceil(game.width() / maxWidth));
   const w = Math.floor(game.width() / scale);
   const h = Math.floor(game.height() / scale);
+  const highlighted = new Uint8Array(w * h);
   const colours = new Map<number, [number, number, number]>();
   for (const p of game.allPlayers()) {
     let c: [number, number, number];
@@ -77,6 +88,7 @@ export function renderTerritory(
       let c = WATER;
       if (game.isLand(t)) {
         const owner = game.ownerID(t);
+        if (highlightSmallIDs.has(owner)) highlighted[y * w + x] = 1;
         c =
           owner !== 0
             ? (colours.get(owner) ?? LAND)
@@ -92,5 +104,42 @@ export function renderTerritory(
       rgb[i + 2] = c[2];
     }
   }
+  outline(rgb, highlighted, w, h, Math.max(1, Math.round(w / 400)));
   return encodePng(w, h, rgb);
+}
+
+const OUTLINE: [number, number, number] = [245, 245, 245];
+
+/**
+ * Paints OUTLINE on every unmarked pixel within `r` (square) of a marked
+ * one, so a small agent still stands out once the image is a thumbnail.
+ */
+function outline(
+  rgb: Uint8Array,
+  marked: Uint8Array,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const across = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (marked[y * w + x] === 0) continue;
+      const hi = Math.min(w - 1, x + r);
+      for (let nx = Math.max(0, x - r); nx <= hi; nx++) across[y * w + nx] = 1;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (across[y * w + x] === 0) continue;
+      const hi = Math.min(h - 1, y + r);
+      for (let ny = Math.max(0, y - r); ny <= hi; ny++) {
+        const j = ny * w + x;
+        if (marked[j] === 1) continue;
+        rgb[j * 3] = OUTLINE[0];
+        rgb[j * 3 + 1] = OUTLINE[1];
+        rgb[j * 3 + 2] = OUTLINE[2];
+      }
+    }
+  }
 }
