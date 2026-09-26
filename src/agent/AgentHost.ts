@@ -50,11 +50,15 @@ export interface AgentHostStats {
   intentsInvalid: number;
   /** Intent counts by type, accepted only. */
   intentsByType: Record<string, number>;
-  /** Wall-clock milliseconds spent in `agent.tick`, one sample per call. */
+  /** Wall-clock milliseconds spent in `agent.tick`, one sample per call,
+   *  not counting the time inside `ctx.fork()` (that is `forkMs`). */
   thinkMs: number[];
   errors: number;
   firstErrors: string[];
   forks: number;
+  /** Wall-clock milliseconds spent inside `ctx.fork()` (snapshot and
+   *  restore; stepping the fork afterwards is think time). */
+  forkMs: { count: number; total: number; max: number };
 }
 
 /**
@@ -72,6 +76,7 @@ export class AgentHost {
     errors: 0,
     firstErrors: [],
     forks: 0,
+    forkMs: { count: 0, total: 0, max: 0 },
   };
   readonly logs: string[] = [];
 
@@ -79,6 +84,8 @@ export class AgentHost {
   private readonly random: PseudoRandom;
   private finished: AgentOutcome | null = null;
   private eliminatedAtTick: number | null = null;
+  // Fork time inside the current agent.tick, taken out of its think time.
+  private tickForkMs = 0;
 
   constructor(private readonly opts: AgentHostOptions) {
     this.budget = new IntentBudget(opts.nowMs, opts.rateLimit ?? true);
@@ -107,13 +114,15 @@ export class AgentHost {
   tick(): void {
     if (this.finished !== null) return;
     const ctx = this.context();
+    this.tickForkMs = 0;
     const start = performance.now();
     try {
       this.opts.agent.tick(ctx);
     } catch (e) {
       this.recordError(e);
     } finally {
-      this.stats.thinkMs.push(performance.now() - start);
+      const ms = performance.now() - start - this.tickForkMs;
+      this.stats.thinkMs.push(Math.max(0, ms));
     }
   }
 
@@ -212,13 +221,23 @@ export class AgentHost {
       throw new Error("forking needs a TerrainSource");
     }
     this.stats.forks++;
-    return new GameFork(
-      runner.game,
-      runner.snapshot(),
-      terrain,
-      gameStart,
-      clientID,
-    );
+    const start = performance.now();
+    try {
+      return new GameFork(
+        runner.game,
+        runner.snapshot(),
+        terrain,
+        gameStart,
+        clientID,
+      );
+    } finally {
+      const ms = performance.now() - start;
+      const forkMs = this.stats.forkMs;
+      forkMs.count++;
+      forkMs.total += ms;
+      forkMs.max = Math.max(forkMs.max, ms);
+      this.tickForkMs += ms;
+    }
   }
 
   log(message: string): void {
@@ -227,14 +246,16 @@ export class AgentHost {
     this.opts.onLog?.(line);
   }
 
+  /** Counts and logs an agent exception; rethrows it when strict, after
+   *  counting, so the seat's stats agree with the game's error. */
   private recordError(e: unknown): void {
-    if (this.opts.strict) throw e;
     this.stats.errors++;
     const text = e instanceof Error ? (e.stack ?? e.message) : String(e);
     if (this.stats.firstErrors.length < MAX_RECORDED_ERRORS) {
       this.stats.firstErrors.push(`tick ${this.game.ticks()}: ${text}`);
     }
     this.log(`agent error: ${text.split("\n")[0]}`);
+    if (this.opts.strict) throw e;
   }
 
   private context(): AgentContext {

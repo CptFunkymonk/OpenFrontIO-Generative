@@ -5,7 +5,12 @@
  *
  *   npm run arena -- --games 16 --agent baseline
  *   npm run arena -- --agent baseline --agent 'baseline:{"attackRatio":0.7}'
+ *   npm run arena -- --suite dev --shard 0/4
+ *   npm run arena -- --from arena-results/dev-x --game 7 --image-every 1
  *   npm run arena -- --help
+ *
+ * Statistics and the results-directory format are in Summary.ts, the named
+ * suites in Suites.ts.
  */
 import { ChildProcess, fork } from "child_process";
 import fs from "fs";
@@ -24,6 +29,22 @@ import { simpleHash } from "../../core/Util";
 import { AGENTS } from "../agents";
 import { ArenaGameResult, ArenaGameSpec, SeatSpec } from "./ArenaGame";
 import type { ArenaWorkerRequest } from "./ArenaWorker";
+import { isMain } from "./Cli";
+import { parseSuiteName, suiteArgs, SuiteName, suitesHelp } from "./Suites";
+import {
+  codeFingerprint,
+  CrashedGame,
+  gameEntry,
+  pct,
+  provenance,
+  RunConfig,
+  Shard,
+  StoredGame,
+  storedGame,
+  summarizeEntrants,
+  SummaryFile,
+  summaryTable,
+} from "./Summary";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "../../..");
@@ -36,6 +57,16 @@ Agents
                          Available: ${Object.keys(AGENTS).join(", ")}. Default: baseline
   --together             Seat all entrants in the same games (FFA between them)
                          instead of giving each its own copy of every game.
+
+Suites
+  --suite NAME           A named preset of maps, seed and flags (docs/11-roadmap.md
+                         §11.5). A flag given explicitly overrides the suite's
+                         value wherever it appears (on/off flags it sets stay
+                         on); --games N turns its --each-map into N random
+                         draws from its maps. A run whose flags change which
+                         games the suite plays, or how, is recorded as
+                         "NAME (modified)".
+${suitesHelp("    ")}
 
 Games
   --games N              Games per entrant (default 8)
@@ -58,6 +89,21 @@ Games
   --play-out             Keep simulating after every agent is out
   --strict               An agent exception aborts its game
 
+Selecting games (never change which map or game id a game gets; g is the game
+number, counted before each entrant gets its copy)
+  --shard I/N            Only the games with g % N == I, every entrant's copy:
+                         N sessions running shards 0/N..N-1/N play the run
+  --range A:B            Only the games A <= g < B
+  --game N               Only job N, the one written to games/gameNNN.json
+  --from DIR             Start from the flags of the run in DIR (the argv in its
+                         summary.json, with the map pool it played pinned)
+                         without its --out, --shard, --range and --game. Flags
+                         given with --from, before or after it, override
+                         them, and any --agent replaces that run's entrants.
+                         Refuses if this checkout would put a game of that run
+                         on another map or game id. To look at game 7 of a run:
+                           --from DIR --game 7 --images --image-every 1 --verbose
+
 Output
   --out DIR              Results directory (default arena-results/<seed>-<time>)
   --images               Write a final territory PNG per game
@@ -66,6 +112,11 @@ Output
   --jobs J               Games in parallel (default: CPU count)
   --verbose              Keep the simulation's console output
   --quiet                Only print the summary
+
+summary.json records the git commit, whether src, resources or the package
+files had local changes (or changed while the run played), the suite, the
+selection and the command line. Under --strict or --isolate the arena exits
+with code 2 if a game stopped on an error or a worker crashed.
 `;
 
 interface Entrant {
@@ -73,7 +124,7 @@ interface Entrant {
   seat: SeatSpec;
 }
 
-interface Options {
+export interface Options {
   entrants: Entrant[];
   together: boolean;
   games: number;
@@ -98,6 +149,36 @@ interface Options {
   jobs: number;
   verbose: boolean;
   quiet: boolean;
+  /** The suite, `name (modified)` if explicit flags change which games it
+   *  plays or how (anything but the entrants, the selection and the
+   *  output); null for none. */
+  suite: string | null;
+  shard: Shard | null;
+  /** [from, to): the games from <= g < to. */
+  range: [number, number] | null;
+  /** --game N: the one job index to play. */
+  onlyGame: number | null;
+  /** The command line with --from expanded (the suite stays a name). */
+  argv: string[];
+  /** The run --from replays, null without --from. */
+  from: FromRun | null;
+}
+
+/** The earlier run a --from command line replays. */
+export interface FromRun {
+  dir: string;
+  /** Its flags as --from loads them, before the flags given with --from:
+   *  the command line that replays it. */
+  argv: string[];
+}
+
+/** One game for one worker: an entrant's copy of game g. */
+export interface ArenaJob {
+  spec: ArenaGameSpec;
+  /** Index into Options.entrants; -1 with --together (every entrant). */
+  entrant: number;
+  /** The game number g; its map and game id depend only on it and the seed. */
+  game: number;
 }
 
 function mapByName(name: string): GameMapType {
@@ -125,18 +206,186 @@ function parseEntrant(arg: string): Entrant {
   return { label: arg, seat: { agent: name, options } };
 }
 
-function parseArgs(argv: string[]): Options {
+/** Flags of an earlier run that --from leaves out: where its results went and
+ *  which of its games it played. Each takes a value. */
+const FROM_DROPPED = ["--out", "--shard", "--range", "--game"];
+
+/** summary.json as --from reads it: runs from before --each-map lack eachMap
+ *  and repeat, runs from before M1 the provenance, argv and game numbers. */
+type RecordedRun = Partial<
+  Pick<SummaryFile, "argv" | "commit" | "dirty" | "games">
+> & {
+  config?: Omit<RunConfig, "eachMap" | "repeat"> &
+    Partial<Pick<RunConfig, "eachMap" | "repeat">>;
+};
+
+function readRecorded(dir: string): RecordedRun {
+  const file = path.join(dir, "summary.json");
+  if (!fs.existsSync(file)) {
+    throw new Error(`--from: ${file} not found (did that run finish?)`);
+  }
+  return JSON.parse(fs.readFileSync(file, "utf8")) as RecordedRun;
+}
+
+/**
+ * The command line of the run in `dir`: its recorded argv, or for a run from
+ * before argv was recorded, the flags its config stands for (the map pool in
+ * draw order, so random draws replay).
+ */
+export function runArgv(dir: string): string[] {
+  return recordedArgv(readRecorded(dir), dir);
+}
+
+function recordedArgv(summary: RecordedRun, dir: string): string[] {
+  if (summary.argv !== undefined) return summary.argv;
+  const c = summary.config;
+  if (c === undefined) {
+    throw new Error(`--from: ${dir}/summary.json records no command line`);
+  }
+  const flag = (on: boolean | undefined, name: string) => (on ? [name] : []);
+  return [
+    ...c.entrants.flatMap((e) => ["--agent", e]),
+    ...flag(c.together, "--together"),
+    ...["--games", String(c.games)],
+    ...flag(c.eachMap, "--each-map"),
+    ...["--repeat", String(c.repeat ?? 1)],
+    ...["--seed", c.seed],
+    ...["--maps", c.maps.join(",")],
+    ...["--difficulty", c.difficulty],
+    ...["--nations", String(c.nations)],
+    ...["--bots", String(c.bots)],
+    ...["--size", c.size.toLowerCase()],
+    ...["--max-minutes", String(c.maxMinutes)],
+    ...["--latency", String(c.latency)],
+    ...flag(!c.rateLimit, "--no-rate-limit"),
+    ...flag(c.isolate, "--isolate"),
+    ...flag(c.playOut, "--play-out"),
+    ...flag(c.strict, "--strict"),
+    ...["--timeline-every", String(c.timelineEvery)],
+  ];
+}
+
+/**
+ * Replaces `--from DIR` with that run's flags (see --help), followed by the
+ * flags given with it, before or after it, so those win. The map pool the
+ * run resolved is pinned unless the flags given choose maps themselves: a map
+ * added to the generated list since would otherwise move every later game of
+ * a default-pool run (dev, holdout) to another map under the same game id.
+ */
+function expandFrom(argv: string[]): { args: string[]; from: FromRun | null } {
+  const at = argv.indexOf("--from");
+  if (at < 0) return { args: argv, from: null };
+  if (argv.indexOf("--from", at + 1) >= 0) {
+    throw new Error("--from can only be given once");
+  }
+  const value = argv[at + 1];
+  if (value === undefined) throw new Error("missing value for --from");
+  const dir = path.resolve(value);
+  const given = [...argv.slice(0, at), ...argv.slice(at + 2)];
+  const dropped = new Set(FROM_DROPPED);
+  if (given.includes("--agent")) dropped.add("--agent");
+  const summary = readRecorded(dir);
+  const loaded = recordedArgv(summary, dir);
+  const replay: string[] = [];
+  for (let i = 0; i < loaded.length; i++) {
+    if (dropped.has(loaded[i])) i++;
+    else replay.push(loaded[i]);
+  }
+  const maps = summary.config?.maps;
+  if (
+    Array.isArray(maps) &&
+    maps.length > 0 &&
+    !given.includes("--maps") &&
+    !given.includes("--suite")
+  ) {
+    replay.push("--maps", maps.join(","));
+  }
+  return { args: [...replay, ...given], from: { dir, argv: replay } };
+}
+
+/** The options that decide which games a run plays and how they play. */
+type GameOptions = Pick<
+  Options,
+  | "maps"
+  | "seed"
+  | "eachMap"
+  | "repeat"
+  | "games"
+  | "difficulty"
+  | "nations"
+  | "bots"
+  | "size"
+  | "maxMinutes"
+  | "latency"
+  | "rateLimit"
+  | "playOut"
+  | "strict"
+>;
+
+function sameGames(a: GameOptions, b: GameOptions): boolean {
+  const key = (o: GameOptions) =>
+    JSON.stringify([
+      o.maps,
+      o.seed,
+      o.eachMap,
+      o.eachMap ? o.repeat : o.games,
+      o.difficulty,
+      o.nations,
+      o.bots,
+      o.size,
+      o.maxMinutes,
+      o.latency,
+      o.rateLimit,
+      o.playOut,
+      o.strict,
+    ]);
+  return key(a) === key(b);
+}
+
+export function parseArgs(argv: string[]): Options {
+  const { args, from } = expandFrom(argv);
+  const o = resolveArgs(args);
+  // A suite whose games the flags changed is recorded as modified, so
+  // summary.md, compare and merge do not pass the run off as the suite.
+  const suite =
+    o.suite === null || sameGames(o, resolveArgs(["--suite", o.suite]))
+      ? o.suite
+      : `${o.suite} (modified)`;
+  return { ...o, suite, from };
+}
+
+/** parseArgs without --from, with the suite as given. */
+function resolveArgs(
+  args: string[],
+): Omit<Options, "suite" | "from"> & { suite: SuiteName | null } {
   const list = (v: string) =>
     v
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+  // A suite's flags are read before the command line's, so an explicit flag
+  // overrides the suite's value wherever it is given.
+  let suite: SuiteName | null = null;
+  for (let i = args.indexOf("--suite"); i >= 0; ) {
+    const name = args[i + 1];
+    if (name === undefined) throw new Error("missing value for --suite");
+    suite = parseSuiteName(name);
+    i = args.indexOf("--suite", i + 2);
+  }
+  const preset = suite === null ? [] : suiteArgs(suite);
+  const all = [...preset, ...args];
+  let explicitGames = false;
+  let explicitEachMap = false;
+
   const entrants: Entrant[] = [];
   let onlyMaps: string[] | null = null;
   let categories: string[] | null = null;
   let exclude: string[] = [];
   let out: string | null = null;
-  const o: Omit<Options, "entrants" | "maps" | "out"> = {
+  const o: Omit<
+    Options,
+    "entrants" | "maps" | "out" | "suite" | "argv" | "from"
+  > = {
     together: false,
     games: 8,
     eachMap: false,
@@ -158,11 +407,15 @@ function parseArgs(argv: string[]): Options {
     jobs: os.availableParallelism(),
     verbose: false,
     quiet: false,
+    shard: null,
+    range: null,
+    onlyGame: null,
   };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
+  for (let i = 0; i < all.length; i++) {
+    const arg = all[i];
+    const explicit = i >= preset.length;
     const next = () => {
-      const v = argv[++i];
+      const v = all[++i];
       if (v === undefined) throw new Error(`missing value for ${arg}`);
       return v;
     };
@@ -179,6 +432,9 @@ function parseArgs(argv: string[]): Options {
         process.stdout.write(HELP);
         process.exit(0);
         break;
+      case "--suite":
+        next(); // read above
+        break;
       case "--agent":
         entrants.push(parseEntrant(next()));
         break;
@@ -187,9 +443,11 @@ function parseArgs(argv: string[]): Options {
         break;
       case "--games":
         o.games = int();
+        explicitGames ||= explicit;
         break;
       case "--each-map":
         o.eachMap = true;
+        explicitEachMap ||= explicit;
         break;
       case "--repeat":
         o.repeat = Math.max(1, int());
@@ -249,6 +507,29 @@ function parseArgs(argv: string[]): Options {
       case "--strict":
         o.strict = true;
         break;
+      case "--shard": {
+        const m = /^(\d+)\/(\d+)$/.exec(next());
+        const [index, count] = m === null ? [NaN, NaN] : [+m[1], +m[2]];
+        if (!(count >= 1 && index < count)) {
+          throw new Error(`--shard needs I/N with 0 <= I < N, e.g. 0/4`);
+        }
+        o.shard = { index, count };
+        break;
+      }
+      case "--range": {
+        const m = /^(\d+):(\d+)$/.exec(next());
+        const [from, to] = m === null ? [NaN, NaN] : [+m[1], +m[2]];
+        if (!(from < to)) {
+          throw new Error(`--range needs A:B with 0 <= A < B, e.g. 0:32`);
+        }
+        o.range = [from, to];
+        break;
+      }
+      case "--game":
+        o.onlyGame = int();
+        break;
+      case "--from":
+        throw new Error("--from can only be given once");
       case "--out":
         out = next();
         break;
@@ -276,6 +557,8 @@ function parseArgs(argv: string[]): Options {
     }
   }
   if (entrants.length === 0) entrants.push(parseEntrant("baseline"));
+  // An explicit --games asks for random draws, over a suite's --each-map.
+  if (explicitGames && !explicitEachMap) o.eachMap = false;
 
   // With default nations, a map without any is a game against tribes only,
   // which measures nothing about the built-in AI: leave those out unless
@@ -295,13 +578,20 @@ function parseArgs(argv: string[]): Options {
   if (pool.length === 0) throw new Error("the map pool is empty");
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const selected = [
+    o.shard === null ? "" : `-shard${o.shard.index}of${o.shard.count}`,
+    o.range === null ? "" : `-games${o.range[0]}to${o.range[1]}`,
+    o.onlyGame === null ? "" : `-game${o.onlyGame}`,
+  ].join("");
   return {
     ...o,
     entrants,
     maps: pool,
     out: path.resolve(
-      out ?? path.join(ROOT, "arena-results", `${o.seed}-${stamp}`),
+      out ?? path.join(ROOT, "arena-results", `${o.seed}${selected}-${stamp}`),
     ),
+    suite,
+    argv: args,
   };
 }
 
@@ -311,9 +601,10 @@ function gameIDFor(seed: string, index: number): string {
   return `G${h.toString(36).padStart(7, "0").slice(-7)}`;
 }
 
-function makeSpecs(o: Options): { spec: ArenaGameSpec; entrant: number }[] {
+/** Every job of the run, before --shard, --range and --game select. */
+export function makeSpecs(o: Options): ArenaJob[] {
   const rng = new PseudoRandom(simpleHash(o.seed));
-  const jobs: { spec: ArenaGameSpec; entrant: number }[] = [];
+  const jobs: ArenaJob[] = [];
   const games = o.eachMap ? o.maps.length * o.repeat : o.games;
   for (let g = 0; g < games; g++) {
     // Random draws only consume the PRNG when used, so existing seeds keep
@@ -349,6 +640,7 @@ function makeSpecs(o: Options): { spec: ArenaGameSpec; entrant: number }[] {
           seats: seats(o.entrants),
         },
         entrant: -1,
+        game: g,
       });
     } else {
       o.entrants.forEach((e, i) =>
@@ -360,11 +652,32 @@ function makeSpecs(o: Options): { spec: ArenaGameSpec; entrant: number }[] {
             seats: [e.seat],
           },
           entrant: i,
+          game: g,
         }),
       );
     }
   }
   return jobs;
+}
+
+/** The jobs this invocation plays: `jobs` narrowed by --shard, --range and
+ *  --game. Throws if nothing is left. */
+export function selectJobs(o: Options, jobs: ArenaJob[]): ArenaJob[] {
+  const picked = jobs.filter(
+    (j) =>
+      (o.shard === null || j.game % o.shard.count === o.shard.index) &&
+      (o.range === null || (j.game >= o.range[0] && j.game < o.range[1])) &&
+      (o.onlyGame === null || j.spec.index === o.onlyGame),
+  );
+  if (picked.length === 0) {
+    const games = jobs.length === 0 ? 0 : jobs[jobs.length - 1].game + 1;
+    throw new Error(
+      o.onlyGame !== null && !jobs.some((j) => j.spec.index === o.onlyGame)
+        ? `--game ${o.onlyGame}: the run has jobs 0-${jobs.length - 1}`
+        : `the selection leaves none of the run's ${games} games`,
+    );
+  }
+  return picked;
 }
 
 function runJob(
@@ -395,154 +708,211 @@ function runJob(
   });
 }
 
-// ── Statistics ───────────────────────────────────────────────────────────
-
-/** Wilson score interval for a binomial proportion, 95%. */
-function wilson(k: number, n: number): [number, number] {
-  if (n === 0) return [0, 1];
-  const z = 1.96;
-  const p = k / n;
-  const denom = 1 + (z * z) / n;
-  const centre = (p + (z * z) / (2 * n)) / denom;
-  const half =
-    (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / denom;
-  return [Math.max(0, centre - half), Math.min(1, centre + half)];
+/**
+ * The selection as the run header and summary.md describe it, "" for all:
+ * --shard and --range pick games (of the run's game numbers), --game a job
+ * (of its jobs, one per entrant per game unless --together).
+ */
+export function selection(o: Options, all: readonly ArenaJob[]): string {
+  const games = all.length === 0 ? 0 : all[all.length - 1].game + 1;
+  const picked = [
+    o.shard === null ? null : `shard ${o.shard.index}/${o.shard.count}`,
+    o.range === null ? null : `games ${o.range[0]}-${o.range[1] - 1}`,
+  ].filter((p) => p !== null);
+  const parts = [
+    ...(picked.length === 0 ? [] : [`${picked.join(", ")} of ${games} games`]),
+    ...(o.onlyGame === null ? [] : [`job ${o.onlyGame} of ${all.length} jobs`]),
+  ];
+  return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
 }
 
-const mean = (xs: number[]) =>
-  xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
+/** What `jobs` play: "3 games", or "1 game × 2 entrants" when each game is
+ *  played once per entrant. */
+export function playing(jobs: readonly ArenaJob[]): string {
+  const games = new Set(jobs.map((j) => j.game)).size;
+  const copies = games === 0 ? 0 : jobs.length / games;
+  return (
+    `${games} game${games === 1 ? "" : "s"}` +
+    (copies > 1 ? ` × ${copies} entrants` : "")
+  );
+}
+
+/** summary.md's list of the jobs that did not run to their end: games that
+ *  stopped on an error, and crashed workers. */
+export function failedJobs(
+  played: readonly StoredGame[],
+  crashes: readonly CrashedGame[],
+): string[] {
+  const first = (text: string) => text.split("\n")[0];
+  return [
+    ...played.flatMap((g) =>
+      g.error === null
+        ? []
+        : [
+            {
+              index: g.index,
+              line:
+                `- job ${g.index}, ${g.map} ${g.gameID}: stopped at ` +
+                `${g.gameMinutes.toFixed(1)} min on an error: ${first(g.error)}`,
+            },
+          ],
+    ),
+    ...crashes.map((c) => ({
+      index: c.index,
+      line: `- job ${c.index}, ${c.map} ${c.gameID}: crashed: ${first(c.crash)}`,
+    })),
+  ]
+    .sort((a, b) => a.index - b.index)
+    .map((f) => f.line);
+}
 
 /**
- * Per-game progress toward victory: 1 for a win, otherwise the peak land
- * share as a fraction of the 80% needed to win (capped below 1).
+ * Checks a --from rerun against the run it replays. Game g of the run's own
+ * flags (without those given with --from) must still be on the map and game
+ * id the run recorded for it, or this checkout draws differently now (a
+ * default or a suite changed) and the rerun would be another game: throws,
+ * naming the games. Returns warnings when the code may differ from what
+ * played the run.
  */
-function progress(r: ArenaGameResult, seat: number): number {
-  const s = r.seats[seat];
-  if (s.result === "win") return 1;
-  return Math.min(0.99, s.peakShare / 0.8);
-}
-
-interface EntrantSummary {
-  label: string;
-  games: number;
-  wins: number;
-  winRate: number;
-  winRate95: [number, number];
-  meanProgress: number;
-  meanPeakShare: number;
-  meanFinalShare: number;
-  meanPlacement: number;
-  eliminated: number;
-  meanSurvivalMinutes: number;
-  crashed: number;
-  agentErrors: number;
-  intentsRateLimited: number;
-  thinkMsP95Max: number;
-}
-
-function summarize(
-  label: string,
-  rows: { r: ArenaGameResult; seat: number }[],
-  crashed: number,
-): EntrantSummary {
-  const seats = rows.map(({ r, seat }) => r.seats[seat]);
-  const wins = seats.filter((s) => s.result === "win").length;
-  const eliminated = seats.filter((s) => s.eliminatedAtTick !== null);
-  return {
-    label,
-    games: rows.length,
-    wins,
-    winRate: rows.length ? wins / rows.length : 0,
-    winRate95: wilson(wins, rows.length),
-    meanProgress: mean(rows.map(({ r, seat }) => progress(r, seat))),
-    meanPeakShare: mean(seats.map((s) => s.peakShare)),
-    meanFinalShare: mean(seats.map((s) => s.finalShare)),
-    meanPlacement: mean(
-      seats.filter((s) => s.placement !== null).map((s) => s.placement!),
-    ),
-    eliminated: eliminated.length,
-    meanSurvivalMinutes: mean(eliminated.map((s) => s.eliminatedAtTick! / 600)),
-    crashed,
-    agentErrors: seats.reduce((a, s) => a + s.stats.errors, 0),
-    intentsRateLimited: seats.reduce(
-      (a, s) => a + s.stats.intentsRateLimited,
-      0,
-    ),
-    thinkMsP95Max: Math.max(0, ...seats.map((s) => s.stats.thinkMs.p95)),
-  };
-}
-
-const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
-
-function summaryTable(summaries: EntrantSummary[]): string {
-  const header =
-    "| entrant | games | wins | win rate (95% CI) | progress | peak land | final land | placement | eliminated | agent errors | think p95 |";
-  const rule = `|${header
-    .split("|")
-    .slice(1, -1)
-    .map(() => "---")
-    .join("|")}|`;
-  const rows = summaries.map(
-    (s) =>
-      `| ${s.label} | ${s.games} | ${s.wins} | ${pct(s.winRate)} (${pct(s.winRate95[0])}–${pct(s.winRate95[1])}) | ` +
-      `${s.meanProgress.toFixed(3)} | ${pct(s.meanPeakShare)} | ${pct(s.meanFinalShare)} | ` +
-      `${s.meanPlacement.toFixed(1)} | ${s.eliminated} | ${s.agentErrors} | ${s.thinkMsP95Max.toFixed(1)} ms |`,
-  );
-  return [header, rule, ...rows].join("\n");
+export function checkReplay(
+  from: FromRun,
+  selected: readonly ArenaJob[],
+  head: { commit: string | null; dirty: boolean | null },
+): string[] {
+  const run = readRecorded(from.dir);
+  const entrants = run.config?.together
+    ? 1
+    : (run.config?.entrants.length ?? 1);
+  const recorded = new Map<number, { map: string; gameID: string }>();
+  for (const g of run.games ?? []) {
+    // Runs from before M1 record no game number: derive it from the index.
+    const game =
+      (g as { game?: number }).game ?? Math.floor(g.index / entrants);
+    recorded.set(game, g);
+  }
+  const replay = new Map<number, ArenaJob>();
+  for (const j of makeSpecs(parseArgs(from.argv))) {
+    if (!replay.has(j.game)) replay.set(j.game, j);
+  }
+  const moved: string[] = [];
+  for (const g of new Set(selected.map((j) => j.game))) {
+    const was = recorded.get(g);
+    if (was === undefined) continue;
+    const now = replay.get(g)?.spec;
+    if (now?.map !== was.map || now.gameID !== was.gameID) {
+      moved.push(
+        `game ${g} was ${was.map} ${was.gameID}, now ` +
+          (now === undefined ? "not in the run" : `${now.map} ${now.gameID}`),
+      );
+    }
+  }
+  const short = (c: string | null | undefined) => c?.slice(0, 7) ?? "unknown";
+  if (moved.length > 0) {
+    throw new Error(
+      `--from ${from.dir}: this checkout does not replay that run's games ` +
+        `(it ran on ${short(run.commit)}; a default or a suite changed since):\n` +
+        moved.map((m) => `  - ${m}`).join("\n"),
+    );
+  }
+  const warnings: string[] = [];
+  if (run.commit !== undefined && run.commit !== head.commit) {
+    warnings.push(
+      `--from: that run played on ${short(run.commit)}, this checkout is ` +
+        `${short(head.commit)}: its games may not replay exactly`,
+    );
+  }
+  if (run.dirty === true) {
+    warnings.push(`--from: that run played with local changes`);
+  }
+  if (head.dirty === true) {
+    warnings.push(`--from: this checkout has local changes`);
+  }
+  return warnings;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const o = parseArgs(process.argv.slice(2));
-  const jobs = makeSpecs(o);
+  const allJobs = makeSpecs(o);
+  const jobs = selectJobs(o, allJobs);
+  const { commit, dirty } = provenance(ROOT);
+  if (o.from !== null) {
+    for (const w of checkReplay(o.from, jobs, { commit, dirty })) {
+      console.warn(`Warning: ${w}`);
+    }
+  }
   fs.mkdirSync(path.join(o.out, "games"), { recursive: true });
   const say = (line: string) => {
     if (!o.quiet) console.log(line);
   };
+  const version =
+    commit === null ? "no git" : `${commit.slice(0, 7)}${dirty ? "+" : ""}`;
   say(
-    `Arena: ${jobs.length} games, ${o.entrants.map((e) => e.label).join(" vs ")}, ` +
+    `Arena${o.suite === null ? "" : ` suite ${o.suite}`}: ` +
+      `${playing(jobs)}${selection(o, allJobs)}, ` +
+      `${o.entrants.map((e) => e.label).join(" vs ")}, ` +
       `${o.difficulty} nations, ${o.bots} bots, ${o.maps.length} maps in pool, ` +
-      `${o.jobs} parallel → ${path.relative(process.cwd(), o.out) || "."}`,
+      `seed ${o.seed}, ${version}, ${o.jobs} parallel → ` +
+      `${path.relative(process.cwd(), o.out) || "."}`,
   );
 
-  const results: {
-    job: (typeof jobs)[number];
-    res: ArenaGameResult | { crash: string };
-  }[] = [];
+  // Each worker loads src/ when it is forked: check before every fork, and
+  // once after the last, that the code is still what the run started on.
+  const code = codeFingerprint(ROOT);
+  // Assigned in checkCode: typed so the narrowing to null does not stick.
+  let changed = null as string | null;
+  const checkCode = (when: string) => {
+    if (code !== null && changed === null && codeFingerprint(ROOT) !== code) {
+      changed = when;
+    }
+  };
+
+  const results: { job: ArenaJob; res: StoredGame | CrashedGame }[] = [];
   let nextJob = 0;
   let done = 0;
   const started = performance.now();
   const worker = async () => {
     while (nextJob < jobs.length) {
       const job = jobs[nextJob++];
+      checkCode(`before job ${job.spec.index} started`);
       const res = await runJob(job.spec, o);
-      results.push({ job, res });
       done++;
       const tag = `[${done}/${jobs.length}]`;
+      const place = {
+        index: job.spec.index,
+        game: job.game,
+        entrant: o.together ? null : job.entrant,
+      };
       if ("crash" in res) {
+        results.push({
+          job,
+          res: {
+            ...place,
+            map: job.spec.map,
+            gameID: job.spec.gameID,
+            crash: res.crash,
+          },
+        });
         say(
           `${tag} game ${job.spec.index} ${job.spec.map}: CRASH ${res.crash.split("\n")[0]}`,
         );
         continue;
       }
       const name = `game${String(res.index).padStart(3, "0")}`;
-      const { seats, ...rest } = res;
+      const stored = storedGame(res, place.game, place.entrant);
+      results.push({ job, res: stored });
       fs.writeFileSync(
         path.join(o.out, "games", `${name}.json`),
-        JSON.stringify(
-          { ...rest, seats: seats.map(({ logs, ...s }) => s) },
-          null,
-          1,
-        ),
+        JSON.stringify(stored, null, 1),
       );
       fs.writeFileSync(
         path.join(o.out, "games", `${name}.log`),
-        seats
+        res.seats
           .map((s) => [`## ${s.agent} (${s.clientID})`, ...s.logs].join("\n"))
           .join("\n\n"),
       );
-      seats.forEach((s, i) => {
+      res.seats.forEach((s, i) => {
         const entrant = o.entrants[o.together ? i : job.entrant].label;
         const label =
           entrant.length > 24 ? `${entrant.slice(0, 23)}…` : entrant;
@@ -560,82 +930,84 @@ async function main(): Promise<void> {
   await Promise.all(
     Array.from({ length: Math.min(o.jobs, jobs.length) }, worker),
   );
+  checkCode("after the last job started");
   results.sort((a, b) => a.job.spec.index - b.job.spec.index);
 
-  const summaries = o.together
-    ? o.entrants.map((e, i) =>
-        summarize(
-          e.label,
-          results.flatMap(({ res }) =>
-            "crash" in res ? [] : [{ r: res, seat: i }],
-          ),
-          results.filter(({ res }) => "crash" in res).length,
-        ),
-      )
-    : o.entrants.map((e, i) => {
-        const mine = results.filter(({ job }) => job.entrant === i);
-        return summarize(
-          e.label,
-          mine.flatMap(({ res }) =>
-            "crash" in res ? [] : [{ r: res, seat: 0 }],
-          ),
-          mine.filter(({ res }) => "crash" in res).length,
-        );
-      });
-
-  const games = results.map(({ job, res }) =>
-    "crash" in res
-      ? {
-          index: job.spec.index,
-          map: job.spec.map,
-          gameID: job.spec.gameID,
-          crash: res.crash,
-        }
-      : {
-          index: res.index,
-          map: res.map,
-          gameID: res.gameID,
-          minutes: Number(res.gameMinutes.toFixed(2)),
-          winner: res.winner,
-          error: res.error,
-          seats: res.seats.map((s) => ({
-            agent: s.agent,
-            options: s.options,
-            result: s.result,
-            placement: s.placement,
-            peakShare: s.peakShare,
-            finalShare: s.finalShare,
-            eliminatedAtTick: s.eliminatedAtTick,
-          })),
-        },
+  const played = results.flatMap(({ res }) => ("crash" in res ? [] : [res]));
+  const crashes = results.flatMap(({ res }) => ("crash" in res ? [res] : []));
+  const summaries = summarizeEntrants(
+    o.entrants.map((e) => e.label),
+    played,
+    crashes,
   );
   const wallSeconds = (performance.now() - started) / 1000;
-  const { entrants, ...config } = o;
+  const changedDuringRun = changed !== null;
+  const notes: string[] = [];
+  if (changedDuringRun) {
+    notes.push(
+      `The code under src, resources or the package files changed during ` +
+        `the run, ${changed}: games started after the change may have run ` +
+        `other code, so the run is recorded as having local changes.`,
+    );
+  }
+  const failed = failedJobs(played, crashes);
+  if (failed.length > 0) {
+    notes.push(
+      `${failed.length} of ${jobs.length} job(s) did not run to their end:\n\n` +
+        failed.join("\n"),
+    );
+  }
+  const { entrants, suite, shard, range, argv, from, ...config } = o;
+  const summary: SummaryFile = {
+    config: {
+      ...config,
+      entrants: entrants.map((e) => e.label),
+    } satisfies RunConfig,
+    commit,
+    dirty: changedDuringRun ? true : dirty,
+    changedDuringRun,
+    suite,
+    shard,
+    range,
+    argv,
+    from: from?.dir ?? null,
+    wallSeconds,
+    summaries,
+    games: results.map(({ res }) => ("crash" in res ? res : gameEntry(res))),
+  };
   fs.writeFileSync(
     path.join(o.out, "summary.json"),
-    JSON.stringify(
-      {
-        config: { ...config, entrants: entrants.map((e) => e.label) },
-        wallSeconds,
-        summaries,
-        games,
-      },
-      null,
-      1,
-    ),
+    JSON.stringify(summary, null, 1),
   );
   const table = summaryTable(summaries);
+  const finalVersion = changedDuringRun
+    ? `${version}, changed during the run`
+    : version;
   fs.writeFileSync(
     path.join(o.out, "summary.md"),
-    `# Arena ${o.seed}\n\n${o.difficulty} nations, ${o.bots} bots, ${o.size} maps, ` +
-      `cap ${o.maxMinutes} min, latency ${o.latency} tick(s).\n\n${table}\n`,
+    `# Arena ${o.suite === null ? o.seed : `${o.suite} (seed ${o.seed})`}` +
+      `${selection(o, allJobs)}\n\n` +
+      `${o.difficulty} nations, ${o.bots} bots, ${o.size} maps, ` +
+      `cap ${o.maxMinutes} min, latency ${o.latency} tick(s), ${finalVersion}.\n\n${table}\n` +
+      notes.map((n) => `\n**Warning:** ${n}\n`).join(""),
   );
   console.log(
     `\n${table}\n\nWall time ${wallSeconds.toFixed(0)}s. Results: ${o.out}`,
   );
+  for (const n of notes) console.warn(`\nWarning: ${n}`);
+  // Under --strict or --isolate (the smoke suite) a failed game fails the
+  // run, after its results are written.
+  if ((o.strict || o.isolate) && failed.length > 0) {
+    console.error(
+      `\n${failed.length} job(s) failed under --strict/--isolate: exit code 2`,
+    );
+    process.exitCode = 2;
+  }
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+if (isMain(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}

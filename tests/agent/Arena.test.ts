@@ -1,7 +1,15 @@
+import fs from "fs";
+import os from "os";
 import path from "path";
 import zlib from "zlib";
 import { AGENTS } from "../../src/agent/agents";
 import { ArenaGameSpec, runArenaGame } from "../../src/agent/arena/ArenaGame";
+import {
+  gameEntry,
+  readRun,
+  storedGame,
+  summarizeEntrants,
+} from "../../src/agent/arena/Summary";
 import { encodePng } from "../../src/agent/arena/TerritoryImage";
 import {
   Difficulty,
@@ -101,6 +109,65 @@ describe("arena", () => {
         expect(dirty.error).toMatch(/diverged/);
       } finally {
         delete AGENTS.cheater;
+      }
+    },
+    TIMEOUT,
+  );
+});
+
+describe("arena results", () => {
+  beforeAll(() => {
+    console.debug = () => {};
+  });
+
+  test(
+    "a stored game loads back and summarizes like the result it came from",
+    async () => {
+      const r = await runArenaGame(spec({ index: 3, maxTicks: 300 }), MAPS);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arena-results-"));
+      try {
+        // What Arena.ts writes for game g = 1 of entrant 1 of two.
+        const stored = storedGame(r, 1, 1);
+        fs.mkdirSync(path.join(dir, "games"));
+        fs.writeFileSync(
+          path.join(dir, "games", "game003.json"),
+          JSON.stringify(stored, null, 1),
+        );
+        fs.writeFileSync(
+          path.join(dir, "summary.json"),
+          JSON.stringify({
+            config: { entrants: ["idle", "baseline"], together: false },
+            games: [gameEntry(stored)],
+          }),
+        );
+        const run = readRun(dir);
+        expect(run.games).toHaveLength(1);
+        const [g] = run.games;
+        expect(Object.keys(g).slice(0, 3)).toEqual([
+          "index",
+          "game",
+          "entrant",
+        ]);
+        expect(g).toMatchObject({ index: 3, game: 1, entrant: 1 });
+        expect(g.gameID).toBe(r.gameID);
+        expect(g.seats[0]).not.toHaveProperty("logs");
+        expect(g.seats[0].timeline).toEqual(r.seats[0].timeline);
+
+        const [idle, baseline] = summarizeEntrants(
+          run.config!.entrants,
+          run.games,
+          run.crashes,
+        );
+        expect(idle.games).toBe(0);
+        const direct = summarizeEntrants(
+          ["idle", "baseline"],
+          [{ ...r, entrant: 1 }],
+        )[1];
+        expect(baseline).toEqual(direct);
+        expect(baseline.games).toBe(1);
+        expect(baseline.meanPeakShare).toBe(r.seats[0].peakShare);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
       }
     },
     TIMEOUT,

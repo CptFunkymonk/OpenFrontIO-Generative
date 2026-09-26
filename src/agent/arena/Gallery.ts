@@ -21,9 +21,10 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { pathToFileURL } from "url";
 import { PlayerType } from "../../core/game/Game";
 import type { ArenaGameResult, LeaderPoint, SeatResult } from "./ArenaGame";
+import { isMain } from "./Cli";
 import { TERRITORY_LEGEND } from "./TerritoryImage";
 
 export const DEFAULT_MINUTES = [1, 3, 5, 10, 15, 20];
@@ -573,10 +574,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (
-  process.argv[1] !== undefined &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isMain(import.meta.url)) {
   main().catch((e) => {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);

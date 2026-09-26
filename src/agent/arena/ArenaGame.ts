@@ -29,7 +29,23 @@ import { createAgent } from "../agents";
 import { TerrainSource } from "../Fork";
 import { landShare, maxTroops } from "../lib/Perception";
 import { NodeMapLoader } from "./NodeMapLoader";
+import {
+  ArenaRecorder,
+  AttackRecord,
+  Received,
+  SeatRecords,
+  StandingPoint,
+} from "./Recorder";
 import { renderTerritory } from "./TerritoryImage";
+
+export {
+  MAX_ATTACK_RECORDS,
+  STANDING_MINUTES,
+  type AttackRecord,
+  type ByAttacker,
+  type Received,
+  type StandingPoint,
+} from "./Recorder";
 
 export interface SeatSpec {
   agent: string;
@@ -97,10 +113,19 @@ export interface SeatResult {
   finalShare: number;
   peakShare: number;
   peakShareTick: number;
-  stats: Omit<AgentHostStats, "thinkMs"> & {
+  stats: Omit<AgentHostStats, "thinkMs" | "forkMs"> & {
+    /** Excludes fork time since forkMs was added. */
     thinkMs: { mean: number; p50: number; p95: number; max: number };
+    forkMs?: AgentHostStats["forkMs"];
   };
   timeline: TimelinePoint[];
+  // The fields below were added later; older result files lack them.
+  /** Sampled at each of STANDING_MINUTES the game reaches. */
+  standings?: StandingPoint[];
+  received?: Received;
+  /** This seat's own attacks, the first MAX_ATTACK_RECORDS of them. */
+  attacks?: AttackRecord[];
+  attacksDropped?: number;
   logTail: string[];
   logs: string[];
 }
@@ -190,6 +215,7 @@ export async function runArenaGame(
 
   let fatal: string | null = null;
   const authHashes = new Map<number, number>();
+  let recorder: ArenaRecorder | null = null;
   const hashSink =
     (hashes: Map<number, number>, label: string) =>
     (gu: GameUpdateViewData | ErrorUpdate) => {
@@ -202,12 +228,11 @@ export async function runArenaGame(
       }
     };
 
-  const runner = await createGameRunner(
-    gameStart,
-    undefined,
-    loader,
-    hashSink(authHashes, "game"),
-  );
+  const authSink = hashSink(authHashes, "game");
+  const runner = await createGameRunner(gameStart, undefined, loader, (gu) => {
+    authSink(gu);
+    if (!("errMsg" in gu)) recorder?.update(gu);
+  });
   const game = runner.game;
   const terrain = await TerrainSource.load(loader, spec.map, spec.mapSize);
 
@@ -258,6 +283,11 @@ export async function runArenaGame(
     });
   }
 
+  recorder = new ArenaRecorder(
+    game,
+    seats.map((s) => seatPlayer(game, s)),
+  );
+
   const highlight = new Set<number>();
   const images: string[] = [];
   const writeImage = (label: string) => {
@@ -296,11 +326,12 @@ export async function runArenaGame(
       }
       executed++;
       verifyReplicas(seats, authHashes);
+      recorder.afterTick();
 
       for (const s of seats) s.host.tick();
 
       const tick = game.ticks();
-      for (const s of seats) {
+      for (const [i, s] of seats.entries()) {
         const share = landShare(game, seatPlayer(game, s));
         if (share > s.peakShare) {
           s.peakShare = share;
@@ -310,6 +341,7 @@ export async function runArenaGame(
           s.outcome = s.host.checkOutcome();
           if (s.outcome !== null && s.outcome.eliminatedAtTick !== null) {
             s.placement = 1 + contenders(game).length;
+            recorder.eliminated(i);
           }
         }
       }
@@ -369,7 +401,7 @@ export async function runArenaGame(
               type: winner.type(),
               isAgent: agentPlayers.has(winner),
             },
-    seats: seats.map((s) => seatResult(game, s, error)),
+    seats: seats.map((s, i) => seatResult(game, s, error, recorder.records(i))),
     leaders,
     images,
     error,
@@ -429,8 +461,13 @@ function sampleTimeline(game: Game, seats: Seat[], leaders: LeaderPoint[]) {
   });
 }
 
-function seatResult(game: Game, s: Seat, error: string | null): SeatResult {
-  const { thinkMs, ...stats } = s.host.stats;
+function seatResult(
+  game: Game,
+  s: Seat,
+  error: string | null,
+  records: SeatRecords,
+): SeatResult {
+  const { thinkMs, forkMs, ...stats } = s.host.stats;
   const sorted = [...thinkMs].sort((a, b) => a - b);
   const pct = (q: number) =>
     sorted.length === 0
@@ -458,8 +495,14 @@ function seatResult(game: Game, s: Seat, error: string | null): SeatResult {
         p95: round(pct(0.95), 3),
         max: round(sorted[sorted.length - 1] ?? 0, 3),
       },
+      forkMs: {
+        count: forkMs.count,
+        total: round(forkMs.total, 3),
+        max: round(forkMs.max, 3),
+      },
     },
     timeline: s.timeline,
+    ...records,
     logTail: s.host.logs.slice(-LOG_TAIL),
     logs: s.host.logs,
   };

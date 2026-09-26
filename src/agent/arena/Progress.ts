@@ -19,6 +19,7 @@ import fs from "fs";
 import path from "path";
 import prettier from "prettier";
 import { fileURLToPath } from "url";
+import { isMain } from "./Cli";
 import type { GalleryEntrant, GallerySummary } from "./Gallery";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -311,10 +312,7 @@ async function main(): Promise<void> {
   else process.stdout.write(HELP);
 }
 
-if (
-  process.argv[1] !== undefined &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isMain(import.meta.url)) {
   main().catch((e) => {
     console.error(e instanceof Error ? e.message : e);
     process.exit(1);

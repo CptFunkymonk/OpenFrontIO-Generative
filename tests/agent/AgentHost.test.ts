@@ -128,8 +128,11 @@ describe("AgentHost", () => {
     expect(host.stats.errors).toBe(1);
     expect(host.stats.firstErrors[0]).toContain("boom");
 
+    // Strict counts it too, so the seat's stats agree with the game error.
     const strict = makeHost(runner, boom, { strict: true }).host;
     expect(() => strict.tick()).toThrow("boom");
+    expect(strict.stats.errors).toBe(1);
+    expect(strict.stats.firstErrors[0]).toContain("boom");
   });
 
   test("gives the agent its own player before it has spawned", () => {
@@ -174,5 +177,46 @@ describe("GameFork", () => {
     again.advance(30);
     expect(hash(again.game)).toBe(hash(fork.game));
     expect(host.stats.forks).toBe(2);
+    expect(host.stats.forkMs.count).toBe(2);
+  });
+
+  test("reports time inside ctx.fork() apart from think time", async () => {
+    const runner = await newRunner();
+    step(runner);
+    const terrain = await TerrainSource.load(
+      new TestDataMapLoader("world"),
+      GameMapType.World,
+      GameMapSize.Compact,
+    );
+    const busy = (ms: number) => {
+      const end = performance.now() + ms;
+      while (performance.now() < end);
+    };
+    let forks = 2;
+    const { host } = makeHost(
+      runner,
+      (ctx) => {
+        busy(5);
+        for (; forks > 0; forks--) ctx.fork();
+      },
+      { terrain },
+    );
+    const start = performance.now();
+    host.tick();
+    const wall = performance.now() - start;
+    const { forkMs, thinkMs } = host.stats;
+    expect(forkMs.count).toBe(2);
+    expect(forkMs.total).toBeGreaterThan(0);
+    expect(forkMs.max).toBeLessThanOrEqual(forkMs.total);
+    expect(forkMs.max * 2).toBeGreaterThanOrEqual(forkMs.total);
+    // Think time is what is left: at least the busy wait, and with the fork
+    // time no more than the whole tick.
+    expect(thinkMs[0]).toBeGreaterThanOrEqual(5);
+    expect(thinkMs[0] + forkMs.total).toBeLessThanOrEqual(wall);
+
+    // A tick without a fork takes nothing off.
+    host.tick();
+    expect(host.stats.forkMs.count).toBe(2);
+    expect(thinkMs[1]).toBeGreaterThanOrEqual(5);
   });
 });
