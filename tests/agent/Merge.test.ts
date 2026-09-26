@@ -154,6 +154,40 @@ test("a crash gives way to a rerun of it; missing games are reported", () => {
   ]);
 });
 
+test("the merged config and argv do not depend on the parts' order", () => {
+  writeRun(dir("s0"), [...RUN, "--shard", "0/2"], sketch);
+  writeRun(dir("s1"), [...RUN, "--shard", "1/2"], { ...sketch, crash: [7] });
+  writeRun(
+    dir("g7"),
+    [...RUN, "--game", "7", "--images", "--image-every", "1"],
+    sketch,
+  );
+  const first = mergeRuns([dir("g7"), dir("s0"), dir("s1")], dir("m1"));
+  const last = mergeRuns([dir("s0"), dir("s1"), dir("g7")], dir("m2"));
+  const { out: o1, ...c1 } = first.summary.config;
+  const { out: o2, ...c2 } = last.summary.config;
+  expect([o1, o2]).toEqual([dir("m1"), dir("m2")]);
+  expect(c1).toEqual(c2);
+  expect(first.summary.argv).toEqual(last.summary.argv);
+  expect(first.summary.argv).toEqual(RUN);
+  expect(c1).toMatchObject({ images: false, imageEvery: 0, onlyGame: null });
+  // --from the merged run replays the run, not the rerun's frames.
+  expect(parseArgs(["--from", dir("m1")])).toMatchObject({
+    images: false,
+    imageEvery: 0,
+    onlyGame: null,
+  });
+
+  // Shards that disagree on frames give none, whichever comes first.
+  writeRun(dir("f1"), [...RUN, "--shard", "1/2", "--images"], sketch);
+  const a = mergeRuns([dir("s0"), dir("f1")], dir("m3")).summary;
+  const b = mergeRuns([dir("f1"), dir("s0")], dir("m4")).summary;
+  for (const m of [a, b]) {
+    expect(m.config).toMatchObject({ images: false, imageEvery: 0 });
+    expect(m.argv).toEqual(RUN);
+  }
+});
+
 test("parts of different runs are refused unless forced", () => {
   writeRun(dir("s0"), [...RUN, "--shard", "0/2"], sketch);
   writeRun(dir("seed"), [...RUN, "--shard", "1/2", "--seed", "other"], sketch);

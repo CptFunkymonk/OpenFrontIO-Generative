@@ -123,9 +123,15 @@ export interface SeatResult {
   /** Sampled at each of STANDING_MINUTES the game reaches. */
   standings?: StandingPoint[];
   received?: Received;
-  /** This seat's own attacks, the first MAX_ATTACK_RECORDS of them. */
+  /** This seat's own attacks, the first MAX_ATTACK_RECORDS of them. Before
+   *  troopsLost was added, "exhausted" stood for burned_out,
+   *  frontier_emptied, sunk and returned alike. */
   attacks?: AttackRecord[];
   attacksDropped?: number;
+  /** Tiles gained before the first attack or boat, and later tiles that no
+   *  attack record got (SeatRecords). Added with troopsLost. */
+  spawnTiles?: number;
+  tilesUncredited?: number;
   logTail: string[];
   logs: string[];
 }
@@ -326,7 +332,7 @@ export async function runArenaGame(
       }
       executed++;
       verifyReplicas(seats, authHashes);
-      recorder.afterTick();
+      recorder.afterTick(turn.intents);
 
       for (const s of seats) s.host.tick();
 

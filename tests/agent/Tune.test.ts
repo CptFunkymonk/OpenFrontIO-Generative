@@ -6,6 +6,7 @@ import { provenance, StoredSeat } from "../../src/agent/arena/Summary";
 import {
   compareScores,
   ConfigScore,
+  finishedRound,
   halvingSchedule,
   parseConfigs,
   parseTuneArgs,
@@ -362,7 +363,7 @@ describe("the command line", () => {
     ]);
     expect(path.basename(t.out)).toMatch(/^tune-quick-\d{4}-/);
 
-    // Another seed or cap still plays quick's maps.
+    // Another seed or cap still plays quick's maps, as a modified quick.
     const s = parseTuneArgs(["--configs", f, "--seed", "x", "--jobs", "2"]);
     expect(s.arenaArgs).toEqual([
       "--suite",
@@ -372,7 +373,11 @@ describe("the command line", () => {
       "--jobs",
       "2",
     ]);
-    expect([s.suite, s.seed, s.totalGames]).toEqual(["quick", "x", 32]);
+    expect([s.suite, s.seed, s.totalGames]).toEqual([
+      "quick (modified)",
+      "x",
+      32,
+    ]);
 
     // Maps given: no suite, so none is recorded that was not played.
     const own = [
@@ -419,6 +424,70 @@ describe("the command line", () => {
     expect(() =>
       parseTuneArgs(["--configs", path.join(tmp, "missing.json")]),
     ).toThrow(/--configs .*missing.json/);
+  });
+});
+
+describe("resuming a round", () => {
+  const round = [
+    ...["--maps", "Onion", "--max-minutes", "1", "--seed", "s"],
+    ...["--agent", "baseline", "--range", "0:2"],
+  ];
+  const recorded = (argv: string[]) => {
+    const dir = path.join(tmp, "round-1");
+    writeRun(dir, [...argv, "--out", dir]);
+    return dir;
+  };
+
+  test("the same games in any flag order, or with pictures, are read back", () => {
+    const dir = recorded(round);
+    expect(finishedRound(dir, round)).toBe(true);
+    const swapped = [
+      ...["--max-minutes", "1", "--maps", "Onion", "--seed", "s"],
+      ...["--range", "0:2", "--agent", "baseline"],
+    ];
+    expect(finishedRound(dir, swapped)).toBe(true);
+    expect(finishedRound(dir, [...round, "--image-every", "1"])).toBe(true);
+    expect(finishedRound(dir, [...round, "--images", "--jobs", "3"])).toBe(
+      true,
+    );
+    expect(finishedRound(dir, [...round, "--seed", "s"])).toBe(true);
+    expect(
+      finishedRound(dir, [
+        ...round.slice(0, 6),
+        "--agent",
+        "baseline:{}",
+        ...round.slice(8),
+      ]),
+    ).toBe(true);
+    expect(finishedRound(path.join(tmp, "none"), round)).toBe(false);
+  });
+
+  test("other games are refused", () => {
+    const dir = recorded(round);
+    for (const other of [
+      ["--max-minutes", "2"],
+      ["--seed", "t"],
+      ["--range", "0:3"],
+      ["--agent", "idle"],
+      ["--bots", "10"],
+    ]) {
+      expect(
+        () => finishedRound(dir, [...round, ...other]),
+        other.join(" "),
+      ).toThrow(/holds another arena run than this round's/);
+    }
+    // A recorded command line the arena no longer takes is another run.
+    const file = path.join(dir, "summary.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        ...JSON.parse(fs.readFileSync(file, "utf8")),
+        argv: [...round, "--bogus"],
+      }),
+    );
+    expect(() => finishedRound(dir, round)).toThrow(
+      /another arena run than this round's \(its flags no longer parse: unknown argument "--bogus"/,
+    );
   });
 });
 

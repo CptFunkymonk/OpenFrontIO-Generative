@@ -97,10 +97,13 @@ work, and append a ledger row when you adopt a change. Pictures of games:
   DOM and Node APIs, except `src/agent/arena/` (Node only).
 
 ```bash
-npm run arena -- --games 16                     # vs Impossible nations, random maps
-npm run arena -- --agent a --agent b --games 32 # paired A/B on identical games
-npm run arena -- --isolate --games 2            # proves an agent never mutates the game
-npm run arena -- --images --image-every 5       # territory PNGs to inspect
+npm run arena -- --games 16                                   # vs Impossible nations, random maps
+npm run arena -- --agent a --agent b --games 32               # paired A/B on identical games
+npm run arena -- --isolate --games 2                          # proves an agent never mutates the game
+npm run arena -- --images --image-every 5                     # territory PNGs to inspect
+npm run arena -- --suite quick --agent a --shard 0/2          # suites: smoke showcase quick dev holdout
+npm run arena:compare -- dirA dirB                            # paired report (arena:merge joins shards)
+npm run arena -- --from DIR --game 7 --images --image-every 1 # rerun one stored game
 npx vitest tests/agent --run
 ```
 

@@ -23,10 +23,12 @@ import {
   GameMapSize,
   GameMapType,
   GameType,
+  Player,
   PlayerInfo,
   PlayerType,
   UnitType,
 } from "../../src/core/game/Game";
+import { StampedIntent } from "../../src/core/Schemas";
 import { setup } from "../util/Setup";
 import { constructionExecution } from "../util/utils";
 
@@ -113,12 +115,15 @@ function boat(
 describe("AttackLog", () => {
   test("a land attack gains tiles from its target while active", () => {
     const log = new AttackLog(lookup());
+    // Before any attack, gains are the spawn.
+    observe(log, 0, { gains: [9, 0, 8, 0] });
     observe(log, 1, {
       attacks: [land("a", 0, 100)],
       gains: [10, 0, 11, 0, 12, 5], // tile 12 came from someone else
     });
     observe(log, 2, { attacks: [land("a", 0, 60)], gains: [13, 0] });
-    // Gone after this tick, but it was active during it.
+    // Gone after this tick, but it was active during it; 60 troops came
+    // home (the frontier emptied).
     observe(log, 3, { gains: [14, 0] });
     observe(log, 4, { gains: [15, 0] });
     expect(log.records).toEqual([
@@ -129,10 +134,35 @@ describe("AttackLog", () => {
         target: TN,
         boat: false,
         troopsSent: 100,
+        troopsCancelledAtLaunch: 0,
+        troopsLost: 40,
         tilesGained: 4,
-        end: "exhausted",
+        end: "frontier_emptied",
       },
     ]);
+    expect([log.spawnTiles, log.tilesUncredited]).toEqual([2, 2]);
+  });
+
+  test("an attack gone with under a troop burned out; its troops are lost", () => {
+    const log = new AttackLog(lookup());
+    // The live attack is read once it is gone: deleting it keeps troops.
+    const live = { troops: () => 55 };
+    observe(log, 1, { attacks: [{ ...land("a", 0, 100), ref: live }] });
+    observe(log, 2, { attacks: [{ ...land("a", 0, 60), ref: live }] });
+    live.troops = () => 0.4;
+    observe(log, 3, {});
+    expect(log.records[0]).toMatchObject({
+      end: "burned_out",
+      troopsLost: 100,
+    });
+    // One that went with troops left emptied its frontier: they came home.
+    const other = { troops: () => 70 };
+    observe(log, 4, { attacks: [{ ...land("b", 0, 90), ref: other }] });
+    observe(log, 5, {});
+    expect(log.records[1]).toMatchObject({
+      end: "frontier_emptied",
+      troopsLost: 20,
+    });
   });
 
   test("a new land attack on the same target continues the record", () => {
@@ -152,15 +182,27 @@ describe("AttackLog", () => {
         ["o", 10, 0],
       ],
     );
-    expect(log.records[0]).toMatchObject({ end: "retreated", endTick: 5 });
-    expect(log.records[1]).toMatchObject({ end: "exhausted", endTick: 4 });
+    // A retreat from a player brings three quarters of the 120 home.
+    expect(log.records[0]).toMatchObject({
+      end: "retreated",
+      endTick: 5,
+      troopsLost: 150 - 90,
+    });
+    expect(log.records[1]).toMatchObject({
+      end: "frontier_emptied",
+      endTick: 4,
+      troopsLost: 0,
+    });
   });
 
   test("an attack ends countered or with its target dead", () => {
     const log = new AttackLog(lookup(new Set([8])));
     observe(log, 1, { attacks: [land("a", 7, 100), land("b", 8, 100)] });
     observe(log, 2, { counters: new Set([7]) });
-    expect(log.records.map((r) => r.end)).toEqual(["countered", "target_dead"]);
+    expect(log.records.map((r) => [r.end, r.troopsLost])).toEqual([
+      ["countered", 100],
+      ["target_dead", 0],
+    ]);
   });
 
   test("a boat carries on into the attack it lands", () => {
@@ -194,8 +236,10 @@ describe("AttackLog", () => {
         target: { name: "P7", type: PlayerType.Nation },
         boat: false,
         troopsSent: 100,
+        troopsCancelledAtLaunch: 0,
+        troopsLost: 10,
         tilesGained: 2,
-        end: "exhausted",
+        end: "frontier_emptied",
       },
       {
         id: "boat:42",
@@ -204,6 +248,8 @@ describe("AttackLog", () => {
         target: { name: "P7", type: PlayerType.Nation },
         boat: true,
         troopsSent: 300,
+        troopsCancelledAtLaunch: 0,
+        troopsLost: 300,
         tilesGained: 2,
         end: "countered",
       },
@@ -212,24 +258,83 @@ describe("AttackLog", () => {
 
   test("a boat that sinks, turns back, or lands without an attack", () => {
     const log = new AttackLog(lookup());
-    observe(log, 1, {
-      boats: [boat(1, 7, 100, 10), boat(2, 7, 200, 10), boat(3, 7, 300, 10)],
-    });
-    observe(log, 2, {
-      boats: [
-        boat(1, 7, 100, 10),
-        boat(2, 7, 50, 10, true),
-        boat(3, 7, 300, 10),
-      ],
-    });
-    // 1 sinks, 2 gets home, 3 lands on a friend: the tile, no attack.
+    const sunk = { wasDestroyedByEnemy: () => false };
+    const afloat = { wasDestroyedByEnemy: () => false };
+    const boats = (retreat: boolean) => [
+      { ...boat(1, 7, 100, 40), ref: sunk },
+      { ...boat(2, 7, retreat ? 50 : 200, 40, retreat), ref: afloat },
+      { ...boat(3, 7, 300, 40), ref: afloat },
+      { ...boat(4, 7, 400, 40), ref: afloat },
+    ];
+    observe(log, 1, { boats: boats(false) });
+    observe(log, 2, { boats: boats(true) });
+    // 1 is sunk, 2 gets home, 3 lands on a friend (the tile, no attack), 4
+    // reaches our own shore (the tile was ours already).
+    sunk.wasDestroyedByEnemy = () => true;
     observe(log, 3, { gains: [300, 7] });
     expect(
-      log.records.map((r) => [r.id, r.end, r.endTick, r.tilesGained]),
+      log.records.map((r) => [
+        r.id,
+        r.end,
+        r.endTick,
+        r.tilesGained,
+        r.troopsLost,
+      ]),
     ).toEqual([
-      ["boat:1", "exhausted", 3, 0],
-      ["boat:2", "retreated", 3, 0],
-      ["boat:3", "exhausted", 3, 1],
+      ["boat:1", "sunk", 3, 0, 40],
+      ["boat:2", "retreated", 3, 0, 10],
+      ["boat:3", "returned", 3, 1, 0],
+      ["boat:4", "returned", 3, 0, 10],
+    ]);
+  });
+
+  test("launches cancelled by the target's attack on us", () => {
+    const log = new AttackLog(lookup());
+    const opposing = new Map([[7, 500]]);
+    // Our launch at 7 never appeared, but the stats count 200 troops sent:
+    // 7's attack on us took them all.
+    observe(log, 1, { launched: [7], committed: 200, opposing });
+    // A launch of 300 appeared with 180: 7's attack took 120 of it.
+    observe(log, 2, {
+      attacks: [land("b", 7, 180)],
+      launched: [7],
+      committed: 300,
+      opposing,
+    });
+    // A launch the game refused (a friend, say): nothing committed.
+    observe(log, 3, {
+      attacks: [land("b", 7, 170)],
+      launched: [8],
+      committed: 0,
+      opposing,
+    });
+    // A boat that landed (took its tile) but whose attack was cancelled at
+    // once: its 50 troops are in the stats, and no attack appeared.
+    observe(log, 4, {
+      attacks: [land("b", 7, 160)],
+      boats: [boat(9, 7, 900, 50)],
+    });
+    observe(log, 5, {
+      attacks: [land("b", 7, 150)],
+      gains: [900, 7],
+      committed: 50,
+      opposing,
+    });
+    expect(
+      log.records.map((r) => [
+        r.id,
+        r.end,
+        r.startTick,
+        r.endTick,
+        r.troopsSent,
+        r.troopsCancelledAtLaunch,
+        r.troopsLost,
+        r.tilesGained,
+      ]),
+    ).toEqual([
+      ["launch:1:7", "cancelled_at_launch", 1, 1, 200, 200, 200, 0],
+      ["b", "running", 2, null, 300, 120, null, 0],
+      ["boat:9", "cancelled_at_launch", 4, 5, 50, 50, 50, 1],
     ]);
   });
 
@@ -261,10 +366,16 @@ describe("AttackLog", () => {
     observe(log, 3, { attacks: [land("n", 7, 240)], gains: [801, 7] });
     observe(log, 4, { counters: new Set([7]) });
     expect(
-      log.records.map((r) => [r.id, r.troopsSent, r.tilesGained, r.end]),
+      log.records.map((r) => [
+        r.id,
+        r.troopsSent,
+        r.tilesGained,
+        r.end,
+        r.troopsLost,
+      ]),
     ).toEqual([
-      ["l", 200, 1, "countered"],
-      ["boat:6", 50, 0, "countered"],
+      ["l", 200, 1, "countered", 200],
+      ["boat:6", 50, 0, "countered", 50],
     ]);
   });
 
@@ -280,7 +391,7 @@ describe("AttackLog", () => {
     observe(log, n + 2, { attacks: [last] });
     expect(log.records).toHaveLength(MAX_ATTACK_RECORDS);
     expect(log.dropped).toBe(5);
-    expect(log.records[MAX_ATTACK_RECORDS - 1].end).toBe("exhausted");
+    expect(log.records[MAX_ATTACK_RECORDS - 1].end).toBe("frontier_emptied");
   });
 });
 
@@ -305,6 +416,13 @@ describe("IncomingLog", () => {
       boat: true,
     };
     expect([...log.observe([nation("b", 130), landing])]).toEqual([3, 4]);
+    // What a launch of ours at each could meet: last tick's, and the new.
+    expect(log.opposing).toEqual(
+      new Map([
+        [3, 80 + 130],
+        [4, 20],
+      ]),
+    );
     log.launched(PlayerType.Human, 70);
     expect(log.attacks).toEqual({ nation: 2, bot: 0, human: 1 });
     expect(log.attackTroops).toEqual({ nation: 150, bot: 0, human: 70 });
@@ -424,6 +542,136 @@ describe("ArenaRecorder", () => {
   });
 });
 
+describe("attack endings in the simulation", () => {
+  // plains: 100 × 100 land. Seat a owns the columns x < 10; b owns the
+  // columns from `bFrom` on, the rest is TerraNullius. Nothing regrows
+  // troops (no spawn, so no PlayerExecution): what a has is what came back.
+  async function plains(bFrom: number) {
+    const infoA = new PlayerInfo("seat a", PlayerType.Human, "CLIENT_A", "a");
+    const infoB = new PlayerInfo("seat b", PlayerType.Human, "CLIENT_B", "b");
+    const game = await setup("plains", {}, [infoA, infoB]);
+    const a = game.player(infoA.id);
+    const b = game.player(infoB.id);
+    for (let x = 0; x < 100; x++) {
+      for (let y = 0; y < 100; y++) {
+        if (x < 10) a.conquer(game.ref(x, y));
+        else if (x >= bFrom) b.conquer(game.ref(x, y));
+      }
+    }
+    a.addTroops(1_000_000);
+    b.addTroops(1_000_000);
+    const recorder = new ArenaRecorder(game, [a, b]);
+    const step = (intents: StampedIntent[] = []) => {
+      const updates = game.executeNextTick();
+      recorder.update({
+        tick: game.ticks(),
+        updates,
+        packedTileUpdates: game.drainPackedTileUpdates(),
+      });
+      recorder.afterTick(intents);
+    };
+    const until = (done: () => boolean) => {
+      for (let i = 0; i < 2000 && !done(); i++) step();
+      expect(done()).toBe(true);
+    };
+    return { game, a, b, recorder, step, until };
+  }
+
+  test("burned out loses its troops; frontier emptied brings them home", async () => {
+    const { game, a, recorder, until } = await plains(20);
+    const attacks = () => recorder.records(0).attacks;
+
+    // 150 troops into open land run out after a few tiles.
+    const before = a.troops();
+    game.addExecution(new AttackExecution(150, a, game.terraNullius().id()));
+    until(
+      () => attacks()[0]?.end !== undefined && attacks()[0].end !== "running",
+    );
+    expect(attacks()[0]).toMatchObject({
+      end: "burned_out",
+      troopsSent: 150,
+      troopsLost: 150,
+    });
+    expect(a.troops()).toBe(before - 150);
+
+    // 400k into the 10-column strip of TerraNullius left between a and b:
+    // it takes the strip, runs out of frontier and retreats with the rest.
+    const strip = 10 * 100 - attacks()[0].tilesGained;
+    const start = a.troops();
+    game.addExecution(
+      new AttackExecution(400_000, a, game.terraNullius().id()),
+    );
+    until(
+      () => attacks()[1]?.end !== undefined && attacks()[1].end !== "running",
+    );
+    const r = attacks()[1];
+    expect(r).toMatchObject({
+      end: "frontier_emptied",
+      troopsSent: 400_000,
+      tilesGained: strip,
+    });
+    expect(r.troopsLost).toBeGreaterThan(0);
+    expect(r.troopsLost).toBeLessThan(400_000);
+    // What did not come back is exactly what the owner is short of.
+    expect(Math.abs(start - r.troopsLost! - a.troops())).toBeLessThanOrEqual(1);
+  });
+
+  const attackIntent = (from: Player, target: Player, troops: number) =>
+    ({
+      type: "attack",
+      clientID: from.clientID()!,
+      targetID: target.id(),
+      troops,
+    }) as StampedIntent;
+
+  test("a launch cancelled whole by a larger attack on us is recorded", async () => {
+    const { game, a, b, recorder, step } = await plains(10);
+    game.addExecution(new AttackExecution(50_000, b, a.id()));
+    step();
+    const incoming = a.incomingAttacks()[0].troops();
+
+    // Our 20k meets b's attack in AttackExecution.init and vanishes.
+    game.addExecution(new AttackExecution(20_000, a, b.id()));
+    step([attackIntent(a, b, 20_000)]);
+    expect(a.outgoingAttacks()).toHaveLength(0);
+    expect(a.incomingAttacks()[0].troops()).toBeLessThan(incoming - 19_000);
+    const tick = game.ticks();
+    expect(recorder.records(0).attacks).toEqual([
+      {
+        id: `launch:${tick}:${b.smallID()}`,
+        startTick: tick,
+        endTick: tick,
+        target: { name: "seat b", type: PlayerType.Human },
+        boat: false,
+        troopsSent: 20_000,
+        troopsCancelledAtLaunch: 20_000,
+        troopsLost: 20_000,
+        tilesGained: 0,
+        end: "cancelled_at_launch",
+      },
+    ]);
+  });
+
+  test("a launch cancelled in part records what it committed", async () => {
+    const { game, a, b, recorder, step } = await plains(10);
+    game.addExecution(new AttackExecution(10_000, b, a.id()));
+    step();
+
+    // Our 30k cancels b's attack and goes on with the rest.
+    game.addExecution(new AttackExecution(30_000, a, b.id()));
+    step([attackIntent(a, b, 30_000)]);
+    expect(a.incomingAttacks()).toHaveLength(0);
+    const seen = a.outgoingAttacks()[0].troops();
+    expect(seen).toBeLessThan(21_000);
+    const [r] = recorder.records(0).attacks;
+    expect(r.end).toBe("running");
+    expect(Math.abs(r.troopsSent - 30_000)).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(r.troopsCancelledAtLaunch - (30_000 - seen)),
+    ).toBeLessThanOrEqual(1);
+  });
+});
+
 describe("arena records", () => {
   beforeAll(() => {
     console.debug = () => {};
@@ -479,11 +727,16 @@ describe("arena records", () => {
       for (const a of attacks) {
         expect(a.troopsSent).toBeGreaterThan(0);
         expect(a.endTick === null).toBe(a.end === "running");
+        expect(a.troopsLost === null).toBe(a.end === "running");
+        expect(a.troopsLost ?? 0).toBeLessThanOrEqual(a.troopsSent);
+        expect(a.troopsCancelledAtLaunch).toBeLessThanOrEqual(a.troopsSent);
         if (a.endTick !== null) {
           expect(a.endTick).toBeGreaterThanOrEqual(a.startTick);
         }
       }
       expect(seat.attacksDropped).toBe(0);
+      expect(seat.spawnTiles).toBeGreaterThan(0);
+      expect(seat.tilesUncredited).toBeGreaterThanOrEqual(0);
 
       const rec = seat.received!;
       for (const k of ["nation", "bot", "human"] as const) {

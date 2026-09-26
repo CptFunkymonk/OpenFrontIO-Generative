@@ -1,7 +1,9 @@
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import {
+  codeFingerprint,
   EntrantSummary,
   median,
   provenance,
@@ -114,6 +116,64 @@ describe("summarize", () => {
     expect(s.meanSurvivalMinutes).toBeCloseTo((15 + 2.5) / 2);
   });
 
+  test("a seat out by the minute is behind, sampled or not", () => {
+    // --play-out and --together games go on sampling a dead seat, whose
+    // share is 0 but whose rank among two survivors is 3.
+    const dead = game(
+      seat({
+        result: "loss",
+        eliminatedAtTick: 1500,
+        standings: [
+          standing(3, 0, 3, 0, 0.5),
+          standing(10, 0, 3, 0, 0.6),
+          standing(20, 0, 3, 0, 0.8),
+        ],
+      }),
+      12000,
+    );
+    const s = summarize("x", rows([dead]), 0);
+    expect(s).toMatchObject({
+      top3At10: 0,
+      top3At10Games: 1,
+      // share 0 against a median of 0 would be "at the median".
+      m3AboveMedian: 0,
+      m3AboveTop: 0,
+      m3Games: 1,
+      eliminatedBefore20: 1,
+    });
+    // Out after minute 10: its minute-10 standing counts.
+    const late = game(
+      seat({
+        result: "loss",
+        eliminatedAtTick: 6600,
+        standings: [standing(3, 0.1, 2, 0.05, 0.2), standing(10, 0, 3, 0, 0.6)],
+      }),
+      12000,
+    );
+    expect(summarize("x", rows([late]), 0)).toMatchObject({
+      top3At10: 1,
+      m3AboveMedian: 1,
+    });
+  });
+
+  test("games that stopped on an error are counted apart", () => {
+    const stopped: SummaryGame = {
+      ...game(seat({ result: "error" }), 50),
+      error: "Error: boom",
+    };
+    const s = summarize(
+      "x",
+      rows([stopped, game(seat()), { ...game(seat()), error: null }]),
+      2,
+    );
+    expect([s.games, s.errored, s.crashed]).toEqual([3, 1, 2]);
+    const [header, , row] = summaryTable([s, summarize("none", [], 1)])
+      .split("\n")
+      .map((l) => l.split("|").map((c) => c.trim()));
+    const col = (name: string) => row[header.indexOf(name)];
+    expect([col("errored"), col("crashed")]).toEqual(["1", "2"]);
+  });
+
   test("no nation counts as above the top; nothing known is null", () => {
     const alone = game(seat({ standings: [standing(3, 0.3, 1, 0, null)] }));
     expect(summarize("x", rows([alone]), 0)).toMatchObject({
@@ -184,6 +244,20 @@ describe("summarize", () => {
     expect(col(b, "≥ top @3")).toBe("–");
     expect(col(b, "win time")).toBe("–");
     expect(col(b, "out < 20 min")).toBe("0.0% of 1");
+
+    // An entrant with no games (another entrant's --game rerun) shows no
+    // means over nothing.
+    const none = cells(summaryTable([summarize("c", [], 0)]).split("\n")[2]);
+    for (const name of [
+      "win rate (95% CI)",
+      "progress",
+      "peak land",
+      "placement",
+      "think p95",
+    ]) {
+      expect(col(none, name), name).toBe("–");
+    }
+    expect(col(none, "games")).toBe("0");
   });
 
   test("entrants: their own copies, or seat i of a --together game", () => {
@@ -333,4 +407,50 @@ test("provenance names the commit, or null without git", () => {
   expect(p.commit).toMatch(/^[0-9a-f]{40}$/);
   expect(typeof p.dirty).toBe("boolean");
   expect(provenance(os.tmpdir())).toEqual({ commit: null, dirty: null });
+  expect(codeFingerprint(os.tmpdir())).toBeNull();
+});
+
+test("the code fingerprint follows every edit of the decisive files", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "arena-code-"));
+  try {
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    const write = (file: string, text: string) => {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.writeFileSync(path.join(root, file), text);
+    };
+    git("init", "-q");
+    write("src/a.ts", "one");
+    write("docs/notes.md", "x");
+    git("add", ".");
+    git(
+      ...["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q"],
+      ...["-m", "start"],
+    );
+    const clean = codeFingerprint(root);
+    expect(clean).toMatch(/^[0-9a-f]{40}$/);
+    // Outside src, resources and the package files: no change.
+    write("docs/notes.md", "y");
+    expect(codeFingerprint(root)).toBe(clean);
+
+    // An edit, and another edit of the same dirty file, each tell; dirty
+    // alone says true for both.
+    write("src/a.ts", "two");
+    const edited = codeFingerprint(root);
+    expect(edited).not.toBe(clean);
+    write("src/a.ts", "three");
+    expect(codeFingerprint(root)).not.toBe(edited);
+    expect(provenance(root).dirty).toBe(true);
+    // A new file, and a staged edit, tell too; undoing all is clean again.
+    write("src/a.ts", "one");
+    expect(codeFingerprint(root)).toBe(clean);
+    write("src/b.ts", "new");
+    expect(codeFingerprint(root)).not.toBe(clean);
+    fs.rmSync(path.join(root, "src/b.ts"));
+    write("package.json", "{}");
+    git("add", "package.json");
+    expect(codeFingerprint(root)).not.toBe(clean);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

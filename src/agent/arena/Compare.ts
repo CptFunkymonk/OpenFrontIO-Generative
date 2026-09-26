@@ -968,6 +968,8 @@ function main(): void {
   );
   console.log(md);
   console.log(`Wrote ${path.join(dir, "compare.md")} and compare.json`);
+  // Nothing to compare is a failure a script must see, not a report.
+  if (report.paired === 0) process.exit(1);
 }
 
 if (isMain(import.meta.url)) {

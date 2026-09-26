@@ -3,11 +3,16 @@ import os from "os";
 import path from "path";
 import {
   ArenaJob,
+  checkReplay,
+  failedJobs,
   makeSpecs,
   parseArgs,
+  playing,
+  selection,
   selectJobs,
 } from "../../src/agent/arena/Arena";
 import { SUITE_NAMES, SUITES } from "../../src/agent/arena/Suites";
+import { CrashedGame, StoredGame } from "../../src/agent/arena/Summary";
 import { GameMapType, maps as MAP_INFO } from "../../src/core/game/Game";
 
 // The arena's command line: suites, --shard/--range/--game selection and
@@ -141,8 +146,8 @@ describe("suites", () => {
     expect(
       quick.maps.map((t) => MAP_INFO.find((m) => m.type === t)!.id),
     ).toEqual(
-      // docs/11-roadmap.md §11.5
-      "World,Europe,Africa,NorthAmerica,GiantWorldMap,Alps,TheBox,MiddleEast,ArchipelagoSea,Japan,FourIslands,BeringStrait,YellowSea,Onion,MississippiRiver,Passage".split(
+      // The maps of docs/11-roadmap.md §11.5, mixed by kind (Suites.ts).
+      "World,ArchipelagoSea,Alps,BeringStrait,Onion,Passage,Europe,FourIslands,Japan,TheBox,MississippiRiver,Africa,YellowSea,MiddleEast,GiantWorldMap,NorthAmerica".split(
         ",",
       ),
     );
@@ -157,6 +162,56 @@ describe("suites", () => {
     expect(DEFAULT_POOL).toHaveLength(127);
     expect(makeSpecs(parseArgs(["--suite", "dev"]))).toHaveLength(254);
     expect(makeSpecs(parseArgs(["--suite", "holdout"]))).toHaveLength(381);
+  });
+
+  test("quick's first 8 games, and its next 8, mix every kind of map", () => {
+    // What a tune's first cuts see (Tune.ts plays prefixes of the games).
+    const manifest = (t: GameMapType) => {
+      const id = MAP_INFO.find((m) => m.type === t)!.id.toLowerCase();
+      const file = path.join(__dirname, "../../resources/maps", id);
+      return JSON.parse(
+        fs.readFileSync(path.join(file, "manifest.json"), "utf8"),
+      ) as {
+        map: { width: number; height: number; num_land_tiles: number };
+        nations: unknown[];
+      };
+    };
+    const games = makeSpecs(parseArgs(["--suite", "quick"])).map(
+      (j) => j.spec.map,
+    );
+    const land = (t: GameMapType) => manifest(t).map.num_land_tiles;
+    const smallest = [...new Set(games)].sort((a, b) => land(a) - land(b))[0];
+    const kinds: Record<string, (t: GameMapType) => boolean> = {
+      continent: (t) =>
+        MAP_INFO.find((m) => m.type === t)!.categories.some(
+          (c) => c === "continental" || c === "world",
+        ),
+      "islands (< 10% land)": (t) => {
+        const m = manifest(t).map;
+        return m.num_land_tiles < 0.1 * m.width * m.height;
+      },
+      "all land": (t) => {
+        const m = manifest(t).map;
+        return m.num_land_tiles === m.width * m.height;
+      },
+      "400 wide": (t) =>
+        Math.min(manifest(t).map.width, manifest(t).map.height) <= 400,
+      "few nations": (t) => manifest(t).nations.length <= 8,
+    };
+    const lacking = (maps: GameMapType[], names: string[]) =>
+      names.filter((k) => !maps.some(kinds[k]));
+    const first = games.slice(0, 8);
+    expect(lacking(first, Object.keys(kinds))).toEqual([]);
+    expect(first).toContain(smallest);
+    expect(first.some((t) => manifest(t).nations.length === 2)).toBe(true);
+    expect(
+      lacking(games.slice(0, 4), [
+        "continent",
+        "islands (< 10% land)",
+        "all land",
+      ]),
+    ).toEqual([]);
+    expect(lacking(games.slice(8, 16), Object.keys(kinds))).toEqual([]);
   });
 
   test("every suite map is a real map with nations", () => {
@@ -208,6 +263,39 @@ describe("suites", () => {
     expect(parseArgs(["--suite", "dev", "--suite", "quick"]).seed).toBe(
       "quick",
     );
+    // A suite whose games the flags change is recorded as modified...
+    for (const argv of [
+      ["--suite", "smoke", "--maps", "Onion,Iceland"],
+      ["--suite", "smoke", "--max-minutes", "2"],
+      ["--suite", "quick", "--seed", "x"],
+      ["--suite", "quick", "--games", "3"],
+      ["--suite", "quick", "--repeat", "1"],
+      ["--suite", "quick", "--max-minutes", "5"],
+      ["--suite", "showcase", "--bots", "10"],
+    ]) {
+      expect(parseArgs(argv).suite, argv.join(" ")).toBe(
+        `${argv[1]} (modified)`,
+      );
+    }
+    // ...but not by the entrants, the selection, the output, or a value the
+    // suite has anyway.
+    for (const argv of [
+      ["--suite", "smoke", "--max-minutes", "10", "--isolate"],
+      ["--suite", "quick", "--agent", "idle", "--agent", "baseline"],
+      ["--suite", "quick", "--shard", "1/4", "--range", "0:9", "--game", "3"],
+      ["--suite", "showcase", "--image-every", "5", "--jobs", "2", "--quiet"],
+      [
+        "--suite",
+        "dev",
+        "--out",
+        "/tmp/x",
+        "--verbose",
+        "--timeline-every",
+        "5",
+      ],
+    ]) {
+      expect(parseArgs(argv).suite, argv.join(" ")).toBe(argv[1]);
+    }
     expect(() => parseArgs(["--suite", "nope"])).toThrow(/unknown suite/);
     expect(() => parseArgs(["--suite"])).toThrow(/missing value/);
   });
@@ -215,6 +303,55 @@ describe("suites", () => {
 
 describe("selection", () => {
   const run = ["--suite", "quick", "--agent", "baseline", "--agent", "idle"];
+
+  test("labels count games and jobs apart", () => {
+    const label = (...argv: string[]) => {
+      const o = parseArgs(argv);
+      const all = makeSpecs(o);
+      return `${playing(selectJobs(o, all))}${selection(o, all)}`;
+    };
+    const two = ["--agent", "idle", "--agent", "baseline", "--games", "4"];
+    expect(label(...two)).toBe("4 games × 2 entrants");
+    expect(label(...two, "--range", "2:3")).toBe(
+      "1 game × 2 entrants (games 2-2 of 4 games)",
+    );
+    expect(label(...two, "--shard", "0/2")).toBe(
+      "2 games × 2 entrants (shard 0/2 of 4 games)",
+    );
+    expect(label(...two, "--game", "3")).toBe("1 game (job 3 of 8 jobs)");
+    expect(label(...two, "--range", "1:3", "--game", "3")).toBe(
+      "1 game (games 1-2 of 4 games; job 3 of 8 jobs)",
+    );
+    expect(label(...two, "--together")).toBe("4 games");
+    expect(label("--games", "4")).toBe("4 games");
+  });
+
+  test("failed jobs are listed for summary.md", () => {
+    const [played] = makeSpecs(parseArgs(["--maps", "Onion", "--games", "3"]));
+    const game = (index: number, error: string | null) =>
+      ({
+        index,
+        map: played.spec.map,
+        gameID: `G${index}`,
+        gameMinutes: 1.5,
+        error,
+      }) as StoredGame;
+    const crash: CrashedGame = {
+      index: 1,
+      game: 1,
+      entrant: 0,
+      map: played.spec.map,
+      gameID: "G1",
+      crash: "worker exited (code 1, signal null)",
+    };
+    expect(
+      failedJobs([game(0, null), game(2, "Error: boom\n    at tick")], [crash]),
+    ).toEqual([
+      "- job 1, Onion G1: crashed: worker exited (code 1, signal null)",
+      "- job 2, Onion G2: stopped at 1.5 min on an error: Error: boom",
+    ]);
+    expect(failedJobs([game(0, null)], [])).toEqual([]);
+  });
 
   test("shards partition the games, every entrant's copy together", () => {
     const all = jobsOf(...run);
@@ -300,7 +437,8 @@ describe("--from", () => {
       "--verbose",
     ]);
     expect(o).toMatchObject({
-      suite: "quick",
+      // quick with a 20-minute cap is not the quick suite.
+      suite: "quick (modified)",
       seed: "quick",
       maxMinutes: 20,
       onlyGame: 7,
@@ -377,10 +515,124 @@ describe("--from", () => {
     expect(makeSpecs(replay).map(key)).toEqual(makeSpecs(now).map(key));
   });
 
+  test("flags given before --from win too; any --agent replaces", () => {
+    write({
+      argv: [
+        ...["--maps", "Onion,Iceland", "--agent", "baseline", "--agent"],
+        ...["idle", "--max-minutes", "2", "--jobs", "2"],
+      ],
+      config: {},
+    });
+    const before = parseArgs([
+      ...["--max-minutes", "5", "--jobs", "1", "--from", dir, "--game", "2"],
+    ]);
+    expect([before.maxMinutes, before.jobs, before.onlyGame]).toEqual([
+      5, 1, 2,
+    ]);
+    expect(before.entrants.map((e) => e.label)).toEqual(["baseline", "idle"]);
+    const agent = parseArgs(["--agent", "idle", "--from", dir]);
+    expect(agent.entrants.map((e) => e.label)).toEqual(["idle"]);
+    expect(agent.maxMinutes).toBe(2);
+  });
+
+  test("the run's map pool is pinned against a changed map list", () => {
+    // A dev run from before a map was added to the generated list: every
+    // later game of today's pool would be on the map after its own.
+    const pool = DEFAULT_POOL.filter((m) => m !== DEFAULT_POOL[5]);
+    const argv = ["--suite", "dev", "--agent", "baseline"];
+    const then = { ...parseArgs(argv), maps: pool };
+    const recorded = makeSpecs(then);
+    write({
+      argv,
+      config: { maps: pool, entrants: ["baseline"] },
+      games: recorded.map((j) => ({
+        index: j.spec.index,
+        game: j.game,
+        entrant: 0,
+        map: j.spec.map,
+        gameID: j.spec.gameID,
+      })),
+    });
+    // Today's dev suite puts game 10 elsewhere under the same game id.
+    const today = makeSpecs(parseArgs(argv))[10].spec;
+    expect(today.gameID).toBe(recorded[10].spec.gameID);
+    expect(today.map).not.toBe(recorded[10].spec.map);
+
+    const o = parseArgs(["--from", dir, "--game", "10"]);
+    const jobs = selectJobs(o, makeSpecs(o));
+    expect(jobs.map(key)).toEqual([key(recorded[10])]);
+    expect(makeSpecs(o)).toHaveLength(recorded.length);
+    // The pinned pool is not today's dev pool: not the dev suite now.
+    expect(o.suite).toBe("dev (modified)");
+    const head = { commit: "b".repeat(40), dirty: false };
+    expect(checkReplay(o.from!, jobs, head)).toEqual([]);
+
+    // Maps chosen with --from are not pinned over.
+    const own = parseArgs(["--from", dir, "--maps", "Onion"]);
+    expect(own.maps).toEqual([GameMapType.Onion]);
+  });
+
+  test("a rerun that would be another game is refused", () => {
+    const argv = ["--maps", "Onion,Iceland", "--games", "4", "--seed", "s"];
+    const jobs = makeSpecs(parseArgs(argv));
+    const games = jobs.map((j) => ({
+      index: j.spec.index,
+      game: j.game,
+      entrant: 0,
+      map: j.spec.map,
+      gameID: j.spec.gameID,
+    }));
+    const commit = "a".repeat(40);
+    // As if the run's seed had been a default that has changed since.
+    games[2] = { ...games[2], gameID: "Gchanged" };
+    write({ argv, config: {}, games, commit, dirty: true });
+    const head = { commit, dirty: false };
+    const rerun = (...flags: string[]) => {
+      const o = parseArgs(["--from", dir, ...flags]);
+      return checkReplay(o.from!, selectJobs(o, makeSpecs(o)), head);
+    };
+    expect(() => rerun("--game", "2")).toThrow(
+      /does not replay that run's games[\s\S]*game 2 was .* Gchanged, now /,
+    );
+    // Other games of the run still replay; the run's local changes are
+    // warned of.
+    expect(rerun("--game", "1")).toEqual([
+      "--from: that run played with local changes",
+    ]);
+    // The check is on the run's own flags: one given with --from neither
+    // causes a refusal nor hides one.
+    expect(() => rerun("--game", "2", "--seed", "t")).toThrow(/game 2 was/);
+    expect(rerun("--game", "1", "--seed", "t")).toHaveLength(1);
+    expect(
+      checkReplay(parseArgs(["--from", dir]).from!, [], {
+        commit: "c".repeat(40),
+        dirty: true,
+      }),
+    ).toEqual([
+      `--from: that run played on aaaaaaa, this checkout is ccccccc: its games may not replay exactly`,
+      "--from: that run played with local changes",
+      "--from: this checkout has local changes",
+    ]);
+  });
+
   test("needs a finished run", () => {
     expect(() => parseArgs(["--from", dir])).toThrow(/summary.json not found/);
     write({ argv: ["--games", "2"] });
     expect(() => parseArgs(["--from", dir, "--from", dir])).toThrow(/once/);
     expect(() => parseArgs(["--from"])).toThrow(/missing value/);
+  });
+});
+
+describe("agent options", () => {
+  test("a misspelled option is refused before any game plays", () => {
+    expect(() =>
+      parseArgs(["--agent", 'baseline:{"expandTrigr":0.3}']),
+    ).toThrow(/baseline has no option "expandTrigr"/);
+    expect(() => parseArgs(["--agent", 'idle:{"x":1}'])).toThrow(
+      /idle has no option "x" \(it takes none\)/,
+    );
+    expect(
+      parseArgs(["--agent", 'baseline:{"expandTrigger":0.3}']).entrants,
+    ).toHaveLength(1);
   });
 });

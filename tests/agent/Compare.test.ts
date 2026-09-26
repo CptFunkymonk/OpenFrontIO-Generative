@@ -124,7 +124,7 @@ function writePair(): { a: Run; b: Run } {
       job.entrant === 0 ? { ...at3(0.02), ...A_GAMES[job.game] } : {},
     ticks: (job) => (job.entrant === 0 ? ticks(A_GAMES, job.game) : 36000),
   });
-  writeRun(dir("b"), ["--agent", 'baseline:{"x":1}', ...POOL], {
+  writeRun(dir("b"), ["--agent", 'baseline:{"expandTrigger":0.3}', ...POOL], {
     seat: (job) => ({ ...at3(0.04), ...B_GAMES[job.game] }),
     ticks: (job) => ticks(B_GAMES, job.game),
     crash: [3],
@@ -152,7 +152,9 @@ describe("entrants and pairing", () => {
 
     // A run that never wrote summary.json names its entrants by its seats.
     fs.rmSync(path.join(dir("b"), "summary.json"));
-    expect(entrantLabels(readRun(dir("b")))).toEqual(['baseline:{"x":1}']);
+    expect(entrantLabels(readRun(dir("b")))).toEqual([
+      'baseline:{"expandTrigger":0.3}',
+    ]);
   });
 
   test("games pair by id whatever their order; the rest are listed", () => {
@@ -225,7 +227,7 @@ describe("the report", () => {
     );
     expect(r.a).toMatchObject({ label: "baseline", games: 6, crashed: 0 });
     expect(r.b).toMatchObject({
-      label: 'baseline:{"x":1}',
+      label: 'baseline:{"expandTrigger":0.3}',
       games: 5,
       crashed: 1,
     });
@@ -372,6 +374,61 @@ describe("the report", () => {
     expect(compareMarkdown(r)).toContain(
       "no difference shown (the interval includes 0)",
     );
+  });
+
+  test("a game crashed on both sides is unpaired, not left out", () => {
+    const args = ["--agent", "baseline", ...POOL];
+    writeRun(dir("a"), args, { crash: [1] });
+    writeRun(dir("b"), args, { crash: [1, 4] });
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(4);
+    expect(r.unpaired.map((u) => [u.game, u.reason, u.a, u.b])).toEqual([
+      [1, "crashed in both", 1, 1],
+      [4, "crashed in B", 4, 4],
+    ]);
+    const md = compareMarkdown(r);
+    expect(md).toContain("(A has 5, B 4; 2 unpaired)");
+    expect(md).toContain("| 1 | Iceland |");
+    expect(md).not.toContain("every game of both sides paired");
+
+    // A crash in one run whose other run never had the game.
+    const p = pairGames([], [], readRun(dir("a")).crashes, []);
+    expect(p.unpaired.map((u) => u.reason)).toEqual(["crashed in A, not in B"]);
+  });
+
+  test("games that stopped on an error are left out, loudly", () => {
+    const args = ["--agent", "baseline", ...POOL];
+    // Under --strict, B's agent threw in game 2 at minute 1.5.
+    writeRun(dir("a"), args, { seat: () => alive(0.2) });
+    writeRun(dir("b"), args, {
+      seat: (job) =>
+        job.game === 2 ? { result: "error", peakShare: 0.01 } : alive(0.3),
+      ticks: (job) => (job.game === 2 ? 900 : 36000),
+      error: (job) =>
+        job.game === 2 ? "Error: boom\n    at BaselineAgent.tick" : null,
+    });
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(5);
+    expect(r.unpaired.map((u) => [u.game, u.reason])).toEqual([
+      [2, "errored in B"],
+    ]);
+    // Without the cut-short game, B is better in every pair.
+    expect(r.peakShare.meanDelta).toBeCloseTo(0.1);
+    expect(r.survivalMinutes.worse).toBe(0);
+    expect(r.warnings).toEqual([
+      "1 game(s) stopped early on an error and are left out of the pairs, " +
+        "where each would weigh in as a quick loss: game 2 (World) in B " +
+        "Error: boom.",
+    ]);
+    expect(r.milestones.b.errored).toBe(0);
   });
 
   test("loud warnings: unknown, stale or dirty code, other settings", () => {

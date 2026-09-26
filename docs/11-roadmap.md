@@ -211,8 +211,10 @@ snapshots restore byte-identically
 (`tests/core/snapshot/FullGameSnapshot.test.ts`). A fork stepped with our
 intents therefore _is_ the future, with two caveats. Intents sent but not yet
 executed are not in the snapshot, so replay them into the fork's first step.
-And it is expensive: ~0.3 s to fork plus ~4 ms per tick on World mid-game
-(§10.6). Use it for the spawn (H1), strike go/no-go (H5) and alliance timing
+(At a latency above 1 tick each in-flight intent must go into the fork on the
+turn it was queued for, not all into the first step: pinned by
+`tests/agent/ForkFidelity.test.ts`.) And it is expensive: ~0.3–0.4 s to fork
+plus 3–4 ms per tick on World mid-game, 6–9 ms early. Use it for the spawn (H1), strike go/no-go (H5) and alliance timing
 (H6), never per tick.
 
 ## 11.4 Agent architecture
@@ -259,28 +261,39 @@ decide. Times are for one 4-core container:
 
 | Suite      | Contents                                                | Games per entrant | Wall time per entrant | Use                                   |
 | ---------- | ------------------------------------------------------- | ----------------- | --------------------- | ------------------------------------- |
-| `smoke`    | 4 small maps, `--isolate --strict`                      | 4                 | ~1 min                | every change                          |
+| `smoke`    | 4 small maps, `--isolate --strict`, 10-minute cap       | 4                 | ~1 min                | every change                          |
 | `showcase` | 6 fixed maps, played out, an image every minute (below) | 6                 | ~3 min                | every A/B and milestone: the pictures |
-| `quick`    | 16 maps × 2 seeds (below)                               | 32                | ~7 min                | screening: drop clearly worse ideas   |
-| `dev`      | all 127 maps × 2 seeds                                  | 254               | ~50 min               | the adoption test                     |
-| `holdout`  | all 127 maps × 3 seeds never used in tuning             | 381               | ~75 min               | milestone sign-off and Done           |
+| `quick`    | 16 maps × 2 seeds (below)                               | 32                | ~4–13 min             | screening: drop clearly worse ideas   |
+| `dev`      | all 127 maps × 2 seeds                                  | 254               | ~40–105 min           | the adoption test                     |
+| `holdout`  | all 127 maps × 3 seeds never used in tuning             | 381               | ~60–160 min           | milestone sign-off and Done           |
+
+`npm run arena -- --suite NAME` plays a suite (`src/agent/arena/Suites.ts`);
+any flag given as well overrides the suite's. The low wall times are for an
+agent that dies early, like the baseline (measured 2026-09-26: `quick` 4.2
+min, `showcase` 2.8 min). An agent that survives keeps the game going until a
+nation wins, ~92 s of wall time per game, which is the high end. Opening
+work (M2) caps games with `--max-minutes 4`, which costs about a quarter.
 
 `quick` maps, chosen to span the pool: World, Europe, Africa, NorthAmerica,
 GiantWorldMap (107 nations), Alps and TheBox (all land, no ports),
 MiddleEast (3.4M land tiles), ArchipelagoSea and Japan (6–8% land),
 FourIslands, BeringStrait and YellowSea (2 and 8 nations, won by a nation in
 10–21 and 15 min), Onion (smallest), MississippiRiver and Passage (400 tiles
-wide).
+wide). They play in a mixed order (World, ArchipelagoSea, Alps, BeringStrait,
+Onion, Passage, Europe, FourIslands, Japan, TheBox, MississippiRiver, Africa,
+YellowSea, MiddleEast, GiantWorldMap, NorthAmerica) because a tune's first
+rounds play only the first games. `smoke` is Onion, ArchipelagoSea,
+FourIslands and BeringStrait: small maps covering all land, islands and the
+duel.
 
 `showcase` maps, seed `showcase`: World, Europe, Alps, ArchipelagoSea,
 BeringStrait, Mena. That covers continents with many nations, all land,
-islands, a two-nation duel, and a crowded map where nations nuke early.
-Until `--suite` exists (§11.7):
+islands, a two-nation duel, and a crowded map where nations nuke early. It
+plays the same games as the M0 ledger rows:
 
 ```bash
-npm run arena -- --agent CHAMPION --agent CHALLENGER --each-map \
-  --maps World,Europe,Alps,ArchipelagoSea,BeringStrait,Mena --seed showcase \
-  --play-out --image-every 1 --out arena-results/showcase-CHANGE
+npm run arena -- --suite showcase --agent CHAMPION --agent CHALLENGER \
+  --out arena-results/showcase-CHANGE
 npm run arena:gallery -- arena-results/showcase-CHANGE
 ```
 
@@ -291,11 +304,27 @@ Primary: win rate with its Wilson interval. Until wins exist: `progress`
 15, eliminations, survival time. Once winning: time to win, against the minute
 a nation wins the same game with `idle` in our seat.
 
+Every game records `standings` at minutes 1, 2, 3, 5, 7, 10, 15, 20, 25, 30,
+40, 50 and 60 (our share and rank, the median and top nation's share),
+`received` (attacks by attacker type, nukes, who took our last tiles) and
+`attacks`, our own attack log (target, troops sent and lost, tiles gained,
+how it ended). Summaries turn them into the milestone rates: ≥ median and ≥
+top nation at minute 3 (M2), eliminated before minute 20 and top 3 at minute
+10 (M3), and the median minute of our wins (M5). An attack's `tilesGained`
+counts tiles that moved from its target to us while it ran, so it includes
+enclosed pockets and misses tiles taken from players we were not attacking
+(`tilesUncredited` keeps the rest).
+
 ### Comparisons
 
 The same seed gives every entrant the same maps and game IDs, so comparisons
-are paired. Report discordant wins (sign test) and mean Δprogress with a
-bootstrap 95% interval, beside the better/worse split. Screen on `quick` and
+are paired. `npm run arena:compare -- DIR_A DIR_B` (with `--entrant-a` and
+`--entrant-b` when a run holds several entrants) pairs games by game ID and
+reports discordant wins (sign test) and mean Δprogress, Δpeak land and
+Δsurvival, each with a bootstrap 95% interval beside the better/worse split,
+plus the milestone rates below, a per-category and per-map breakdown, the
+games B lost most in (with the command that reruns each with pictures), and
+a warning when either side ran on uncommitted or different code. Screen on `quick` and
 stop if the challenger is clearly worse. Adopt a change only on `dev`: the
 difference must be positive with the interval excluding zero, `smoke` must
 pass, and the `showcase` gallery must show what the numbers claim. Confirm
@@ -379,62 +408,57 @@ One container plays ~4.8 games per wall minute (~290 an hour), so `dev` costs
    then only plays the challenger. Recording the commit in every run
    (§11.7 item 2) makes a stale one detectable.
 2. **Screen on `quick` first**; only survivors go to `dev`.
-3. **Shard big runs across cloud sessions** (`--shard i/n`, §11.7): four
-   sessions bring `dev` to ~13 min and `holdout` to ~20 min. Merge the
-   shards before comparing.
+3. **Shard big runs across cloud sessions** (`--shard i/n`): four sessions
+   bring `dev` to a quarter of its time. `npm run arena:merge -- --out DIR
+SHARD...` joins the shards into one run before comparing; `--range a:b`
+   plays a slice of the game numbers the same way.
 
 A 16-config sweep on `quick` takes ~1.8 h on one container.
 
 ## 11.6 Milestones
 
-|     | Milestone            | Deliverables                                                                                 | Exit criterion                                                                               | Status              |
-| --- | -------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------- |
-| M0  | Ground truth         | environment verified, baseline measured, this plan, the ledger, the first `showcase` gallery | —                                                                                            | **done** 2026-09-26 |
-| M1  | Measurement          | the §11.7 tooling; the baseline's `dev` run, kept for reuse                                  | one command per suite; paired report; fork-fidelity test green                               |                     |
-| M2  | Opening              | H1, H2, H3 in a new agent                                                                    | at minute 3, land ≥ the median nation's in ≥ 80% of `dev` games, ≥ the top nation's in ≥ 50% |                     |
-| M3  | Survival             | H4, defensive H6, SAM cover against the early nukes (H8)                                     | eliminated before minute 20 in < 10% of `dev` games; top-3 land at minute 10 in ≥ 70%        |                     |
-| M4  | Conquest and economy | H5, H7                                                                                       | first wins; ≥ 25% on `dev`                                                                   |                     |
-| M5  | Closing              | the MIRV threat (H8), a faster snowball                                                      | ≥ 60% on `dev`; median time to win under 22.9 min (the nations' median)                      |                     |
-| M6  | Any map              | H9, the weakest categories fixed, big-map think time                                         | `dev` ≥ 80%, no category under 60%, no map lost on both seeds                                |                     |
-| M7  | Browser              | the autopilot plays to a win on 3 maps including World, within budget                        | a recorded run per map, no divergence                                                        |                     |
-| —   | **Done**             |                                                                                              | `holdout` ≥ 90%, every map won in ≥ 2 of 3 seeds                                             |                     |
+|     | Milestone            | Deliverables                                                                                 | Exit criterion                                                                               | Status                  |
+| --- | -------------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------- |
+| M0  | Ground truth         | environment verified, baseline measured, this plan, the ledger, the first `showcase` gallery | —                                                                                            | **done** 2026-09-26     |
+| M1  | Measurement          | the §11.7 tooling; the baseline's `dev` run, kept for reuse                                  | one command per suite; paired report; fork-fidelity test green                               | tooling done 2026-09-26 |
+| M2  | Opening              | H1, H2, H3 in a new agent                                                                    | at minute 3, land ≥ the median nation's in ≥ 80% of `dev` games, ≥ the top nation's in ≥ 50% |                         |
+| M3  | Survival             | H4, defensive H6, SAM cover against the early nukes (H8)                                     | eliminated before minute 20 in < 10% of `dev` games; top-3 land at minute 10 in ≥ 70%        |                         |
+| M4  | Conquest and economy | H5, H7                                                                                       | first wins; ≥ 25% on `dev`                                                                   |                         |
+| M5  | Closing              | the MIRV threat (H8), a faster snowball                                                      | ≥ 60% on `dev`; median time to win under 22.9 min (the nations' median)                      |                         |
+| M6  | Any map              | H9, the weakest categories fixed, big-map think time                                         | `dev` ≥ 80%, no category under 60%, no map lost on both seeds                                |                         |
+| M7  | Browser              | the autopilot plays to a win on 3 maps including World, within budget                        | a recorded run per map, no divergence                                                        |                         |
+| —   | **Done**             |                                                                                              | `holdout` ≥ 90%, every map won in ≥ 2 of 3 seeds                                             |                         |
 
 Cross-cutting from M2 on: **tuning** (`npm run tune`, successive halving over
 option sets on `quick`, finalists on `dev`) and **lookahead** (H10). Both are
 adopted only through the same paired test.
 
-## 11.7 Tooling backlog (M1)
+## 11.7 Tooling (M1)
 
-Landed 2026-09-26: `--each-map [--repeat R]` (every map in the pool once per
-repeat instead of random draws), `npm run arena:gallery` with rows labelled
-by what changed, and `npm run arena:progress` with the gallery page (§11.5,
-Looking at the games and Where the pictures live).
+All of it landed on 2026-09-26, in `src/agent/arena/` unless noted, and
+was checked end to end: the full smoke suite, its two shards merged, and
+`--game` reruns all replay byte for byte, and the `plan-check` and M0
+`showcase` ledger rows reproduce exactly.
 
-Next, in order, in `src/agent/arena/` unless noted:
+| Tool                                               | What it does                                                                                                                                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--each-map [--repeat R]`                          | every map in the pool once per repeat instead of random draws                                                                                                                            |
+| `--suite NAME` (`Suites.ts`)                       | the §11.5 presets; explicit flags override them                                                                                                                                          |
+| provenance                                         | `summary.json` records the commit, whether `src`, `resources` or the lockfile were dirty, whether the code changed during the run, the suite, the selection and the command line         |
+| `--shard i/n`, `--range a:b`, `arena:merge`        | play part of a run's games (never changing which map or game ID a game gets) and join the parts into one run                                                                             |
+| `arena:compare` (`Compare.ts`)                     | the paired report of §11.5 Comparisons; exits 1 when nothing pairs                                                                                                                       |
+| `--game N`, `--from DIR`                           | rerun one game of a stored run, e.g. `--from DIR --game 7 --images --image-every 1 --verbose`; refuses if this checkout would give that game another map or game ID                      |
+| standings, received, attack log (`Recorder.ts`)    | §11.5 Metrics; exact tile crediting from each tick's tile updates, under 1% of arena time                                                                                                |
+| fork fidelity (`tests/agent/ForkFidelity.test.ts`) | a fork stepped with the real game's intents stays hash- and snapshot-identical: 600 ticks on Onion (through the spawn too) and 100 on World at tick 3,000 with nukes and ships in flight |
+| fork time                                          | `stats.forkMs` apart from `thinkMs`; a World fork takes ~0.3–0.4 s at any tick, and a fork steps at 3–4 ms a tick mid-game, 6–9 early                                                    |
+| `npm run tune` (`Tune.ts`)                         | successive halving over a JSON list of entrants on a suite's first games, reusing earlier rounds' games; writes `tune.md`                                                                |
+| `arena:gallery`, `arena:progress`                  | the pictures (§11.5 Looking at the games)                                                                                                                                                |
+| option check                                       | an agent option the agent does not have is refused before any game plays, so an A/B cannot measure a typo                                                                                |
 
-1. `--suite smoke|showcase|quick|dev|holdout`: named presets for maps, seeds
-   and flags (§11.5).
-2. The git commit (and whether the tree was dirty) in `summary.json`, so a
-   reused champion run is known to be valid.
-3. `--shard i/n`, and `npm run arena:merge` to join shard directories into one
-   run: how hundreds of games spread over several sessions.
-4. `npm run arena:compare -- dirA dirB`: the paired report from two result
-   directories (merged shards included) run with the same seed, so a stored
-   champion run and versions from different commits compare without frozen
-   copies in the registry.
-5. `--game N`: rerun one game of a run by index, with images and verbose
-   agent logs, to look at a loss.
-6. Timeline: land share and rank among nations at fixed minutes; the leading
-   nation's share; attacks received by attacker type; nukes and MIRVs
-   received; who took our last tiles.
-7. Attack log per game: target, troops sent, tiles gained, troops lost, and
-   how it ended (burned out, retreated, frontier emptied, cancelled by a
-   counter-attack).
-8. A fork-fidelity test (`tests/agent/`): fork, step the fork and the real game
-   with identical intents for N ticks, compare hashes.
-9. Fork time reported separately from think time.
-10. `npm run tune`: successive halving over a JSON list of option sets,
-    writing a ranked table.
+Known limits: an attack's `tilesGained` is attribution by target (§11.5
+Metrics); `--from` replays the stored command line against today's code and
+warns when that differs from the run's commit; an agent exception or a
+replica divergence under `--strict`/`--isolate` makes the arena exit 2.
 
 ## 11.8 Risks
 

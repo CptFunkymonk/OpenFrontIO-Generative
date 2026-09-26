@@ -26,7 +26,7 @@ import {
 } from "../../core/game/Game";
 import { PseudoRandom } from "../../core/PseudoRandom";
 import { simpleHash } from "../../core/Util";
-import { AGENTS } from "../agents";
+import { AGENTS, createAgent } from "../agents";
 import { ArenaGameResult, ArenaGameSpec, SeatSpec } from "./ArenaGame";
 import type { ArenaWorkerRequest } from "./ArenaWorker";
 import { isMain } from "./Cli";
@@ -203,6 +203,7 @@ function parseEntrant(arg: string): Entrant {
   }
   if (colon < 0) return { label: name, seat: { agent: name } };
   const options = JSON.parse(arg.slice(colon + 1)) as Record<string, unknown>;
+  createAgent(name, options); // refuses unknown options before any game plays
   return { label: arg, seat: { agent: name, options } };
 }
 
@@ -267,10 +268,10 @@ function recordedArgv(summary: RecordedRun, dir: string): string[] {
 
 /**
  * Replaces `--from DIR` with that run's flags (see --help), followed by the
- * flags given with it, before or after it, so those win. The map pool the
- * run resolved is pinned unless the flags given choose maps themselves: a map
- * added to the generated list since would otherwise move every later game of
- * a default-pool run (dev, holdout) to another map under the same game id.
+ * flags given with it, before or after it, so those win. The map pool of a
+ * run that played the default pool (dev, holdout) is pinned unless the flags
+ * given choose maps themselves: a map added to the generated list since
+ * would otherwise move every later game to another map under the same id.
  */
 function expandFrom(argv: string[]): { args: string[]; from: FromRun | null } {
   const at = argv.indexOf("--from");
@@ -291,10 +292,12 @@ function expandFrom(argv: string[]): { args: string[]; from: FromRun | null } {
     if (dropped.has(loaded[i])) i++;
     else replay.push(loaded[i]);
   }
+  // A run that named its maps is pinned already.
   const maps = summary.config?.maps;
   if (
     Array.isArray(maps) &&
     maps.length > 0 &&
+    !replay.includes("--maps") &&
     !given.includes("--maps") &&
     !given.includes("--suite")
   ) {
@@ -780,14 +783,15 @@ export function checkReplay(
   head: { commit: string | null; dirty: boolean | null },
 ): string[] {
   const run = readRecorded(from.dir);
-  const entrants = run.config?.together
-    ? 1
-    : (run.config?.entrants.length ?? 1);
+  // Runs from before M1 record no game number: derive it from the index.
+  const perGame = () =>
+    run.config === undefined || run.config.together
+      ? 1
+      : run.config.entrants.length;
   const recorded = new Map<number, { map: string; gameID: string }>();
   for (const g of run.games ?? []) {
-    // Runs from before M1 record no game number: derive it from the index.
     const game =
-      (g as { game?: number }).game ?? Math.floor(g.index / entrants);
+      (g as { game?: number }).game ?? Math.floor(g.index / perGame());
     recorded.set(game, g);
   }
   const replay = new Map<number, ArenaJob>();
