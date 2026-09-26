@@ -1,6 +1,6 @@
 import { Game, Player } from "../core/game/Game";
 import { PseudoRandom } from "../core/PseudoRandom";
-import { ClientID, Intent } from "../core/Schemas";
+import { ClientID, GameID, Intent } from "../core/Schemas";
 import { GameFork } from "./Fork";
 
 /**
@@ -48,6 +48,13 @@ export interface AgentContext {
   /** The full game state. READ-ONLY, see the rule on `Agent`. */
   readonly game: Game;
   readonly clientID: ClientID;
+  /**
+   * The game's ID (`GameStartInfo.gameID`). Every client knows it. The
+   * simulation seeds each nation's private random stream from it
+   * (`NationExecution`), so an agent can replay a nation's fixed per-game
+   * parameters from it.
+   */
+  readonly gameID: GameID;
   /** This agent's player. Exists from the first tick, before spawning. */
   readonly me: Player;
   /** Current game tick (`game.ticks()`). */

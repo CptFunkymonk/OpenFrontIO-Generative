@@ -21,6 +21,7 @@ bootstrap 95% interval.
 | 2026-09-26 | `a535bc8` | `baseline`                                            | 6 `showcase`, play-out            | 0    | 0.090    | 7.2%      | 4          | the M0 picture, [`progress/2026-09-26-m0-baseline.jpg`](progress/2026-09-26-m0-baseline.jpg): level with the top nation at minute 1 on 3 of 6 maps, half its land by minute 3, then stalls and is eaten (minutes 6–14); stuck on its islands on ArchipelagoSea; tribes hold 37–96% of the land at minute 1; nukes from minutes 4–7 |
 | 2026-09-26 | `f959d1f` | `baseline:{"expandTrigger":0.25,"expandReserve":0.1}` | 6 `showcase`, play-out            | 0    | 0.126    | 10.1%     | 4          | against the defaults on the same games (0.090, 7.2%, 4 out): survives longer (Europe out at 23.7 min against 6.9) but grows only on Mena (13.3%); [gallery](progress/2026-09-26-expand-reserve-sweep.jpg)                                                                                                                          |
 | 2026-09-26 | `f959d1f` | `baseline:{"expandTrigger":0.5,"expandReserve":0.42}` | 6 `showcase`, play-out            | 0    | 0.119    | 9.5%      | 3          | survives World and Mena to the end but dies early on ArchipelagoSea (13.5 min) and Alps (5.6); the reserve moves survival, not the stall. Same gallery                                                                                                                                                                             |
+| 2026-09-26 | `f33c228` | `baseline`                                            | 254 `dev`, `--max-minutes 4`      | 0    | 0.059    | 4.7%      | 28         | the stored M2 reference (`arena-results/dev4-baseline`, 26 min wall): at minute 3 ≥ median nation in 31.1% of games, ≥ top nation in 0%; think p95 ≤ 0.5 ms. Marked dirty only because the `apex` skeleton was being added during the run; the baseline's code did not change                                                      |
 
 Reproduce:
 
@@ -37,6 +38,7 @@ npm run arena -- --agent baseline --agent 'baseline:{"expandTrigger":0.25,"expan
   --play-out --image-every 1 --maps World,Europe,Alps,ArchipelagoSea,BeringStrait,Mena \
   --out arena-results/showcase-reserve-sweep
 npm run arena:gallery -- arena-results/showcase-reserve-sweep
+npm run arena -- --suite dev --agent baseline --max-minutes 4 --out arena-results/dev4-baseline
 ```
 
 The same seed replays the same games, so the 20-game reserve sweep (third

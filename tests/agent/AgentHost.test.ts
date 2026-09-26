@@ -143,6 +143,15 @@ describe("AgentHost", () => {
     host.tick();
     expect(seen).toBe(true);
   });
+
+  test("tells the agent the game's ID", () => {
+    let seen: string | null = null;
+    const { host } = makeHost(runner, (ctx) => {
+      seen = ctx.gameID;
+    });
+    host.tick();
+    expect(seen).toBe(gameStart.gameID);
+  });
 });
 
 describe("GameFork", () => {

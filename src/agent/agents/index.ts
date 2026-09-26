@@ -1,5 +1,7 @@
 import { Agent, AgentContext, AgentFactory } from "../Agent";
 import { planSpawn } from "../lib/SpawnPlanner";
+import { ApexAgent } from "./apex";
+import { parseApexOptions } from "./apex/options";
 import { BaselineAgent, BaselineOptions } from "./BaselineAgent";
 
 /** Spawns on the best-scored tile, then does nothing. A lower bound. */
@@ -22,6 +24,7 @@ export const AGENTS: Record<string, AgentFactory> = {
   baseline: (options) =>
     new BaselineAgent((options ?? {}) as Partial<BaselineOptions>),
   idle: () => new IdleAgent(),
+  apex: (options) => new ApexAgent(parseApexOptions(options)),
 };
 
 export function createAgent(

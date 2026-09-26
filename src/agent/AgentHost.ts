@@ -263,6 +263,7 @@ export class AgentHost {
     return {
       game,
       clientID: this.opts.clientID,
+      gameID: this.opts.gameStart.gameID,
       me: this.me(),
       tick: game.ticks(),
       random: this.random,
