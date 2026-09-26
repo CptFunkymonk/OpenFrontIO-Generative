@@ -31,6 +31,7 @@ export default [
         projectService: {
           allowDefaultProject: [
             "__mocks__/fileMock.js",
+            "docs/agent/build.mjs",
             "eslint.config.js",
             "scripts/sync-assets.mjs",
             "tests/matchmaking/*.mjs",
