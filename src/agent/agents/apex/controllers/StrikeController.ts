@@ -11,13 +11,14 @@ import { Prio } from "../../../lib/Scheduler";
 import {
   conquestStack,
   isVulture,
-  minimumStack,
   planStrike,
   postLossFactor,
   retaliationBound,
   retreatReason,
   StrikeSizing,
   StrikeWindowName,
+  strikeYield,
+  topUpReason,
   WindowInput,
 } from "../../../lib/StrikeWindows";
 import type { NeighborInfo } from "../../../lib/WorldModel";
@@ -127,7 +128,9 @@ export function strikeStack(
 //   retreats our attack), no plan or stack of ours on it, not called back
 //   within STRIKE_REST ticks, at least o.strikeMinContact contact, and with
 //   o.strikeNukeVeto no finished silo and atom-bomb gold while we own a
-//   city (a nation nukes the largest attacker first, §5.0).
+//   city (a nation nukes the largest attacker first, §5.0). With
+//   o.strikeLiveCheck the contact is counted live and a request to it
+//   queued this tick (the DefenseController's recall) blocks too.
 // - The stack is planStrike's: the conquest stack T1/ratio·margin (T1 its
 //   troops at d1, its first decision to see the attack: launched now, the
 //   attack runs rate − 1 ticks unseen), at least the kill cost, plus its
@@ -137,7 +140,8 @@ export function strikeStack(
 //   home stays above every other unallied bordering nation's land line
 //   (troopsAt/1.1 where its gates are open, at its decision
 //   o.strikeDetHorizon ticks ahead) and 0.34× each bordering ally's troops
-//   (betrayal).
+//   (betrayal); with o.strikeDetNearTarget also above those of the
+//   nations bordering the target, which the conquest makes ours.
 // - Value: tiles expected (all of them and gold/strikeGoldPerTile on a
 //   kill, else the stack's worth at the loss per tile) per troop spent (on
 //   a kill the tiles' losses and the answer's cancel, the rest comes home;
@@ -148,17 +152,28 @@ export function strikeStack(
 //   range of the target's finished defense posts costs
 //   defensePostDefenseBonus× (postCover): nations post the front of any
 //   land attack above 35% of their troops (NationStructureBehavior), so
-//   long strikes meet posts within about 65 ticks.
+//   long strikes meet posts within about 65 ticks. With o.strikeReachModel
+//   the loss is read at the real ratio too, and the tiles over the
+//   target's land reachable from our border (reachableTiles): a kill needs
+//   all of it, and a pocket that runs out first sends the rest home
+//   (strikeYield).
 // - Top-ups: TOPUP_LEAD ticks before each decision of a nation we strike
 //   (sent then, the top-up inits before the decision and is seen there),
 //   the stack is raised to the conquest stack for its troops and answer
 //   there (0 below its reserve, when locked, or when another attack on it
 //   is larger than ours), if the purse can bring it back to ratio
-//   maxRatio or lift it above an answer that would delete it; else the
-//   attack runs on with what it has. With o.strikePosts, never into a
-//   front posted at o.strikePostCover or more unless it makes the kill.
-//   The ExpansionController's generic top-ups of "strike" plans (§3.6.2)
-//   run too; they want no more than these.
+//   maxRatio or lift it above an answer that would delete it (with
+//   o.strikeSaveOpenOnly only at an open gate, and only to a stack within
+//   maxRatio or able to kill); else the attack runs on with what it has.
+//   With o.strikePosts, never into a front posted at o.strikePostCover or
+//   more unless it makes the kill. The budget is strikeBudget's, the
+//   deterrence floor recomputed at each top-up.
+// - Not these: the ExpansionController's generic top-ups (§3.6.2) also
+//   feed every plan of kind "strike", every tribeTopUpEvery ticks at the
+//   tribe sizing from purse.available("strike") alone, so they bypass the
+//   deterrence floor (review of A1: 21 sends, 2.08M troops over 8 of 42
+//   strikes). Wiring for ExpansionController.topUps, not in this file:
+//   skip plans of kind "strike" when o.strikes is on.
 // - Reviews (o.strikeRetreat): one tick after each decision of a nation we
 //   strike, a stack that can no longer kill is called back (cancel_attack)
 //   when posts cover o.strikePostCover of the front or the nation holds
@@ -324,9 +339,17 @@ export function windowInput(
  * 1)/sendCapSafe [PIN NationSendCap]; for each bordering ally, BETRAY_SHARE
  * of its troops (at d with the horizon). 0 where no home deters
  * (sendCapSafe Infinity: Easy, Medium).
+ *
+ * With o.strikeDetNearTarget, also the nations that border the target
+ * `except` (targetNeighbours): the conquest makes them ours while the
+ * stack is away. They are read as at a decision of theirs that sees us as a
+ * neighbour: unallied ones at their land line unless below their reserve
+ * (the free-land lock is not read: their state may be one full refresh
+ * old, and their free land may be gone by the time they border us), allies
+ * at the betrayal line.
  */
 export function deterrenceFloor(
-  v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick">,
+  v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models">,
   except: PlayerID | null,
 ): number {
   if (!v.o.strikeDeterrence) return 0;
@@ -334,11 +357,13 @@ export function deterrenceFloor(
   if (!Number.isFinite(safe)) return 0;
   const horizon = Math.max(0, v.o.strikeDetHorizon);
   let floor = 0;
+  const seen = new Set<PlayerID>();
   for (const info of v.wm.nations) {
     if (info.type !== PlayerType.Nation || info.id === except) continue;
     if (!v.game.hasPlayer(info.id)) continue;
     const N = v.game.player(info.id);
     if (!N.isAlive()) continue;
+    seen.add(info.id);
     const d = v.nm.nextDecision(info.id, v.tick + horizon);
     if (v.me.isFriendly(N)) {
       const T = horizon > 0 ? v.nm.troopsAt(info.id, d) : N.troops();
@@ -349,7 +374,44 @@ export function deterrenceFloor(
     if (g === "locked" || g === "belowReserve") continue;
     floor = Math.max(floor, (v.nm.troopsAt(info.id, d) + 1) / safe);
   }
+  if (!v.o.strikeDetNearTarget || except === null) return floor;
+  for (const N of targetNeighbours(v, except)) {
+    const id = N.id();
+    if (seen.has(id)) continue;
+    const d = v.nm.nextDecision(id, v.tick + horizon);
+    if (v.me.isFriendly(N)) {
+      const T = horizon > 0 ? v.nm.troopsAt(id, d) : N.troops();
+      floor = Math.max(floor, BETRAY_SHARE * T);
+      continue;
+    }
+    const T = v.nm.troopsAt(id, d);
+    if (T < v.nm.params(id).reserve * v.models.cap(N)) continue;
+    floor = Math.max(floor, (T + 1) / safe);
+  }
   return floor;
+}
+
+/** The live nations (type Nation) in the target's nearby() but us and the
+ *  target: its land neighbours and those across a river, the players its
+ *  land attacks can reach, as ours can once we hold its land (read-only:
+ *  nearby() memoizes per territory version, as NationModel's full refresh
+ *  reads it). Empty for a dead or unknown target. */
+export function targetNeighbours(
+  v: Pick<View, "game" | "me">,
+  target: PlayerID,
+): Player[] {
+  if (!v.game.hasPlayer(target)) return [];
+  const T = v.game.player(target);
+  if (!T.isAlive()) return [];
+  const out: Player[] = [];
+  for (const x of T.nearby()) {
+    if (!x.isPlayer()) continue;
+    const N = x as Player;
+    if (N === v.me || N === T || N.type() !== PlayerType.Nation) continue;
+    if (!N.isAlive()) continue;
+    out.push(N);
+  }
+  return out.sort((a, b) => a.smallID() - b.smallID());
 }
 
 /** Troops a strike on `target` may spend now: purse.available("strike"),
@@ -462,6 +524,104 @@ export function nukeRisk(v: Pick<View, "models" | "me">, N: Player): boolean {
   return N.gold() >= v.models.unitCost(N, UnitType.AtomBomb);
 }
 
+/** The most tiles reachableTiles walks (o.strikeReachModel): at 4
+ *  neighbour reads a tile, about 1 ms. A target with more reachable land
+ *  counts as reaching whatever the stack can pay for. */
+export const REACH_CAP = 1 << 14;
+/** Slots of ReachSet: a power of two, twice REACH_CAP. */
+const REACH_SLOTS = REACH_CAP << 1;
+
+/** A reusable open-addressing set of tile refs (at most REACH_CAP), the
+ *  BFS's visited set: a native Set of 16k tiles costs 4-8 ms a walk. */
+export class ReachSet {
+  private readonly slots = new Int32Array(REACH_SLOTS).fill(-1);
+  private readonly used: number[] = [];
+
+  get size(): number {
+    return this.used.length;
+  }
+
+  /** Adds t; false if it was there. */
+  add(t: TileRef): boolean {
+    const mask = REACH_SLOTS - 1;
+    let i = (Math.imul(t, 0x9e3779b1) >>> 16) & mask;
+    for (;;) {
+      const x = this.slots[i];
+      if (x === t) return false;
+      if (x === -1) {
+        this.slots[i] = t;
+        this.used.push(i);
+        return true;
+      }
+      i = (i + 1) & mask;
+    }
+  }
+
+  clear(): void {
+    for (const i of this.used) this.slots[i] = -1;
+    this.used.length = 0;
+  }
+}
+
+/**
+ * The tiles of N an attack of ours can reach (o.strikeReachModel): its
+ * 4-neighbour components that touch our land. AttackExecution conquers
+ * only a target tile with a 4-neighbour of ours, and when none is left it
+ * retreats with no malus, so the rest comes home (AttackExecution.ts
+ * :302-326). Walked breadth-first from our border, at most
+ * min(cap, REACH_CAP) tiles: Infinity when the walk stops at that bound
+ * short of N's size (at least that many), else the exact count. Read-only.
+ */
+export function reachableTiles(
+  game: Game,
+  me: Player,
+  N: Player,
+  cap: number = REACH_CAP,
+  set: ReachSet = new ReachSet(),
+): number {
+  const them = N.smallID();
+  const size = N.numTilesOwned();
+  const limit = Math.max(1, Math.min(cap, REACH_CAP, size));
+  set.clear();
+  const queue: TileRef[] = [];
+  const visit = (n: TileRef) => {
+    if (set.size >= limit || game.ownerID(n) !== them) return;
+    if (set.add(n)) queue.push(n);
+  };
+  for (const b of me.borderTiles()) {
+    game.forEachNeighbor(b, visit);
+    if (set.size >= limit) break;
+  }
+  for (let i = 0; i < queue.length && set.size < limit; i++) {
+    game.forEachNeighbor(queue[i], visit);
+  }
+  const n = set.size;
+  set.clear();
+  return n >= limit && n < size ? Infinity : n;
+}
+
+/** Whether our land touches N's in at least `need` adjacency pairs now
+ *  (our border tile, its tile; as NeighborInfo.contact counts them), a
+ *  live count that stops at `need` (o.strikeLiveCheck). Read-only. */
+export function contactAtLeast(
+  game: Game,
+  me: Player,
+  N: Player,
+  need: number,
+): boolean {
+  if (need <= 0) return true;
+  const them = N.smallID();
+  let pairs = 0;
+  const count = (n: TileRef) => {
+    if (game.ownerID(n) === them) pairs++;
+  };
+  for (const b of me.borderTiles()) {
+    game.forEachNeighbor(b, count);
+    if (pairs >= need) return true;
+  }
+  return false;
+}
+
 interface Candidate {
   info: NeighborInfo;
   N: Player;
@@ -479,6 +639,9 @@ interface Candidate {
  */
 export class StrikeController implements Controller {
   readonly name = "strike";
+  /** reachableTiles' scratch (o.strikeReachModel); holds nothing between
+   *  calls. */
+  private readonly reachSet = new ReachSet();
 
   onTick(v: View, s: ApexState): void {
     this.stallStrike(v, s);
@@ -603,8 +766,21 @@ export class StrikeController implements Controller {
       const factor = o.strikePosts
         ? postLossFactor(cover, v.game.config().defensePostDefenseBonus())
         : 1;
+      const size = N.numTilesOwned();
+      // o.strikeReachModel: the land an attack of ours can reach; no kill
+      // stack for a target we cannot reach whole.
+      const reach = o.strikeReachModel
+        ? reachableTiles(v.game, v.me, N, REACH_CAP, this.reachSet)
+        : Infinity;
       const cost = strikeCost(v, N, info, inp.T1, o.strikeRatio);
-      const plan = planStrike(inp, inc, budget, sizing, cost.kill * factor);
+      const killable = reach >= size - KILL_FREE;
+      const plan = planStrike(
+        inp,
+        inc,
+        budget,
+        sizing,
+        killable ? cost.kill * factor : 0,
+      );
       if (plan.S <= 0) {
         const k = (x: number) => `${Math.round(x / 1000)}k`;
         this.skip(
@@ -617,24 +793,37 @@ export class StrikeController implements Controller {
         continue;
       }
       const left = plan.S - plan.verdict.answer - inc;
-      // o.strikePosts: the loss at the stack's real ratio after the answer
-      // (a purse-limited stack pays up to 3.3× the cheapest a tile).
-      const p = o.strikePosts
-        ? strikeLoss(v, N, info, inp.T1 - plan.verdict.answer, left) * factor
-        : cost.p;
-      const killCost = o.strikePosts
-        ? p * Math.max(0, N.numTilesOwned() - KILL_FREE)
-        : cost.kill;
-      const kill = left >= killCost;
-      const tiles = kill
-        ? N.numTilesOwned()
-        : Math.min(N.numTilesOwned(), left / Math.max(1, p));
+      // o.strikePosts, o.strikeReachModel: the loss at the stack's real
+      // ratio after the answer (a purse-limited stack pays up to 3.3× the
+      // cheapest a tile).
+      const p =
+        o.strikePosts || o.strikeReachModel
+          ? strikeLoss(v, N, info, inp.T1 - plan.verdict.answer, left) *
+            factor
+          : cost.p;
+      let kill: boolean;
+      let pocket = false;
+      let tiles: number;
+      let spent: number;
+      let refund: number;
+      if (o.strikeReachModel) {
+        const y = strikeYield(plan.S, left, p, size, reach, KILL_FREE);
+        ({ kill, pocket, tiles, spent, refund } = y);
+      } else {
+        const killCost = o.strikePosts
+          ? p * Math.max(0, size - KILL_FREE)
+          : cost.kill;
+        kill = left >= killCost;
+        tiles = kill ? size : Math.min(size, left / Math.max(1, p));
+        // Per troop spent: a kill pays its tiles and the answer's 1:1
+        // cancel, the rest of the stack comes home; short of a kill all of
+        // it burns.
+        spent = kill ? killCost + plan.verdict.answer + inc : plan.S;
+        refund = kill ? Math.max(0, left - killCost) : 0;
+      }
       const value =
         tiles +
         (kill ? Number(N.gold()) / Math.max(1, o.strikeGoldPerTile) : 0);
-      // Per troop spent: a kill pays its tiles and the answer's 1:1 cancel,
-      // the rest of the stack comes home; short of a kill all of it burns.
-      const spent = kill ? killCost + plan.verdict.answer + inc : plan.S;
       const perTroop = value / Math.max(1, spent);
       if (perTroop < o.strikeMinValue) {
         this.skip(
@@ -656,17 +845,24 @@ export class StrikeController implements Controller {
         S: plan.S,
         score,
         clamp: conquestStack(inp.T1, plan.verdict.answer, inc, sizing),
-        refund: kill ? Math.max(0, left - killCost) : 0,
+        refund: Math.max(0, refund),
         line:
           `wstrike ${info.id} ${plan.verdict.window} ` +
           `open=[${plan.verdict.open.join(",")}] S=${k(plan.S)} ` +
           `want=${k(plan.want)} min=${k(plan.min)} T=${k(inp.T)} ` +
           `T(d1=${d1})=${k(inp.T1)} M=${k(inp.M)} res=${inp.reserve} ` +
           `ans=${k(plan.verdict.answer)} inc=${k(inc)} budget=${k(budget)} ` +
-          `tiles=${N.numTilesOwned()} kill=${kill ? "y" : "n"} ` +
+          `tiles=${size} kill=${kill ? "y" : "n"} ` +
           `p=${p.toFixed(1)} value/troop=${perTroop.toFixed(4)}` +
           (vulture ? " vulture" : "") +
-          (o.strikePosts ? ` cover=${cover.toFixed(2)}` : ""),
+          (o.strikePosts ? ` cover=${cover.toFixed(2)}` : "") +
+          (o.strikeReachModel
+            ? ` reach=${Number.isFinite(reach) ? reach : "big"}` +
+              (pocket ? " pocket" : "")
+            : "") +
+          (o.strikeDetNearTarget
+            ? ` det=${k(deterrenceFloor(v, info.id))}`
+            : ""),
       };
     }
     if (best === null) return;
@@ -722,6 +918,14 @@ export class StrikeController implements Controller {
     if (rest !== undefined && v.tick - rest < STRIKE_REST) return "rest";
     if (info.contact < v.o.strikeMinContact) return "contact";
     if (v.o.strikeNukeVeto && nukeRisk(v, N)) return "nuke";
+    if (v.o.strikeLiveCheck) {
+      // A request queued earlier this tick (the DefenseController's recall
+      // runs first) would retreat the attack once accepted.
+      if (v.scheduler.hasKey(`ally:${info.id}`)) return "request";
+      // The scan's contact may be thinkEvery − 1 ticks old.
+      const need = Math.max(1, v.o.strikeMinContact);
+      if (!contactAtLeast(v.game, v.me, N, need)) return "liveContact";
+    }
     return null;
   }
 
@@ -894,14 +1098,21 @@ export class StrikeController implements Controller {
       const add = Math.floor(Math.min(need - A, budget));
       if (add < 1) continue;
       // Worth it if it restores a ratio of at most maxRatio after the
-      // answer (beyond it each tile costs up to 3.3× [PIN
-      // PlayerAttackSpeed]), or if it lifts a stack the answer would
-      // delete whole above it (the rest of the answer would land on us).
-      const ratioOk =
-        A + add >= minimumStack(Td, answer, inc, o.strikeMaxRatio) &&
-        add >= TOPUP_MIN_SHARE * (need - A);
-      const saves = A - inc <= answer && A + add - inc > answer;
-      if (!ratioOk && !saves) continue;
+      // answer, or if it lifts a stack the answer would delete whole above
+      // it (topUpReason).
+      const why = topUpReason(
+        { A, add, need, Td, answer, inc },
+        {
+          maxRatio: o.strikeMaxRatio,
+          minShare: TOPUP_MIN_SHARE,
+          saveOpenOnly: o.strikeSaveOpenOnly,
+        },
+        g === "open",
+        () =>
+          info !== null &&
+          this.canKill(v, N, info, Td, A + add, answer, inc, 1),
+      );
+      if (why === null) continue;
       // o.strikePosts: no more troops into a posted front short of a kill.
       if (o.strikePosts && info !== null) {
         const cover = postCover(v.game, v.me, N, info.contact);
@@ -933,7 +1144,7 @@ export class StrikeController implements Controller {
       const k = (x: number) => `${Math.round(x / 1000)}k`;
       v.log?.(
         `${v.tick} wtopup ${id} +${k(add)} A=${k(A)} need=${k(need)} ` +
-          `T(d=${d})=${k(Td)} ans=${k(answer)} gate=${g}`,
+          `T(d=${d})=${k(Td)} ans=${k(answer)} gate=${g} why=${why}`,
       );
     }
   }

@@ -35,12 +35,16 @@ import { NationModel } from "./NationModel";
 //    outer radius. The best must score > 0, else (Impossible) an atom salvo
 //    at one of the target's SAMs (maybeDestroyEnemySam, :836-1061).
 //
-// In the arena every nuke that hit the agent came from rung 1's crown half
-// (16 of 19 in quick@20 and showcase-m2: the land leader aiming at us as
-// its runner-up), each one taking the city it was aimed at.
+// In the arena (quick@20 and showcase-m2, package B3) 16 of the 19 bombs at
+// the agent came from the last rung's runner-up half, the land leader
+// aiming at us as its runner-up (1 crown lead, 2 with two players left);
+// each took the city it was aimed at. Replayed against every real
+// findBestNukeTarget call of 7 arena games (about 17,000), aimOf agreed on
+// all but the density rung's random picks.
 //
-// Read-only: only getters, canBuild-free. Counts of launched bombs (the
-// perceived prices) come from observe(), which the policy calls every tick.
+// Read-only: only getters (and the memoised unitCount / units(type) and
+// nearbyUnits reads), no canBuild. Counts of launched bombs (the perceived
+// prices) come from observe(), which the policy calls every tick.
 //
 // Where this departs from the code (the real code wins):
 // - The richest nation's density rung draws random.chance(2); aimOf reports
@@ -48,6 +52,10 @@ import { NationModel } from "./NationModel";
 // - isHydroNation is a private PRNG draw (NNB:60). A launch can only show
 //   that a nation is none (firesAtoms), never that it is one, so bombFor
 //   keeps the worst case: every nation fires atoms.
+// - A decision whose NukeExecution fails canBuild at its first tick raises
+//   the nation's perceived price with no bomb to observe (World: 1 of 33
+//   sends); the count then trails by one, the price errs low (the unsafe
+//   side for the nation, the safe one for us).
 // - nukeable() treats an aim point as interceptable only when it lies within
 //   an enemy SAM's range (the trajectory's last tile); a path that crosses a
 //   SAM's range on the way in is not credited (the unsafe side for us is
@@ -122,6 +130,8 @@ const SCORED: ReadonlySet<UnitType> = new Set([
 /** Aim points sampled around each structure, in tiles between samples, as
  *  a share of the bomb's outer radius. */
 const AIM_STEP_SHARE = 1 / 6;
+/** Ticks of gold history behind projectedGold's rate. */
+const GOLD_WINDOW = 300;
 
 interface Launches {
   atoms: number;
@@ -148,6 +158,12 @@ export class NukeModel {
   private ranking: Ranking | null = null;
   private exposureAt = Number.NEGATIVE_INFINITY;
   private exposureCache: NukeExposure[] = [];
+  /** Gold of each silo owner at exposures() calls, oldest first, over
+   *  about GOLD_WINDOW ticks (projectedGold). */
+  private readonly goldLog = new Map<
+    PlayerID,
+    { tick: number; gold: bigint }[]
+  >();
   /** Nations whose ladder named us (any rung), with the last exposures()
    *  tick that saw it: the ranking flips back and forth. */
   private readonly named = new Map<
@@ -341,12 +357,6 @@ export class NukeModel {
     return this.ranking;
   }
 
-  /** Living players by tiles, most first, tribes included, ties in
-   *  game.players() order: the crown rungs' ranking. Cached per tick. */
-  landRank(): readonly Player[] {
-    return this.rank().sorted;
-  }
-
   /** Whether N counts as the richest nation (isRichestNation :318-326). */
   private richest(N: Player): boolean {
     for (const other of this.game.players()) {
@@ -498,8 +508,7 @@ export class NukeModel {
     if (r.land <= 0) return null;
     // Two divisions, as the code has them (:394-395): the floating-point
     // difference decides the edge (0.4 − 0.3 is just above 0.1).
-    const lead =
-      first.numTilesOwned() / r.land - N.numTilesOwned() / r.land;
+    const lead = first.numTilesOwned() / r.land - N.numTilesOwned() / r.land;
     return lead > CROWN_MARGIN[this.difficulty]
       ? { reason: "crownLead", target: first }
       : null;
@@ -520,11 +529,12 @@ export class NukeModel {
   // ── Exposure ───────────────────────────────────────────────────────────
 
   /**
-   * Every living nation whose ladder names us now (latent false) or on a
-   * lower rung that the current answer hides (latent true), with its silo,
-   * slots and the bomb its gold covers. A nation "would fire at us now if
-   * we owned value" exactly when !latent && hasSilo && canPay && slots > 0.
-   * Cached per tick.
+   * Every living nation with a silo (finished or not) whose ladder names us
+   * now (latent false) or on a lower rung that the current answer hides
+   * (latent true), with its slots and the bomb its gold covers. A nation
+   * "would fire at us now if we owned value" exactly when !latent && canPay
+   * && slots > 0. Cached per tick; samples each silo owner's gold
+   * (projectedGold).
    */
   exposures(): NukeExposure[] {
     const g = this.game;
@@ -533,6 +543,9 @@ export class NukeModel {
     const out: NukeExposure[] = [];
     for (const N of g.players()) {
       if (N === this.me || N.type() !== PlayerType.Nation) continue;
+      // maybeSendNuke's first gate (:115-124): no silo, no decision.
+      if (N.units(UnitType.MissileSilo).length === 0) continue;
+      this.sampleGold(N, tick);
       const rungs = this.rungs(N, false);
       if (rungs.length === 0) continue;
       const at = rungs.findIndex((x) => x.target === this.me);
@@ -560,6 +573,34 @@ export class NukeModel {
     return out;
   }
 
+  private sampleGold(N: Player, tick: number): void {
+    const log = this.goldLog.get(N.id()) ?? [];
+    if (log.length === 0 || log[log.length - 1].tick < tick) {
+      log.push({ tick, gold: N.gold() });
+    }
+    while (log.length > 2 && log[1].tick <= tick - GOLD_WINDOW) log.shift();
+    this.goldLog.set(N.id(), log);
+  }
+
+  /**
+   * N's gold `horizon` ticks ahead at its net gain since the oldest sample
+   * of its last ~GOLD_WINDOW ticks (exposures() samples silo owners), or
+   * its gold now if it gained nothing. Nations gain gold in bursts
+   * (conquest; quick@20 Bering Strait: Alaska from under 2.5M to 6M within
+   * about 300 ticks, then a hydrogen bomb), so the rate is read, not the
+   * wages.
+   */
+  projectedGold(n: PlayerID, horizon: number): bigint {
+    const N = this.game.player(n);
+    const gold = N.gold();
+    const log = this.goldLog.get(n);
+    if (log === undefined || log.length === 0 || horizon <= 0) return gold;
+    const first = log[0];
+    const dt = this.game.ticks() - first.tick;
+    if (dt <= 0 || gold <= first.gold) return gold;
+    return gold + ((gold - first.gold) * BigInt(horizon)) / BigInt(dt);
+  }
+
   /** Nations whose ladder named us at an exposures() call at or after
    *  `since`, with the last such tick and rung. */
   namedSince(
@@ -572,8 +613,9 @@ export class NukeModel {
     return out;
   }
 
-  /** Living humans and nations by tiles, most first (landRank without the
-   *  tribes, which the crown rungs count but which are eaten first). */
+  /** Living humans and nations by tiles, most first: the crown rungs'
+   *  ranking (ties in game.players() order) without the tribes, which the
+   *  rungs count but which are eaten first. */
   nonBotRank(): Player[] {
     return this.rank().sorted.filter((p) => p.type() !== PlayerType.Bot);
   }

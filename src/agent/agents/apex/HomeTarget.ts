@@ -95,8 +95,13 @@ export const NO_FLOORS: HomeFloors = Object.freeze({
  * bordering unallied nation that could land-attack us there and would pick
  * us adds its land line (T_N(d) + 1)/1.1·detMargin, every bordering ally at
  * or above its reserve detBetrayShare·T_A(d), lines above detMaxShare·cap
- * dropped. So tribes, boats, strikes and (through tnKeep) free land never
- * spend home below the line of a nation that could then attack us.
+ * dropped (or, with detCapLines, held at it). So tribes, boats and strikes
+ * never spend home below the kept line. Free land does not get that
+ * guarantee: floor(tn) stays max(H_vw, tnKeep·H), so a free-land attack
+ * may spend home down to tnKeep of the line (half of it at tnKeep 0.5).
+ * Left so on purpose: in the three invasions of the expansion phase in the
+ * champion's quick@20 run (Onion 1489, Africa 1590, Yellow Sea 2031) our
+ * outgoing attacks were all on tribes, none on free land.
  */
 export function homeFloors(v: HomeTargetInputs, s: ApexState): HomeFloors {
   const { o, models, me, nm, tick } = v;

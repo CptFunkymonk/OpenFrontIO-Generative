@@ -53,7 +53,8 @@ export interface View {
   wm: WorldModel;
   nm: NationModel;
   /** Package B3: the nuke-rule replica (spec §2.9), observed every tick
-   *  while o.nukeModel is on. Optional so hand-built Views stay valid. */
+   *  (launch counts for the perceived prices; O(1) while no bomb flies).
+   *  Optional so hand-built Views stay valid. */
   nukes?: NukeModel;
   /** Not in spec §2.10's View; the allocator reads stacks and plans from it
    *  (§3.6.2-3.6.3, §3.6.7). */
@@ -386,7 +387,7 @@ export class ApexPolicy {
     // Step 2 (scheduler.begin below).
     rt.ledger.observe(env.me, t, env.game);
     rt.nm.observe(t);
-    if (o.nukeModel) rt.nukes.observe();
+    rt.nukes.observe();
 
     // Step 4's scanWorld, HomeTarget and Purse, moved ahead of step 3:
     // scheduler.begin takes the Purse, which needs this decision's floors,

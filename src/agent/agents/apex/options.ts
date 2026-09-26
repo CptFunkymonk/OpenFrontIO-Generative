@@ -121,15 +121,24 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (tick 2) are on the ground there, exactly as they will be. The spawn
    *  lands in tick 2 ahead of every nation and ends the phase before any
    *  nation hops. Singleplayer outside the browser only; otherwise, or if
-   *  the fork fails, the spawn goes out at spawnDelay as before. */
+   *  the fork fails, the spawn goes out at spawnDelay as before. Alone it
+   *  picks apex's tile and only shifts the game by 2 ticks (A3 ab1, quick@4:
+   *  progress −0.001 [−0.021, +0.026]); it is what spawnErase needs. */
   spawnPreview: boolean;
   /** With spawnPreview: also consider spawning on exactly a nation's pick,
    *  which covers its disc so it is never placed. Scored as a race site on
-   *  the arrival field without that nation, and verified in a second fork
-   *  (the nation disappears and no other nation is cut). */
+   *  the arrival field without that nation (A and B capped by the land
+   *  connected to the site when that land is landlocked), and verified in
+   *  a second fork (the nation disappears and no other nation is cut).
+   *  Package A3, with spawnEraseMargin −0.25, against apex: quick@4
+   *  progress +0.043 [+0.024, +0.067], 27/5, ≥ top nation at minute 3
+   *  50% → 72%; quick@20 +0.058 [+0.034, +0.085], 28/4, top 3 at minute
+   *  10 22% → 34%, out before 20 min 6 → 5 of 32. On 2-3-nation maps
+   *  (Bering Strait, Onion) we lead early and the nation left wins sooner. */
   spawnErase: boolean;
   /** An erasure site must score above (1 + this) × the best race
-   *  candidate's score. */
+   *  candidate's score (quick@4: +0.1 < 0 < −0.1 < −0.25, where it erases
+   *  in 31 of 32 games). */
   spawnEraseMargin: number;
   /** Most erasure sites scored exactly (each a full nation search). */
   spawnEraseK: number;
@@ -350,18 +359,30 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
 
   // ── Package A2 NAVAL MIDGAME (H9; spec §3.7, §5.4; chapter 13 §2.12,
   //    §5.11; NavalController, RaceField.boatTargets). Off by default. ───
-  /** Boats keep growing across water after the local food is gone:
-   *  targets past boatMaxVoyage (up to boatMidMaxVoyage) whose landmass is
-   *  projected to still hold boatMidMinFood free plus tribe tiles at the
-   *  landing and whose landing no nation's land can reach first (in
-   *  practice, landmasses no nation holds); with boatAvoidWarships, no
-   *  hostile warship near the estimated sea route either (not only the
-   *  straight line); a "surplus" trigger when the Purse holds
-   *  boatMidSurplus of the cap after the land allocator; far tribes sized
-   *  for their regrowth during the voyage; in stall mode the tribe price
-   *  limit times boatMidStallPrice (the troops are idle at the cap). Needs
+  /** Boats in the midgame: a "surplus" trigger when the Purse holds
+   *  boatMidSurplus of the cap after the land allocator; in stall mode the
+   *  tribe price limit times boatMidStallPrice (the troops are idle at the
+   *  cap); far targets only with boatMidFar, their sea routes checked for
+   *  warships; near ones too with boatMidRouteGuard. Needs
    *  boatVoyageScore. */
   boatsMidgame: boolean;
+  /** With boatsMidgame and boatAvoidWarships, a far boat is not sent when
+   *  a hostile warship lies near its estimated sea route
+   *  (RaceField.voyageRoute), not only near the straight line; with this,
+   *  a near boat neither. Off: package A2's screen ab4 (quick 0:12 at 20
+   *  minutes) had it remove only near boats, 0 games better, 3 worse and 9
+   *  tied against the flag without it. */
+  boatMidRouteGuard: boolean;
+  /** With boatsMidgame: far targets, past boatMaxVoyage up to
+   *  boatMidMaxVoyage, only in stall mode or once our landmass's free plus
+   *  tribe land is nearly gone (water priority's own-landmass test), when
+   *  the landing's landmass is projected to still hold boatMidMinFood free
+   *  plus tribe tiles and no nation can get there first, by land
+   *  (boatMidFront) or by its random boats (boatMidNationBoat); a far
+   *  tribe is sized for its regrowth during the voyage. Off: in three
+   *  quick@20 screens no far boat took land the flag-off side did not take
+   *  later. */
+  boatMidFar: boolean;
   /** Longest estimated voyage, tiles (1 per tick), for a far target. */
   boatMidMaxVoyage: number;
   /** Smallest projected free plus tribe tiles of the landing's landmass
@@ -373,12 +394,21 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (nations eat faster as they grow). */
   boatMidRateMargin: number;
   /** Tiles per tick a nation's front is assumed to advance: a far landing
-   *  needs no nation's land within boatMidFront·(voyage + 50 +
-   *  boatMidHold) tiles. A saturated attack paces 0.63 tiles a tick per
-   *  border tile on plains (chapter 13 §5.3) and annexing small tribes
-   *  jumps ahead: at 0.33, 8 of 8 far candidates were eaten before the
-   *  boat could land (quick@20 Bering Strait). */
+   *  needs every nation seed (its land, and the land its random boats
+   *  reach) at least boatMidFront·(voyage + 50 + boatMidHold) tiles away
+   *  by land (RaceField.nationReach), and a landing no seed reaches at the
+   *  OwnerGrid's grain a landmass without one. A nation attacking a tribe
+   *  paces 0.632 tiles a tick per border tile at r ≤ 0.82 on plains
+   *  (chapter 13 §5.3; free land 0.4 when saturated, §5.2), and annexing
+   *  tribes under 100 tiles jumps ahead: Alaska's front (quick@20 Bering
+   *  Strait) covered 400 tiles in about 500 ticks, 0.8 a tick. */
   boatMidFront: number;
+  /** Tiles (Chebyshev) around a nation's ocean-shore land counted as its
+   *  reach for far targets: its random boat lands on a random tile within
+   *  ±150 tiles of one of its shore tiles, unowned or tribe land first
+   *  (AiAttackBehavior.ts:180-220; a literal there, not a Config value).
+   *  0 turns it off. */
+  boatMidNationBoat: number;
   /** Ticks a far landing must stay out of every nation's reach after it
    *  lands (its first fight). */
   boatMidHold: number;
@@ -427,11 +457,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  ones, extensions for the allied ones, a fresh request at the lapse of
    *  a kept alliance whose extension failed (webRenew), counter-accepts
    *  that leave room for them; every other ally lapses (never a break).
-   *  Off: the spec web (allySet by §3.4.2 danger, extensions of allySet
-   *  allies only). */
+   *  Its requests and counter-accepts never take us past A_ext alliances
+   *  (A_max refuses every extension of ours). Off: the spec web (allySet
+   *  by §3.4.2 danger, extensions of allySet allies only). */
   webMidgame: boolean;
   /** Tick the midgame web takes over from the spec web (the opening's
-   *  requests are the spec's). */
+   *  requests are the spec's); its first plan is the first decision from
+   *  here. */
   webFrom: number;
   /** dmid(N) = max(T_N + out_N, trigger_N·M_N^+) / (safe·H_ref), H_ref =
    *  max(homeX·cap^+, min(home, cap)): its stack now or at its trigger on
@@ -447,23 +479,46 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (instead of extendLead). The request stays asked and the nation
    *  re-decides it at each of its decisions, agreeing at the first where it
    *  would accept us, and the term restarts from there [PIN NationAlliance
-   *  "allianceExtension works any time"; chapter 13 §2.9 "ask early"]: 1,800
-   *  gives it about 45 decisions instead of about 7. */
+   *  "allianceExtension works any time"; chapter 13 §2.9 "ask early"]: 600
+   *  gives it 12-20 decisions. An ask cannot be withdrawn, so the earlier
+   *  it goes the likelier the keep set has dropped the ally by the time it
+   *  agrees. Arena quick@20 v2 (1,800): of 320 extensions asked at A_ext or
+   *  fewer alliances, 270 passed at the first decision and 305 within 600
+   *  ticks; the longer lead only waited for lapses above A_ext. */
   webExtendLead: number;
-  /** Reach includes nations on an ocean shore while we have one (boats
-   *  land anywhere; the beachhead then attacks by land), their dmid scaled
-   *  by webBoatDiscount. */
+  /** An ally is asked to extend only once it has been in every plan's keep
+   *  set for this many ticks running (3 plans): v2 won 127 of its 529
+   *  extensions for allies the keep set dropped within 600 ticks. */
+  webExtendStable: number;
+  /** Reach includes, while we own an ocean shore, the nations on one that
+   *  would boat at us though they cannot reach us by land: islanders (no
+   *  bordering enemy or free land on the OwnerGrid) that count us among
+   *  the two nearest players they would boat at
+   *  (AiAttackBehavior.findNearestIslandEnemy), their dmid scaled by
+   *  webBoatDiscount. Every other nation attacks players it borders (or
+   *  lands random boats within 150 tiles, inside the land reach). v2 kept
+   *  every ocean-shore nation at any distance: 143 boat-only requests in 32
+   *  games, 4 of those nations attacked apex in the paired baseline games,
+   *  and the refresh list doubled on GiantWorldMap. */
   webBoatReach: boolean;
   /** dmid factor of a nation reached by boat only (a boat carries T/5; the
    *  beachhead's land attacks then send the full cap: 14 of the 67 nations
    *  that attacked apex in quick@20 opened with a boat). */
   webBoatDiscount: number;
   /** Re-request a kept ally at once when its alliance lapses: a fresh
-   *  request is decided afresh without us counted as its friend, so the
-   *  extension trap (§2.9) does not apply to it. */
+   *  request is decided with our alliances one fewer (hasTooManyAlliances
+   *  passes where the extension failed at A_max) and without us counted
+   *  as its friend, so the extension trap (§2.9) refuses it only when
+   *  every other non-bot neighbour of the nation is its friend (a request
+   *  is refused while at most one bordering non-bot player is not its
+   *  friend). Arena quick@20 v2: 37 renews sent, 32 accepted. */
   webRenew: boolean;
   /** Smallest forecast for a renew request. */
   webRenewMinP: number;
+  /** The renew may restore A_max alliances (the count before the lapse):
+   *  at A_max at least one ally is outside the keep set (A_ext at most), so
+   *  the spell ends when it lapses. Off: the renew too stops at A_ext. */
+  webRenewOver: boolean;
   /** Only while a strike feature is on (strikes, stallStrike or
    *  strikeWindows): in stall mode with no unallied bordering nation left
    *  to eat, the weakest bordering kept ally is dropped from the keep set
@@ -487,30 +542,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  that refuses us leaves the slot to the next one (arena The Box: the
    *  slot waited on Train Trader, who refused, while Front Manager lapsed). */
   webKeepFeasible: boolean;
-  /** Requests to kept nations may use the slot above A_ext (up to A_max)
-   *  while every ally outside the keep set lapses at least webSlotMargin
-   *  ticks before the first kept alliance expires (a new one included), so
-   *  kept extensions still see at most A_ext alliances when they are
-   *  decided (arena Four Islands: the one A_ext slot was held by a weak
-   *  ally, and the kept Sylvoria was never asked; it eliminated us). */
-  webSlotBorrow: boolean;
-  /** Ticks by which every ally outside the keep set must lapse before the
-   *  first kept expiry for webSlotBorrow (a few decisions at A_ext). */
-  webSlotMargin: number;
   /** Keep set size A_ext − ⌊this·A_max⌋ (at least 1): A_max shrinks as
    *  nations die (by 15-30% within an alliance's term from minute 3, arena
-   *  quick@20), and while we hold more than A_ext every extension and
-   *  renew fails on hasTooManyAlliances (arena North America: 15 alliances
-   *  against an A_max down from 17 to 13; Nunavut and Alaska lapsed). 0:
-   *  off (0.25 with webExtendOpening off screened worse, package B2 ab4). */
+   *  quick@20), and while we hold more than A_ext every extension fails on
+   *  hasTooManyAlliances (arena North America: 15 alliances against an
+   *  A_max down from 17 to 13; Nunavut and Alaska lapsed). 0: off (0.25
+   *  was screened only together with another change, package B2 ab4). */
   webSlotSpare: number;
-  /** At the midgame's start (from webFrom to the first midgame plan, the
-   *  plan tick after it), the spec web's extensions go out with
-   *  webExtendLead instead of extendLead: every ally in the opening's
-   *  allySet is asked at once, most accept (we are strong at minute 3),
-   *  and the opening's web is kept five more minutes before the keep set
-   *  trims it. The first midgame screens (ab2, ab3) played this way. */
-  webExtendOpening: boolean;
   /** Buy the extension of a dangerous kept ally with its friendship: when
    *  its extension is still refused webFriendLead ticks before expiry
    *  (the trap, or not similarly strong), donate ceil(M_N/5) + 1 troops
@@ -527,9 +565,11 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  it Friendly from the next decision until 60 ticks past the expiry, so
    *  the pending extension gets its 67% at every decision left and the
    *  renew at the lapse (a fresh request, decided with the same Friendly
-   *  branch before the trap and the strength tests) gets one more. For a
-   *  bordering kept ally only, one gift per term, from at most
-   *  webFriendGoldShare of our gold. Needs webMidgame. */
+   *  branch before the trap and the strength tests) gets one more. An
+   *  extension refused as "tooMany" (hasTooManyAlliances goes before
+   *  Friendly) gains only the renew's chance. For a bordering kept ally
+   *  only, one gift per term, from at most webFriendGoldShare of our gold.
+   *  Needs webMidgame. */
   webFriendGold: boolean;
   /** Most of our gold one gift may take. */
   webFriendGoldShare: number;
@@ -584,17 +624,19 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   // ── Package B1: survival (HomeTarget, DefenseController,
   //    lib/Deterrence.ts; spec §5.1 items 2-4, chapter 13 §2.6-2.9 and
   //    §5.7-5.9). Every behaviour here is off by default. ─────────────────
-  /** Deterrence floor: raise H (the tribe, boat and strike floor, and the
-   *  TN floor through tnKeep) to the land line (T_N(d) + 1)/1.1·detMargin
-   *  of every bordering unallied nation that could land-attack us at the
-   *  floor we would keep without it and whose strategy list would pick us
-   *  (NationModel.canLandAttackUs, wouldTargetUs at its next decision d),
-   *  and to detBetrayShare·T_A(d) for every bordering ally at or above its
-   *  reserve. Lines above detMaxShare of the cap are dropped (we could not
-   *  hold them without freezing). Not adopted (package B1 A/B, quick@20
-   *  0:12: eliminated 3 → 6 of 12 with lines dropped or capped): the
-   *  invasions that kill come from nations whose line T/1.1 is above our
-   *  cap, which no floor can hold, and the floor slows expansion. */
+  /** Deterrence floor: raise H (the tribe, boat and strike floor) to the
+   *  land line (T_N(d) + 1)/1.1·detMargin of every bordering unallied
+   *  nation that could land-attack us at the floor we would keep without
+   *  it and whose strategy list would pick us (NationModel.canLandAttackUs,
+   *  wouldTargetUs at its next decision d), and to detBetrayShare·T_A(d)
+   *  for every bordering ally at or above its reserve. Lines above
+   *  detMaxShare of the cap are dropped (we could not hold them without
+   *  freezing). The TN floor stays max(H_vw, tnKeep·H): free land may
+   *  spend down to tnKeep of the line (HomeTarget.ts). Not adopted
+   *  (package B1 A/B): inconclusive on quick@20 0:12 (3 eliminations more
+   *  of 12, all 3 discordant games against it, sign test p = 0.25; half
+   *  the games unchanged); most invasions that kill come from nations
+   *  whose line T/1.1 is above our cap, which no floor can hold. */
   deterrence: boolean;
   /** Margin on the land line (T_N(d) + 1)/1.1. */
   detMargin: number;
@@ -658,15 +700,18 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  Config.ts:377-387) on the front with a bordering unallied nation that
    *  our home now cannot deter (detPostProactive), or that attacks us by
    *  land (detPostReactive): one per 20 ticks while gold pays for it. Not
-   *  adopted (package B1 A/B, quick@20 0:32: final land +0.5 pp, 15 better
-   *  and 8 worse, but eliminated 6 → 9; fronts are mostly too long for
-   *  the posts gold buys, and posts ordered mid-invasion are overrun). */
+   *  adopted (package B1 A/B, quick@20 0:32, 31 valid pairs: final land
+   *  +0.5 pp, 15 better and 8 worse, but eliminated 5 → 8, discordant 1
+   *  against 4, sign test p = 0.375): posts ordered on a front under
+   *  attack are destroyed before or soon after they are built (a conquered
+   *  post is deleted, PlayerExecution.ts:72-74; arena quick Europe: 12
+   *  ordered, at most 4 standing). */
   detPosts: boolean;
   /** Build posts before an attack, against an undeterred threat. */
   detPostProactive: boolean;
   /** Build posts against a running land attack (it overruns a post before
-   *  its 50 ticks of construction end, and captures it: arena smoke Onion
-   *  lost 20 posts so). */
+   *  its 50 ticks of construction end, and the post is deleted with the
+   *  tile: arena smoke Onion lost 20 posts so). */
   detPostReactive: boolean;
   /** Proactive posts only against a nation whose list would pick us now
    *  (wouldTargetUs, or at most detTribeSlack affordable tribes left) or
@@ -821,19 +866,54 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  only makes the nation Hostile (A1 ab3: ArchipelagoSea final land
    *  1.6% -> 4.2%; same progress as v1 over 12 games). */
   strikeMinContact: number;
+  /** strikeDeterrence also covers the nations that border the target
+   *  (its nearby() nations): a conquest makes them ours while home is down
+   *  by the stack. Unallied ones at their land line unless below their
+   *  reserve at their decision, allies at the betrayal line. Review of A1
+   *  (quick@20 g3: Alaska, Russia's neighbour, land-attacked 1.87M 70
+   *  ticks after a 3.05M strike on Russia with the floor at 0). */
+  strikeDetNearTarget: boolean;
+  /** A top-up that only saves the stack from an answer that would delete
+   *  it goes only where the answer is certain (gate open; below trigger the
+   *  list runs 1 decision in 10) and the saved stack keeps strikeMaxRatio
+   *  or can kill. Review of A1: 8 of 42 top-ups (3.19M) were such saves,
+   *  all below trigger, leaving stacks at ratio 1.8-20. */
+  strikeSaveOpenOnly: boolean;
+  /** The value and kill test read the loss per tile at the stack's real
+   *  ratio after the answer (strikePosts did, without posts), and only the
+   *  target's land reachable from our border (a capped BFS): a pocket that
+   *  runs out first is a partial win whose rest comes home, a kill needs
+   *  all of it reachable. Review of A1: 22 strikes predicted a kill, 3
+   *  killed; 29 of 42 ended with the frontier emptied. */
+  strikeReachModel: boolean;
+  /** Launch only while our land touches the target in at least
+   *  max(1, strikeMinContact) pairs now (the scan may be thinkEvery − 1
+   *  ticks old) and no alliance request to it is queued this tick (the
+   *  DefenseController's recall runs first). Review of A1: quick@20 g17
+   *  6730, 724k sent at Hellsö next to a recall, 0 tiles. */
+  strikeLiveCheck: boolean;
 
   // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
   //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
   /** Master flag; off, every option of this block is ignored and the
-   *  structure policy reads exposedSite. On, the nuke-rule replica
-   *  (NukeModel) decides exposure: a city site or upgrade is exposed only to
-   *  a nation whose nuke ladder names us, that owns a silo, and that could
-   *  aim the bomb it would pick at the site (both rings clear, no SAM of
-   *  ours reaching the aim point). Arena quick@20 and showcase-m2: 16 of the
-   *  19 bombs at apex came from the land leader aiming at us as its
-   *  runner-up; exposedSite also blocked cities against nations aiming
-   *  elsewhere (idle gold 1.2M on average from minute 3). */
+   *  structure policy reads exposedSite alone. On (with structurePolicy
+   *  "exposure"), the nuke-rule replica (NukeModel) lists the threats: the
+   *  nations whose nuke ladder names us (now, latent, remembered, or by the
+   *  rank guard), with a silo and (nearly) the gold for their bomb. A city
+   *  or an upgrade then also needs a tile no threat can aim at (both rings
+   *  clear, no SAM of ours reaching the aim point), and the SAM hub
+   *  (samHub) may build a SAM whose covered ring takes cities exposedSite
+   *  would refuse. Arena quick@20 and showcase-m2: 16 of the 19 bombs at
+   *  apex came from the land leader aiming at us as its runner-up, each
+   *  taking the city it was aimed at. */
   nukeModel: boolean;
+  /** The model alone decides where cities go (package B3 ab1, "v1"): off,
+   *  a site outside a SAM hub's covered ring also needs exposedSite's
+   *  consent. v1 spent the idle gold (1.2M -> 0.5M on average) with no
+   *  gain: quick 0:12 at 20 min Δprogress -0.004 [-0.011, +0.001],
+   *  eliminated 5 against 3 (more structure levels make us the juiciest
+   *  target, NationUtils.findJuiciestTarget). */
+  nukeCities: boolean;
   /** Latent exposures count: the ladder names us below the rung that
    *  answers now (its bombs go elsewhere until that rung clears). */
   nukeLatent: boolean;
@@ -849,12 +929,19 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Ticks a nation whose ladder named us keeps counting (latent) after it
    *  stops: the land ranking flips back and forth. 0 = none. */
   nukeMemory: number;
-  /** SAM hub: while exposed to atoms only, one SAM farther than an atom's
-   *  outer radius from every structure of ours, then cities in its covered
-   *  ring (atom outer < d ≤ samRange − atom outer): aimed atoms there are
-   *  interceptable, and the salvo a SAM draws (NNB maybeDestroyEnemySam)
-   *  spares them. Skipped against a nation that can pay a hydrogen bomb
-   *  (it hunts SAMs below level 5 from outside their range). */
+  /** Ticks ahead at which nukePayShare reads a threat's gold, at its recent
+   *  rate of gain (NukeModel.projectedGold). ab2: Alaska crossed from under
+   *  2.5M to 6M in about 300 ticks and a hydrogen bomb took the hub cities
+   *  built in between. 0 = gold now. */
+  nukeHorizon: number;
+  /** SAM hub: while threatened by atoms only, one SAM farther than an
+   *  atom's outer radius from every structure of ours, then cities in its
+   *  covered ring (atom outer < d ≤ samRange − atom outer): aimed atoms
+   *  there are interceptable, and the salvo a SAM draws (NNB
+   *  maybeDestroyEnemySam) spares them. Skipped while a threat has, or
+   *  nearly has (nukePayShare), the gold for a hydrogen bomb: it outranges
+   *  SAMs below level 5, scores them 100k a level, and one took a whole hub
+   *  in ab1 (Bering Strait). */
   samHub: boolean;
   /** Most SAMs we own at once. */
   samMax: number;
@@ -920,7 +1007,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   // Package A3 SPAWN PREVIEW.
   spawnPreview: false,
   spawnErase: false,
-  spawnEraseMargin: 0,
+  spawnEraseMargin: -0.25,
   spawnEraseK: 4,
 
   homeX: 0.3,
@@ -1002,11 +1089,14 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
 
   // Package A2 NAVAL MIDGAME.
   boatsMidgame: false,
+  boatMidRouteGuard: false,
+  boatMidFar: false,
   boatMidMaxVoyage: 1500,
   boatMidMinFood: 1500,
   boatMidRateTicks: 300,
   boatMidRateMargin: 2,
-  boatMidFront: 0.65,
+  boatMidFront: 0.8,
+  boatMidNationBoat: 150,
   boatMidHold: 100,
   boatMidSurplus: 0.15,
   boatMidStallPrice: 3,
@@ -1029,19 +1119,18 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   webFrom: 1800,
   webDangerMin: 0.5,
   webSlotsMax: false,
-  webExtendLead: 1800,
+  webExtendLead: 600,
+  webExtendStable: 150,
   webBoatReach: true,
   webBoatDiscount: 0.75,
   webRenew: true,
   webRenewMinP: 0.25,
+  webRenewOver: true,
   webLapseTarget: true,
   webKeepBonus: 1.3,
   webPeakKeep: 0.9,
   webKeepFeasible: true,
-  webSlotBorrow: true,
-  webSlotMargin: 300,
   webSlotSpare: 0,
-  webExtendOpening: true,
   webFriend: false,
   webFriendGold: true,
   webFriendGoldShare: 0.9,
@@ -1129,13 +1218,19 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeRetreatRatio: 1.5,
   strikeDetHorizon: 0,
   strikeMinContact: 0,
+  strikeDetNearTarget: false,
+  strikeSaveOpenOnly: false,
+  strikeReachModel: false,
+  strikeLiveCheck: false,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
+  nukeCities: false,
   nukeLatent: true,
   nukePayShare: 0.5,
   nukeRankGuard: true,
   nukeMemory: 600,
+  nukeHorizon: 300,
   samHub: true,
   samMax: 1,
   samMinLevels: 3,

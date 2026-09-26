@@ -223,6 +223,79 @@ export function planStrike(
   return { S: go ? S : 0, verdict, want, min };
 }
 
+/** What a strike expects to buy (package A1, o.strikeReachModel). */
+export interface StrikeYield {
+  /** It takes every tile it pays for: the target dies and its gold is ours. */
+  kill: boolean;
+  /** The land it can reach runs out first (an island or an enclave of the
+   *  target, land behind a third party): the frontier empties, and the rest
+   *  of the stack comes home. */
+  pocket: boolean;
+  /** Tiles expected. */
+  tiles: number;
+  /** Troops expected spent: the tiles' losses and the 1:1 cancel of the
+   *  answer and of its attacks on us when the rest comes home (kill,
+   *  pocket); the whole stack when it burns out. */
+  spent: number;
+  /** Troops expected home. */
+  refund: number;
+}
+
+/**
+ * The yield of a stack `S` on a nation of `tiles` tiles, `reach` of them
+ * reachable by land from our border (Infinity: at least what the stack can
+ * pay for), `left` = S − answer − its attacks on us after the 1:1 cancels,
+ * at `p` troops lost per tile (at the stack's real ratio):
+ * - kill: all but the `killFree` tiles of the annex line are reachable and
+ *   `left` pays for them [PIN TribeStats: the last 99 fall with the one that
+ *   takes it under 100];
+ * - pocket: fewer tiles reachable than `left` pays for: it takes them, and
+ *   the rest comes home when the frontier empties (arena quick@20: 29 of 42
+ *   strikes ended so, most far short of the target's size);
+ * - else it burns out after left/p tiles.
+ */
+export function strikeYield(
+  S: number,
+  left: number,
+  p: number,
+  tiles: number,
+  reach: number,
+  killFree: number,
+): StrikeYield {
+  const none = { kill: false, pocket: false, tiles: 0, spent: S, refund: 0 };
+  if (!(left > 0) || !(p > 0)) return none;
+  const cancel = Math.max(0, S - left);
+  const need = Math.max(0, tiles - killFree);
+  if (reach >= need && left >= p * need) {
+    const cost = p * need;
+    return {
+      kill: true,
+      pocket: false,
+      tiles,
+      spent: cost + cancel,
+      refund: left - cost,
+    };
+  }
+  const afford = left / p;
+  if (reach < afford) {
+    const cost = p * reach;
+    return {
+      kill: false,
+      pocket: true,
+      tiles: reach,
+      spent: cost + cancel,
+      refund: left - cost,
+    };
+  }
+  return {
+    kill: false,
+    pocket: false,
+    tiles: Math.min(tiles, afford),
+    spent: S,
+    refund: 0,
+  };
+}
+
 /**
  * The loss per tile over a front of which `cover` (0..1) lies within range
  * of the defender's finished defense posts, as a factor of the post-free
@@ -265,6 +338,45 @@ export function retreatReason(
   if (r.cover >= o.postCover) return "posts";
   if (r.T >= o.ratio * r.A) return "ratio";
   return null;
+}
+
+/** A top-up the StrikeController weighs before the target's decision. */
+export interface TopUpCase {
+  /** Our live stack, the top-up, and the conquest stack wanted. */
+  A: number;
+  add: number;
+  need: number;
+  /** Its troops and its answer at that decision, its attacks on us. */
+  Td: number;
+  answer: number;
+  inc: number;
+}
+
+/**
+ * Why a top-up goes, or null (StrikeController.topUps):
+ * - "ratio": it restores a ratio of at most maxRatio after the answer
+ *   (beyond it each tile costs up to 3.3× the cheapest [PIN
+ *   PlayerAttackSpeed]) and is at least minShare of the shortfall;
+ * - "save": the answer would delete the stack whole (the rest of it lands
+ *   on us) and the top-up lifts the stack above it. With saveOpenOnly only
+ *   where the answer is certain (`open`: above its trigger; below it the
+ *   list runs 1 decision in 10 [PIN NationRetaliate]) and only to a stack
+ *   within maxRatio or able to kill (`canKill`, asked last): else the save
+ *   buys an attack that burns out (review of A1: 8 of 42 top-ups, all below
+ *   trigger, left stacks at ratio 1.8-20).
+ */
+export function topUpReason(
+  t: TopUpCase,
+  o: { maxRatio: number; minShare: number; saveOpenOnly: boolean },
+  open: boolean,
+  canKill: () => boolean,
+): "ratio" | "save" | null {
+  const within = t.A + t.add >= minimumStack(t.Td, t.answer, t.inc, o.maxRatio);
+  if (within && t.add >= o.minShare * (t.need - t.A)) return "ratio";
+  const saves = t.A - t.inc <= t.answer && t.A + t.add - t.inc > t.answer;
+  if (!saves) return null;
+  if (!o.saveOpenOnly) return "save";
+  return open && (within || canKill()) ? "save" : null;
 }
 
 /**

@@ -513,13 +513,15 @@ describe("spawnErase", () => {
   );
 
   test(
-    "Europe: no erasure site beats the race best, so the preview's race best goes out, with one fork",
+    "Europe at margin 0: no erasure site beats the race best, so the preview's race best goes out, with one fork",
     async () => {
       const L = await layoutOf(GameMapType.Europe, EUROPE_ID);
       const want = raceCandidates(L.game, L.me)[0].tile;
+      // Russia scores 0.91× the race best: the default margin (−0.25)
+      // erases it, margin 0 does not.
       const r = await start(
         GameMapType.Europe,
-        { spawnPreview: true, spawnErase: true },
+        { spawnPreview: true, spawnErase: true, spawnEraseMargin: 0 },
         EUROPE_ID,
       );
       r.step();
@@ -535,6 +537,27 @@ describe("spawnErase", () => {
       for (const n of nations(L.game)) {
         expect(r.game.player(n.id()).isAlive()).toBe(true);
       }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "Europe at the default margin: Russia, 0.91× the race best, is erased",
+    async () => {
+      expect(APEX_DEFAULTS.spawnEraseMargin).toBe(-0.25);
+      const L = await layoutOf(GameMapType.Europe, EUROPE_ID);
+      const russia = nations(L.game).find((n) => n.name() === "Russia")!;
+      const r = await start(
+        GameMapType.Europe,
+        { spawnPreview: true, spawnErase: true },
+        EUROPE_ID,
+      );
+      r.step();
+      expect(spawnTile(r.spawns()[0])).toBe(russia.spawnTile());
+      expect(r.host.stats.forks).toBe(2);
+      stepTo(r, LAYOUT_TICK, false);
+      expect(r.game.player(russia.id()).isAlive()).toBe(false);
+      expect(r.game.player(russia.id()).hasSpawned()).toBe(false);
     },
     TIMEOUT,
   );
@@ -557,6 +580,63 @@ describe("spawnErase", () => {
       expect(
         r.host.logs.some((l) => l.includes("spawn (race, preview) at")),
       ).toBe(true);
+    },
+    TIMEOUT,
+  );
+});
+
+describe("preview with the lookahead modes", () => {
+  test(
+    "idle and rollout also plan on the preview's layout and send at tick 1; the spawn lands in tick 2",
+    async () => {
+      // idle: the arrival times come from a second fork, advanced to the
+      // layout and stepped on with the phase ended.
+      const idle = await start(
+        GameMapType.Pangaea,
+        { spawnMode: "idle", spawnIdleTicks: 150, spawnPreview: true },
+        "SPAWNCTL",
+      );
+      idle.step();
+      expect(idle.host.stats.errors).toBe(0);
+      expect(idle.spawns().map((s) => s.tick)).toEqual([PREVIEW_TICK]);
+      expect(idle.host.stats.forks).toBe(2);
+      expect(
+        idle.host.logs.some((l) => l.includes("spawn (idle, preview)")),
+      ).toBe(true);
+      stepTo(idle, LAYOUT_TICK, false);
+      expect(idle.me.hasSpawned()).toBe(true);
+      expect(idle.game.inSpawnPhase()).toBe(false);
+
+      // rollout: each rolled-out candidate forks the live game at tick 1
+      // with the spawn in turn 1, so it lands in the fork's tick 2 too.
+      const roll = await start(
+        GameMapType.Pangaea,
+        {
+          spawnMode: "rollout",
+          spawnRolloutK: 2,
+          spawnKeep: 1,
+          spawnRound1: 30,
+          spawnFinal: 30,
+          spawnPreview: true,
+          spawnErase: true,
+          spawnEraseMargin: -1,
+        },
+        "SPAWNCTL",
+      );
+      roll.step();
+      expect(roll.host.stats.errors).toBe(0);
+      expect(roll.spawns().map((s) => s.tick)).toEqual([PREVIEW_TICK]);
+      const logs = roll.host.logs;
+      const r1 = logs.filter((l) => l.includes("rollout r1"));
+      expect(r1.length).toBeGreaterThanOrEqual(2);
+      // Every rolled-out spawn landed: none of them is dead at once.
+      for (const l of r1) expect(l).not.toContain(" dead");
+      expect(logs.some((l) => l.includes("spawn (rollout, preview"))).toBe(
+        true,
+      );
+      stepTo(roll, LAYOUT_TICK, false);
+      expect(roll.me.hasSpawned()).toBe(true);
+      expect(roll.me.spawnTile()).toBe(spawnTile(roll.spawns()[0]));
     },
     TIMEOUT,
   );

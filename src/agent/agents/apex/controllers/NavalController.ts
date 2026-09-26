@@ -13,7 +13,8 @@ import {
   cellOf,
   expectedLand,
   FarReach,
-  nationLandDistance,
+  NationReach,
+  nationReach,
   OWNER_WATER,
   OwnerGrid,
   RaceGrid,
@@ -96,36 +97,45 @@ import {
 // a landmass with a nation on it is eaten by that nation long before a
 // 500+-tile voyage lands. The Four Islands nations ate the other three
 // islands (about 100k tribe tiles each at tick 1,229) by tick 2,156; the
-// Bering Strait nations ate 200-240k in 1,000-1,300 ticks, their fronts
-// reaching tribes 400+ tiles from them in about 500 ticks (a saturated
-// attack paces 0.63 tiles a tick per border tile, chapter 13 §5.3, and
-// annexing sub-100-tile tribes jumps ahead). 8 of 8 far candidates that
-// passed a 0.33-tile-a-tick front and 3 of 7 far tribe boats of the first
-// screen (2.1M troops) were lost: eaten, turned back or sunk. With it:
-// - far targets (RaceField FarReach), up to o.boatMidMaxVoyage: the
-//   landmass's free plus tribe land, projected from its trend over the
-//   OwnerGrid history (s.naval.foodSeen over o.boatMidRateTicks, the loss
-//   rate times o.boatMidRateMargin), still holds o.boatMidMinFood
-//   FAR_LAND_SLACK + o.boatMidHold ticks after the landing, and no nation's
-//   land lies within o.boatMidFront × (voyage + FAR_LAND_SLACK +
-//   o.boatMidHold) tiles of the landing (RaceField.nationLandDistance). At
-//   the default front (0.65 tiles a tick) that leaves, in practice,
-//   landmasses no nation holds. A boat whose landing flips to a nation is
-//   turned back (o.boatCancelOnFlip); a landing on a dead tribe finds
-//   nothing to take and retreats in full (AttackExecution.ts:302-306);
-// - the warship guard (o.boatAvoidWarships) also checks the estimated sea
-//   route (RaceField.voyageRoute: down the voyage field from the landing to
-//   our shore) instead of the straight line alone: river and coastal routes
-//   bend, and the first screen's far boats were sunk on a 918-tile river
-//   route (2 boats, 495k troops, Mississippi River) the straight line
-//   cleared;
+// Bering Strait nations ate 200-240k in 1,000-1,300 ticks, Alaska's front
+// covering 400 tiles in about 500 ticks (0.8 a tick: a nation attacking a
+// tribe paces 0.632 tiles a tick per border tile at r ≤ 0.82 on plains,
+// chapter 13 §5.3, and annexing sub-100-tile tribes jumps ahead). 8 of 8
+// far candidates that passed a 0.33-tile-a-tick front were eaten before
+// the boat could land; the first screen's 7 far tribe boats carried 2.1M
+// troops and lost 1.06M (3 sunk, 1 turned back). With it:
 // - a "surplus" trigger: the Purse still holds o.boatMidSurplus of the cap
 //   for boats after the land allocator decided. Its boats go to tribes the
-//   allocator cannot reach (no border with us) before nations eat them: the
-//   best trade of the first screen, 51.7 tiles per 1,000 troops lost;
-// - a far tribe is sized for its regrowth during the voyage; in stall mode
-//   (troops idle at the cap) a tribe may cost up to o.boatMidStallPrice
-//   times the price limit.
+//   allocator cannot reach (no border with us) before nations eat them;
+// - in stall mode (troops idle at the cap) a tribe may cost up to
+//   o.boatMidStallPrice times the price limit;
+// - the warship guard (o.boatAvoidWarships) also checks the estimated sea
+//   route of a far boat, and with o.boatMidRouteGuard of every boat
+//   (RaceField.voyageRoute: down the voyage field from the landing to our
+//   shore), instead of the straight line alone: river and coastal routes
+//   bend, and two far boats (495k troops) were sunk on a 918-tile
+//   Mississippi River route the straight line cleared (their landing, a
+//   tribe's spit on a nation's landmass, should not have passed the nation
+//   test either: see RaceField.nationReach). On near boats it only removed
+//   boats (screen ab4: 0 games better, 3 worse, 9 tied);
+// - with o.boatMidFar (off: no far boat of three screens took land the
+//   flag-off side did not take later), far targets up to
+//   o.boatMidMaxVoyage, in stall mode or once our landmass's food is
+//   nearly gone (farTargets): the landmass's free plus tribe land,
+//   projected from its trend over the OwnerGrid history (s.naval.foodSeen
+//   over o.boatMidRateTicks, the loss rate times o.boatMidRateMargin),
+//   still holds o.boatMidMinFood FAR_LAND_SLACK + o.boatMidHold ticks after
+//   the landing, and no nation can get there first (RaceField.nationReach:
+//   nation land, and the land within o.boatMidNationBoat of a nation's
+//   shore that its random boats reach, at least o.boatMidFront × (voyage +
+//   FAR_LAND_SLACK + o.boatMidHold) tiles away by land; a landing no seed
+//   reaches at the OwnerGrid's grain only on a landmass without one). A
+//   far tribe is sized for its regrowth during the voyage. A boat whose
+//   landing flips to a nation is turned back (o.boatCancelOnFlip). A
+//   landing on a tribe that died on the way still takes its landing tile
+//   (TransportShipExecution.ts:271: a 1-tile enclave in whoever ate the
+//   tribe), and its attack, with nothing to take, retreats in full
+//   (AttackExecution.ts:302-306).
 
 /** A failed canBuild probe is remembered this long, per race-grid cell. */
 export const PROBE_TTL = 200;
@@ -230,20 +240,28 @@ function voyageOf(v: View, grid: RaceGrid, og: OwnerGrid): VoyageField {
   return f;
 }
 
-/** RaceField.nationLandDistance of an OwnerGrid (one BFS per grid): a memo
- *  of plain data, like voyageOf. */
-const nationDistMemo = new WeakMap<
+/** RaceField.nationReach of an OwnerGrid (one pass and one BFS per grid):
+ *  a memo of plain data, like voyageOf. */
+const nationReachMemo = new WeakMap<
   OwnerGrid,
-  { mine: number; d: Int32Array }
+  { mine: number; grid: RaceGrid; box: number; r: NationReach }
 >();
 
-function nationDistOf(v: View, og: OwnerGrid): Int32Array {
+function nationReachOf(v: View, grid: RaceGrid, og: OwnerGrid): NationReach {
   const mine = v.me.smallID();
-  const memo = nationDistMemo.get(og);
-  if (memo !== undefined && memo.mine === mine) return memo.d;
-  const d = nationLandDistance(v.game, og, v.me);
-  nationDistMemo.set(og, { mine, d });
-  return d;
+  const box = v.o.boatMidNationBoat;
+  const memo = nationReachMemo.get(og);
+  if (
+    memo !== undefined &&
+    memo.mine === mine &&
+    memo.grid === grid &&
+    memo.box === box
+  ) {
+    return memo.r;
+  }
+  const r = nationReach(v.game, grid, og, v.me, box);
+  nationReachMemo.set(og, { mine, grid, box, r });
+  return r;
 }
 
 /** Free plus tribe tiles by landmass id (as foodSeen keys them). */
@@ -372,8 +390,9 @@ export class NavalController implements Controller {
   decide(v: View, s: ApexState): void {
     const { o, game, me, tick, wm, race, owners } = v;
     if (!o.boats) return;
-    // The food trend needs every OwnerGrid, boat decision or not.
-    if (o.boatsMidgame && race !== null && owners !== null) {
+    // The far targets' food trend needs every OwnerGrid, boat decision or
+    // not.
+    if (o.boatsMidgame && o.boatMidFar && race !== null && owners !== null) {
       recordFood(navalMemory(s), foodOf(game, race, owners, me), owners.stamp);
     }
     if (tick - s.timers.lastBoat < o.boatEvery) return;
@@ -413,12 +432,12 @@ export class NavalController implements Controller {
       failed.has(cell);
     const guard = o.boatAvoidWarships ? hostileWarships(game, me) : [];
     const reach = game.config().warshipTargettingRange() + o.boatWarshipMargin;
-    const far: FarReach | undefined = o.boatsMidgame
+    const far: FarReach | undefined = farTargets(v, s, food, trigger)
       ? {
           max: o.boatMidMaxVoyage,
           foodAt: foodProjection(mem, food, owners.stamp, o),
           minFood: o.boatMidMinFood,
-          nationDist: nationDistOf(v, owners),
+          nation: nationReachOf(v, race, owners),
           front: o.boatMidFront,
           hold: FAR_LAND_SLACK + o.boatMidHold,
         }
@@ -452,6 +471,7 @@ export class NavalController implements Controller {
         }
         if (
           o.boatsMidgame &&
+          (t.far || o.boatMidRouteGuard) &&
           guard.length > 0 &&
           voyage !== undefined &&
           routeNearWarship(game, race, voyage.field, t.tile, guard, reach)
@@ -876,9 +896,21 @@ export function waterPriority(
   s: ApexState,
   food: LandmassFood,
 ): boolean {
-  const { o, game, tick } = v;
+  const { o, game } = v;
   const mapLand = game.numLandTiles() / (game.width() * game.height());
   if (mapLand < o.waterMapLand) return true;
+  return localFoodLow(v, s, food);
+}
+
+/** Water priority's second test (§3.7): the free plus tribe land left on
+ *  our landmasses is under TAKE_FACTOR × what we expect to take in
+ *  TAKE_TICKS. */
+export function localFoodLow(
+  v: Pick<View, "o" | "tick">,
+  s: ApexState,
+  food: LandmassFood,
+): boolean {
+  const { o, tick } = v;
   const age = Math.max(0, tick - (s.spawn.endTick ?? tick));
   const take = expectedLand(o, age + TAKE_TICKS) - expectedLand(o, age);
   let left = 0;
@@ -886,6 +918,26 @@ export function waterPriority(
     left += (food.free.get(c) ?? 0) + (food.tribe.get(c) ?? 0);
   }
   return left < TAKE_FACTOR * take;
+}
+
+/** o.boatsMidgame with o.boatMidFar: whether this decision may send far
+ *  boats. Only in the midgame the option means: in stall mode (troops idle
+ *  at the cap), or once our landmass's food is nearly gone. Not under
+ *  "blocked" alone, which holds in the opening whenever the tribes that
+ *  border us are busy (package A2's screens, Passage: three far boats with
+ *  1.06M troops before minute 2.5; the flag-off side took two of their
+ *  tribes later with near boats, and a nation's boat took the third
+ *  landing first). */
+export function farTargets(
+  v: View,
+  s: ApexState,
+  food: LandmassFood,
+  trigger: BoatTrigger,
+): boolean {
+  const { o } = v;
+  if (!o.boatsMidgame || !o.boatMidFar) return false;
+  if (trigger === "stall" || inStall(s, v.tick, o)) return true;
+  return localFoodLow(v, s, food);
 }
 
 /** The race-grid cell of every OwnerGrid sample (−1 for water), memoised

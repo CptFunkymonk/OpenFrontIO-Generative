@@ -94,6 +94,7 @@ export type CityOptions = Pick<
   | "structurePolicy"
   | "exposureWide"
   | "nukeModel"
+  | "nukeCities"
 >;
 
 /**
@@ -473,18 +474,23 @@ export function planCity(
 
 // ── Package B3: nukes and SAMs (spec §2.9, §5.1 item 5; chapter 13 §2.11,
 //    §5.10) ─────────────────────────────────────────────────────────────
-// With o.nukeModel (and structurePolicy "exposure"), NukeModel replaces
-// exposedSite: a site or an upgrade is exposed only to a *threat*, a nation
-// whose nuke ladder names us (NukeModel.exposures, latent ones with
-// o.nukeLatent; with o.nukeRankGuard also an unfriendly silo owner in the
-// land top 3 while we are in the top 2), that owns a silo and pays, or
-// nearly pays, the bomb it would pick; and only if that bomb has an aim
-// point at the site (NukeModel.nukeable: rings clear, no SAM reaching it).
+// With o.nukeModel (and structurePolicy "exposure"), NukeModel lists the
+// *threats*: nations with a silo whose nuke ladder names us (now; latent,
+// remembered for o.nukeMemory ticks, or by o.nukeRankGuard, with
+// o.nukeLatent), and whose gold, projected o.nukeHorizon ticks ahead,
+// reaches o.nukePayShare of a bomb's perceived price. A threat is *firing*
+// when it answers us now, with a finished silo and the gold for a bomb.
 // Arena quick@20 and showcase-m2 (package B3 notes): 16 of the 19 bombs at
 // apex came from the land leader aiming at us as its runner-up, each one
-// taking the city it was aimed at; exposedSite, which blocks on any nation
-// with a silo and bomb gold, also held 1.2M of idle gold on average from
-// minute 3 in games where no nation aimed at us.
+// taking the city it was aimed at; the ladder named us 3-40 ticks before
+// the first bomb, silo and gold ready.
+//
+// Cities (planCityModel): outside a SAM hub the legacy rule (exposedSite)
+// still decides, and a firing threat able to aim at the site
+// (NukeModel.nukeable: rings clear, no SAM reaching the aim point) refuses
+// it too; inside a hub's covered ring every threat counts, anticipated
+// hydrogen bombs included. o.nukeCities lets the model alone decide
+// everywhere (ab1: that spent the idle gold and lost, see options.ts).
 //
 // The SAM hub (o.samHub). While threatened by atoms only, one SAM farther
 // than an atom's outer radius from every structure of ours, and new cities
@@ -496,20 +502,29 @@ export function planCity(
 // first), and a blast deletes only units strictly inside its outer radius
 // (NukeExecution.ts:467-483), so the ring's cities survive it. Hub cities
 // keep o.citySpread's spacing (one bomb, one city once the SAM is gone).
-// No SAM against a nation that can pay a hydrogen bomb: it outranges SAMs
-// below level 5 and scores them 100k a level (NNB :750-775).
+// No SAM while a threat has, or will soon have, the gold for a hydrogen
+// bomb: it outranges SAMs below level 5 and scores them 100k a level (NNB
+// :750-775); one took a whole hub in ab1 and ab2 (Bering Strait).
 
 /** A nation that could nuke a structure of ours (see nukeThreats). */
 export interface NukeThreat {
   nation: Player;
-  /** The bomb it would pick (hydrogen if its gold covers the perceived
-   *  price, else atom). */
-  bomb: Bomb;
+  /** The bombs it could fire at us, now or soon (o.nukePayShare): only a
+   *  hydrogen bomb once its gold covers that perceived price (the type
+   *  choice never falls back to atoms, NNB :139-155); else an atom bomb,
+   *  and a hydrogen bomb too once its gold reaches o.nukePayShare of that
+   *  price (quick@20 Bering Strait: Alaska went from 2.8M to 6M in 500
+   *  ticks and one hydrogen bomb took a SAM hub, 6 levels). */
+  bombs: Bomb[];
   reason: NukeReason;
   /** Named below the rung that answers now, or by the rank guard. */
   latent: boolean;
   /** Ready launch slots of its finished silos. */
   slots: number;
+  /** It would fire at us at its next ready decision: named on the rung
+   *  that answers now, a finished silo, and the gold for a bomb at its
+   *  perceived price now. */
+  firing: boolean;
 }
 
 /** The model and this check's threats. */
@@ -526,6 +541,7 @@ export type NukeOptions = Pick<
   | "nukePayShare"
   | "nukeRankGuard"
   | "nukeMemory"
+  | "nukeHorizon"
   | "samHub"
   | "samMax"
   | "samMinLevels"
@@ -551,24 +567,36 @@ export function nukeThreats(
   o: NukeOptions,
 ): NukeThreat[] {
   const out: NukeThreat[] = [];
-  const pick = (N: Player): Bomb | null => {
-    const bomb = model.bombFor(N.id());
-    if (bomb !== null) return bomb;
-    const atom = model.perceivedCost(N.id(), UnitType.AtomBomb);
-    const share = BigInt(Math.round(o.nukePayShare * 1000));
-    return N.gold() * 1000n >= atom * share ? UnitType.AtomBomb : null;
+  const share = BigInt(Math.round(o.nukePayShare * 1000));
+  const near = (N: Player, t: Bomb) =>
+    model.projectedGold(N.id(), o.nukeHorizon) * 1000n >=
+    model.perceivedCost(N.id(), t) * share;
+  const firing = (N: Player, latent: boolean): boolean =>
+    !latent &&
+    model.bombFor(N.id()) !== null &&
+    N.units(UnitType.MissileSilo).some((u) => !u.isUnderConstruction());
+  const pick = (N: Player): Bomb[] | null => {
+    const now = model.bombFor(N.id());
+    if (now === UnitType.HydrogenBomb) return [now];
+    const bombs: Bomb[] = [];
+    if (now === UnitType.AtomBomb || near(N, UnitType.AtomBomb)) {
+      bombs.push(UnitType.AtomBomb);
+    }
+    if (near(N, UnitType.HydrogenBomb)) bombs.push(UnitType.HydrogenBomb);
+    return bombs.length > 0 ? bombs : null;
   };
   for (const e of model.exposures()) {
     if (!e.hasSilo || (e.latent && !o.nukeLatent)) continue;
     const N = game.player(e.nation);
-    const bomb = pick(N);
-    if (bomb === null) continue;
+    const bombs = pick(N);
+    if (bombs === null) continue;
     out.push({
       nation: N,
-      bomb,
+      bombs,
       reason: e.reason,
       latent: e.latent,
       slots: e.slots,
+      firing: firing(N, e.latent),
     });
   }
   const latent = (N: Player, reason: NukeReason): void => {
@@ -576,9 +604,16 @@ export function nukeThreats(
     if (N.isFriendly(me) || out.some((t) => t.nation === N)) return;
     const s = model.slots(N);
     if (s.silos === 0) return;
-    const bomb = pick(N);
-    if (bomb === null) return;
-    out.push({ nation: N, bomb, reason, latent: true, slots: s.now });
+    const bombs = pick(N);
+    if (bombs === null) return;
+    out.push({
+      nation: N,
+      bombs,
+      reason,
+      latent: true,
+      slots: s.now,
+      firing: false,
+    });
   };
   if (o.nukeLatent && o.nukeMemory > 0) {
     for (const n of model.namedSince(game.ticks() - o.nukeMemory)) {
@@ -597,10 +632,17 @@ export function nukeThreats(
   return out;
 }
 
-/** The first threat whose bomb has an aim point at `tile`, or null. */
-export function threatAt(plan: NukePlan, tile: TileRef): NukeThreat | null {
-  for (const t of plan.threats) {
-    if (plan.model.nukeable([tile], t.bomb, t.nation)) return t;
+/** The first threat (of `among`, default all) with a bomb that has an aim
+ *  point at `tile`, or null. */
+export function threatAt(
+  plan: NukePlan,
+  tile: TileRef,
+  among: readonly NukeThreat[] = plan.threats,
+): NukeThreat | null {
+  for (const t of among) {
+    for (const b of t.bombs) {
+      if (plan.model.nukeable([tile], b, t.nation)) return t;
+    }
   }
   return null;
 }
@@ -692,12 +734,28 @@ export function hubSites(
   return out.slice(0, EXACT_SITES);
 }
 
+/** Whether `tile` lies in the covered ring (hubRing) of a finished SAM of
+ *  ours. */
+export function inHub(game: Game, me: Player, tile: TileRef): boolean {
+  for (const sam of me.units(UnitType.SAMLauncher)) {
+    if (sam.isUnderConstruction() || !sam.isActive()) continue;
+    const ring = hubRing(game, sam.level());
+    const d2 = game.euclideanDistSquared(sam.tile(), tile);
+    if (d2 >= ring.min * ring.min && d2 <= ring.max * ring.max) return true;
+  }
+  return false;
+}
+
 /**
- * planCity under the model (o.nukeModel): with no threat, the usual sites
- * and upgrades, unchecked; with threats, only an upgrade of a city no
- * threat can aim at, or a build at such a site: hub sites first (hubSites),
- * then the usual ones. Never a new city within hubRing().min of a SAM of
- * ours: the salvo a SAM draws would take it.
+ * planCity under the model (o.nukeModel). In a hub's covered ring
+ * (inHub), an upgrade or a build needs a tile no threat can aim at
+ * (threatAt over every threat, latent and anticipated bombs included: the
+ * hub concentrates levels). Elsewhere, unless o.nukeCities, it needs
+ * exposedSite's consent (the legacy rule) and no firing threat able to aim
+ * there; with o.nukeCities, the model alone decides, over every threat.
+ * Sites: the hub sites first (hubSites), then the usual ones. Never a new
+ * city within hubRing().min of a SAM of ours: the salvo a SAM draws would
+ * take it.
  */
 function planCityModel(
   game: Game,
@@ -707,13 +765,21 @@ function planCityModel(
   gold: bigint,
   cost: bigint,
 ): CityAction | CityIdle {
-  const threatened = plan.threats.length > 0;
   let exposed = false;
+  const firing = plan.threats.filter((t) => t.firing);
   const safe = (t: TileRef): boolean => {
-    if (!threatened) return true;
-    if (threatAt(plan, t) === null) return true;
-    exposed = true;
-    return false;
+    const hub = inHub(game, me, t);
+    const legacy = !o.nukeCities && !hub;
+    if (legacy && exposedSite(game, me, t, o.exposureWide)) {
+      exposed = true;
+      return false;
+    }
+    const among = legacy ? firing : plan.threats;
+    if (among.length > 0 && threatAt(plan, t, among) !== null) {
+      exposed = true;
+      return false;
+    }
+    return true;
   };
   const maxLevel = levelCap(o);
   if (o.cityUpgradeFirst) {
@@ -737,11 +803,9 @@ function planCityModel(
   const salvoR2 = hubRing(game).min ** 2;
   const clearOfSams = (t: TileRef) =>
     sams.every((sam) => game.euclideanDistSquared(sam, t) >= salvoR2);
-  const sites = (
-    threatened
-      ? [...hubSites(game, me, o), ...citySites(game, me, o)]
-      : citySites(game, me, o)
-  ).filter((site) => clearOfSams(site.tile));
+  const sites = [...hubSites(game, me, o), ...citySites(game, me, o)].filter(
+    (site) => clearOfSams(site.tile),
+  );
   let probes = 0;
   for (const site of sites) {
     if (probes >= BUILD_PROBES) break;
@@ -781,8 +845,8 @@ export type SamIdle =
   | "noSite";
 
 /**
- * The SAM hub rule (o.samHub): with threats, none able to pay a hydrogen
- * bomb, fewer than o.samMax SAMs of ours (finished or not), and gold for
+ * The SAM hub rule (o.samHub): with threats, none with a hydrogen bomb
+ * among its bombs (nukeThreats), fewer than o.samMax SAMs of ours (finished or not), and gold for
  * one, the site farther than hubRing().min from every structure of ours
  * (a salvo at it spares them) whose covered ring holds the most finished
  * city levels (then the deepest, then the lowest tile), at least
@@ -800,7 +864,7 @@ export function planSam(
 ): SamAction | SamIdle {
   if (!o.samHub) return "off";
   if (plan.threats.length === 0) return "noThreat";
-  if (plan.threats.some((t) => t.bomb === UnitType.HydrogenBomb)) {
+  if (plan.threats.some((t) => t.bombs.includes(UnitType.HydrogenBomb))) {
     return "hydro";
   }
   if (me.units(UnitType.SAMLauncher).length >= o.samMax) return "max";
@@ -820,7 +884,7 @@ export function planSam(
       if (
         t.slots >= 1 &&
         gold >= atom &&
-        !plan.model.nukeable(scored, t.bomb, t.nation)
+        !t.bombs.some((b) => plan.model.nukeable(scored, b, t.nation))
       ) {
         return "salvo";
       }
@@ -1028,7 +1092,10 @@ function threatList(plan: NukePlan): string {
       .map(
         (t) =>
           `${t.nation.name()}:${t.reason}${t.latent ? "~" : ""}:` +
-          `${t.bomb === UnitType.HydrogenBomb ? "H" : "A"}${t.slots}`,
+          t.bombs
+            .map((b) => (b === UnitType.HydrogenBomb ? "H" : "A"))
+            .join("") +
+          `${t.slots}`,
       )
       .join(",") +
     "]"

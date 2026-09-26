@@ -3,6 +3,7 @@ import {
   exposedSite,
   hubRing,
   hubSites,
+  inHub,
   NukePlan,
   nukeThreats,
   planCity,
@@ -90,13 +91,13 @@ function dist(w: World, a: TileRef, b: TileRef): number {
 describe("B3 threats (nukeThreats)", () => {
   it("the leader aiming at us as runner-up with a silo and atom gold is a threat; allied, without a silo, or far from the price it is not", () => {
     let w = leaderWorld(1_000_000n);
-    let p = plan(w, "H");
+    const p = plan(w, "H");
     expect(p.threats).toHaveLength(1);
     // (toBe, not inside toMatchObject: its subset walk descends into the
     // whole Player graph.)
     expect(p.threats[0].nation).toBe(w.p.N);
     expect(p.threats[0]).toMatchObject({
-      bomb: UnitType.AtomBomb,
+      bombs: [UnitType.AtomBomb],
       reason: "runnerUp",
       latent: false,
       slots: 1,
@@ -120,6 +121,26 @@ describe("B3 threats (nukeThreats)", () => {
     );
     setGold(w.p.N, 1_000_000n);
     expect(plan(w, "H").threats).toHaveLength(0);
+  });
+
+  it("bombs: a hydrogen bomb joins the atom once the gold reaches nukePayShare of its perceived price; paying it, the hydrogen bomb alone (no fallback to atoms)", () => {
+    const bombs = (gold: bigint) => {
+      const w = leaderWorld(gold);
+      const p = plan(w, "H");
+      expect(p.threats).toHaveLength(1);
+      return p.threats[0].bombs;
+    };
+    expect(bombs(2_400_000n)).toEqual([UnitType.AtomBomb]);
+    expect(bombs(2_500_000n)).toEqual([
+      UnitType.AtomBomb,
+      UnitType.HydrogenBomb,
+    ]);
+    expect(bombs(5_000_000n)).toEqual([UnitType.HydrogenBomb]);
+    // The SAM hub stays off against the nearly-hydro threat.
+    const w = leaderWorld(2_500_000n);
+    w.p.H.buildUnit(UnitType.City, w.game.ref(160, 60), {});
+    setGold(w.p.H, 5_000_000n);
+    expect(planSam(w.game, w.p.H, O, plan(w, "H"))).toBe("hydro");
   });
 
   it("latent: an incoming attack hides the crown rung but the nation still counts; the rank guard and the memory count too, and each can be switched off", () => {
@@ -176,7 +197,7 @@ describe("B3 threats (nukeThreats)", () => {
 });
 
 describe("B3 exposure of cities (planCity with the model)", () => {
-  it("a threat blocks a nukeable site; a silo owner aiming elsewhere does not, where exposedSite blocks", () => {
+  it("a threat blocks a nukeable site; a silo owner aiming elsewhere blocks only through exposedSite, which nukeCities drops", () => {
     // Threat: N aims at us.
     let w = leaderWorld(1_000_000n);
     setGold(w.p.H, 2_000_000n);
@@ -204,10 +225,14 @@ describe("B3 exposure of cities (planCity with the model)", () => {
     setGold(w.p.H, 2_000_000n);
     p = plan(w, "H");
     expect(p.threats).toHaveLength(0);
-    const act = planCity(w.game, w.p.H, O, p);
-    expect(typeof act).not.toBe("string");
+    // The legacy rule (the default: nukeCities off) still refuses: N has a
+    // silo and bomb gold.
     expect(exposedSite(w.game, w.p.H, w.game.ref(260, 60), true)).toBe(true);
+    expect(planCity(w.game, w.p.H, O, p)).toBe("exposed");
     expect(planCity(w.game, w.p.H, { ...O, nukeModel: false })).toBe("exposed");
+    // The model alone (nukeCities, "v1") builds.
+    const act = planCity(w.game, w.p.H, { ...O, nukeCities: true }, p);
+    expect(typeof act).not.toBe("string");
   });
 
   it("the real nation agrees: under a threat nothing planCity would build is aimed at", () => {
@@ -269,10 +294,83 @@ describe("B3 exposure of cities (planCity with the model)", () => {
     const act = planCity(w.game, H, O, p);
     if (typeof act === "string") throw new Error(`no action: ${act}`);
     expect(act).toMatchObject({ kind: "upgrade", unitId: inRing.id() });
-    // Without threats the usual order upgrades the other one.
-    const free = planCity(w.game, H, O, { model: p.model, threats: [] });
+    // Without threats and with the model alone (nukeCities), the usual
+    // order upgrades the other one; with the legacy rule, exposedSite still
+    // refuses it (N has a silo and bomb gold) but not the hub city.
+    const legacy = planCity(w.game, H, O, { model: p.model, threats: [] });
+    expect(legacy).toMatchObject({ kind: "upgrade", unitId: inRing.id() });
+    const free = planCity(
+      w.game,
+      H,
+      { ...O, nukeCities: true },
+      { model: p.model, threats: [] },
+    );
     if (typeof free === "string") throw new Error(`no action: ${free}`);
     expect(free).toMatchObject({ kind: "upgrade", unitId: outside.id() });
+  });
+});
+
+describe("B3 v3: firing threats outside hubs, every threat inside", () => {
+  it("a threat that cannot pay yet (not firing) does not refuse a city exposedSite allows", () => {
+    const w = leaderWorld(400_000n);
+    const { H } = w.p;
+    setGold(H, 2_000_000n);
+    const p = plan(w, "H");
+    expect(p.threats).toHaveLength(1);
+    expect(p.threats[0].firing).toBe(false);
+    expect(p.threats[0].bombs).toEqual([UnitType.AtomBomb]);
+    expect(exposedSite(w.game, H, w.game.ref(160, 60), true)).toBe(false);
+    const act = planCity(w.game, H, O, p);
+    expect(typeof act).toBe("object");
+    // Paying now, it fires: refused.
+    setGold(w.p.N, 1_000_000n);
+    const q = plan(w, "H");
+    expect(q.threats[0].firing).toBe(true);
+    expect(planCity(w.game, H, O, q)).toBe("exposed");
+  });
+
+  it("inside a hub an anticipated hydrogen bomb refuses the site when its rings are clear; an atom-only threat does not", () => {
+    // 600 x 300: N (75,000 tiles) leads; H (59,800) at x in [300, 530),
+    // y in [20, 280), unowned land around it, so hydrogen rings are clear.
+    const make = (gold: bigint) => {
+      const w = world(
+        600,
+        300,
+        { N: PlayerType.Nation, H: PlayerType.Human },
+        (x, y) => {
+          if (x < 250) return "N";
+          if (x >= 300 && x < 530 && y >= 20 && y < 280) return "H";
+          return null;
+        },
+      );
+      siloAt(w, w.p.N, 100, 150);
+      setGold(w.p.N, gold);
+      samAt(w, w.p.H, 415, 150);
+      tick(w);
+      setGold(w.p.H, 2_000_000n);
+      return w;
+    };
+    const site = (w: World) => w.game.ref(415, 185);
+    // Atom only (1M): the hub site is covered, the build goes there.
+    let w = make(1_000_000n);
+    let p = plan(w, "H");
+    expect(p.threats[0].bombs).toEqual([UnitType.AtomBomb]);
+    expect(threatAt(p, site(w))).toBe(null);
+    const act = planCity(w.game, w.p.H, O, p);
+    if (typeof act === "string" || act.kind !== "build") {
+      throw new Error(`no build: ${JSON.stringify(act)}`);
+    }
+    expect(inHub(w.game, w.p.H, act.tile)).toBe(true);
+    // 2.6M: a hydrogen bomb is near (half its 5M): the ring is refused,
+    // and exposedSite refuses the rest.
+    w = make(2_600_000n);
+    p = plan(w, "H");
+    expect(p.threats[0].bombs).toEqual([
+      UnitType.AtomBomb,
+      UnitType.HydrogenBomb,
+    ]);
+    expect(threatAt(p, site(w))).not.toBe(null);
+    expect(planCity(w.game, w.p.H, O, p)).toBe("exposed");
   });
 });
 

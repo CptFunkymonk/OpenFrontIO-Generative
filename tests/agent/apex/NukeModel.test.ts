@@ -269,6 +269,38 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     );
   });
 
+  it("projectedGold: the gain since the oldest sample of the window, carried forward; exposures() lists and samples silo owners only", () => {
+    const w = world(
+      SIDE,
+      SIDE,
+      { N: PlayerType.Nation, H: PlayerType.Human, B: PlayerType.Nation },
+      runs(SIDE, [
+        ["N", 3000],
+        ["H", 2000],
+        ["B", 1000],
+      ]),
+    );
+    const { N, B } = w.p;
+    siloAt(w, N, 10, 5);
+    setGold(N, 1_000_000n);
+    setGold(B, 9_000_000n);
+    const m = model(w, "H");
+    expect(m.exposures().map((e) => e.nation)).toEqual([N.id()]);
+    tick(w, 100);
+    setGold(N, 1_500_000n);
+    m.exposures();
+    // +500k in 100 ticks: +1.5M over the next 300.
+    expect(m.projectedGold(N.id(), 300)).toBe(3_000_000n);
+    expect(m.projectedGold(N.id(), 0)).toBe(1_500_000n);
+    // No silo, no samples: its gold as it is.
+    expect(m.projectedGold(B.id(), 300)).toBe(9_000_000n);
+    // Spending leaves no rate.
+    tick(w, 30);
+    setGold(N, 200_000n);
+    m.exposures();
+    expect(m.projectedGold(N.id(), 300)).toBe(200_000n);
+  });
+
   it("bombFor: a hydrogen bomb when the gold covers its perceived price, else an atom bomb, else none", () => {
     const w = world(
       SIDE,

@@ -6,6 +6,7 @@ import {
   TerrainType,
   UnitType,
 } from "../../../../core/game/Game";
+import { TileRef } from "../../../../core/game/GameMap";
 import {
   attackWhy,
   counterTroops,
@@ -102,6 +103,9 @@ const POST_THREATS = 3;
 /** o.detPosts: a nation that attacked us within this many ticks is a
  *  threat whatever its list picks now (its next wave comes). */
 const POST_RECENT = 600;
+/** Logs only: ticks a transport ship is remembered after its unit is gone
+ *  (a landed ship's attack is seen a tick or two after the unit goes). */
+const BOAT_GONE = 20;
 
 /** Our memory (spec §2.10: controllers keep none of their own). Declared
  *  here rather than in state.ts, which another engineer owns; it is created
@@ -126,7 +130,26 @@ export interface DefenseMemory {
   /** Tick of the last new attack on us (land or a boat landing) by each
    *  nation (absent in memories created before it). */
   lastIn?: Record<PlayerID, number>;
+  /** Logs only (never read by decisions): nation transport ships, by unit
+   *  id, from the scan that first saw them at sea until BOAT_GONE ticks
+   *  after their unit is gone (scanBoats). */
+  boats?: Record<number, SeenBoat>;
   stats: DefenseStats;
+}
+
+/** A nation transport ship as first seen at sea (logs only). Plain data. */
+export interface SeenBoat {
+  /** Tick first seen: at most one tick after its launch. */
+  at: number;
+  by: PlayerID;
+  /** Its landing tile (Unit.targetTile), where its attack will start. */
+  dst: TileRef;
+  /** It was bound for our land when first seen (only these are logged). */
+  ours: boolean;
+  /** Its troops when first seen (only a bomb changes them at sea). */
+  troops: number;
+  /** Tick its unit was first missing (landed, retreated or sunk). */
+  gone?: number;
 }
 
 /** Counts for logs and tests; never read by decisions. */
@@ -233,6 +256,7 @@ export class DefenseController implements Controller {
     noteBorderNations(v, s);
     this.settleRecalls(v, mem);
     const { attackers, incoming } = this.scanIncoming(v, mem);
+    if (v.live !== null && v.log !== undefined) this.scanBoats(v, mem);
     // §3.3.3 first: Emergency, and its key must precede the allocator's.
     this.tnCancel(v, mem, incoming);
     if (attackers.length > 0) this.recalls(v, s, mem, attackers);
@@ -297,9 +321,11 @@ export class DefenseController implements Controller {
     if (t - (mem.lastPost ?? NEVER) < POST_EVERY) return;
     mem.lastPost = t;
     const mine = me.units(UnitType.DefensePost);
-    // Posts ordered, not alive: an invasion captures the posts it
-    // overruns (they are structures), and posts ordered into a running
-    // attack were overrun before they were built (50 ticks).
+    // Posts ordered, not alive: a conquered tile's defense post is
+    // deleted, not captured (PlayerExecution.ts:72-74), and posts ordered
+    // on a front under attack were destroyed before or soon after their 50
+    // ticks of construction (arena quick Europe: 12 ordered, at most 4
+    // standing at once).
     if ((mem.stats.posts ?? 0) >= o.detPostsMax) return;
     const cost = game.config().unitInfo(UnitType.DefensePost).cost(game, me);
     if (me.gold() < cost) return;
@@ -411,7 +437,7 @@ export class DefenseController implements Controller {
       const first = mem.seen[a.id()] ?? t;
       seen[a.id()] = first;
       const fresh = first === t;
-      const estimate = fresh ? this.logIncoming(v, a, p) : 0;
+      const estimate = fresh ? this.logIncoming(v, mem, a, p) : 0;
       if (fresh) {
         mem.stats.incoming++;
         (mem.lastIn ??= {})[p.id()] = t;
@@ -443,7 +469,12 @@ export class DefenseController implements Controller {
   /** §3.3.1: an attack of a troops takes about a/p_def of our tiles, p_def
    *  its loss per tile against our density. Logged; returned for the
    *  counter's gate (it has been 3-100× pessimistic, arena showcase). */
-  private logIncoming(v: View, a: Attack, N: Player): number {
+  private logIncoming(
+    v: View,
+    mem: DefenseMemory,
+    a: Attack,
+    N: Player,
+  ): number {
     const { me, models } = v;
     const troops = a.troops();
     const r = models.hit(
@@ -468,8 +499,20 @@ export class DefenseController implements Controller {
       const st = v.nm.get(N.id());
       const f = v.purse.floors;
       const term = f.detTerms?.find((x) => x.id === N.id());
+      // A boat's attack starts at the ship's landing tile: its launch, as
+      // the nation saw it, is the ship's `def boat` line.
+      const src = a.sourceTile();
+      let why: string;
+      if (src === null) {
+        why = attackWhy(me, N, troops, models, v.nm.sendCapSafe());
+      } else {
+        const ship = this.landed(mem, N.id(), src, troops);
+        why =
+          `boat launch ${ship === null ? "not seen" : `seen at ${ship.at}`} ` +
+          attackWhy(me, N, troops, models, v.nm.sendCapSafe(), "landing");
+      }
       v.log(
-        `${v.tick} def why ${N.name()} ${attackWhy(me, N, troops, models)} ` +
+        `${v.tick} def why ${N.name()} ${why} ` +
           `nm border=${st?.sharesBorderWithUs ?? "-"} ` +
           `free=${st?.bordersFreeLand ?? "-"} tribes=${st?.affordableTribes ?? "-"} ` +
           `at=${st?.refreshedAt ?? "-"} H=${Math.round(f.H)} ` +
@@ -477,6 +520,78 @@ export class DefenseController implements Controller {
       );
     }
     return tiles;
+  }
+
+  /** Logs only: the ship a nation's fresh boat attack of `troops` landed
+   *  from, forgotten once matched: one of its ships bound for the attack's
+   *  source tile (the landing tile), the one whose troops when first seen
+   *  are nearest (ships sent at one tile land in turn), the first seen on a
+   *  tie. */
+  private landed(
+    mem: DefenseMemory,
+    by: PlayerID,
+    src: TileRef,
+    troops: number,
+  ): SeenBoat | null {
+    const boats = mem.boats ?? {};
+    let best: number | null = null;
+    for (const k of Object.keys(boats)) {
+      const b = boats[Number(k)];
+      if (b.by !== by || b.dst !== src || !b.ours) continue;
+      if (
+        best === null ||
+        Math.abs(b.troops - troops) < Math.abs(boats[best].troops - troops)
+      ) {
+        best = Number(k);
+      }
+    }
+    if (best === null) return null;
+    const b = boats[best];
+    delete boats[best];
+    return b;
+  }
+
+  /**
+   * Logs only (live, not in rollouts; never read by decisions): a `def boat` line
+   * for each nation transport ship first seen at sea bound for our land,
+   * with attackWhy read then. A boat's attack exists only once it lands,
+   * often 100 ticks or more after the launch, so what the nation saw at
+   * its decision (the ship took its troops at the launch,
+   * PlayerImpl.buildUnit) is read here, the tick after the launch. A ship
+   * first seen bound elsewhere is remembered as not ours, so a landing
+   * tile we take later does not make it look like a boat at us.
+   */
+  private scanBoats(v: View, mem: DefenseMemory): void {
+    const { me, game, tick: t } = v;
+    const boats = (mem.boats ??= {});
+    const live = new Set<number>();
+    // Every nation: a boat comes from over the sea, so its nation is not
+    // among the scan's neighbours (v.wm.nations are land contacts).
+    for (const N of game.players()) {
+      if (N.type() !== PlayerType.Nation) continue;
+      for (const u of N.units(UnitType.TransportShip)) {
+        const dst = u.targetTile();
+        if (dst === undefined) continue;
+        const id = u.id();
+        live.add(id);
+        if (boats[id] !== undefined) continue;
+        const ours = game.ownerID(dst) === me.smallID();
+        boats[id] = { at: t, by: N.id(), dst, ours, troops: u.troops() };
+        if (!ours) continue;
+        v.log?.(
+          `${t} def boat ${N.name()} ${Math.round(u.troops())} ` +
+            `to ${game.x(dst)},${game.y(dst)} ` +
+            attackWhy(me, N, u.troops(), v.models, v.nm.sendCapSafe(), "sea"),
+        );
+      }
+    }
+    for (const k of Object.keys(boats)) {
+      const id = Number(k);
+      if (live.has(id)) continue;
+      const b = boats[id];
+      b.gone ??= t;
+      if (t - b.gone > BOAT_GONE) delete boats[id];
+    }
   }
 
   // ── §3.3.2 Recall by alliance ──────────────────────────────────────────

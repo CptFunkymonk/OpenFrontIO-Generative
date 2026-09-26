@@ -8,8 +8,9 @@
  *   implementations have their own tests): which nations add a line, the
  *   line (T(d) + 1)/1.1·detMargin, the betrayal line detBetrayShare·T(d),
  *   lines above detMaxShare·cap dropped, the wouldTargetUs check and its
- *   tribe slack, and homeFloors folding the floor into H (and so the TN
- *   floor through tnKeep), off by default.
+ *   tribe slack, and homeFloors folding the floor into H, off by
+ *   default. The TN floor stays max(H_vw, tnKeep·H): free land may spend
+ *   below the line (to tnKeep of it), tribes, boats and strikes may not.
  * - The floor against a real NationExecution (the NationSendCap pin's
  *   setting: the real Config, FFA, Singleplayer, Impossible, an all-plains
  *   map with the nation on x 0-9 and us on the rest): with our home at the
@@ -44,6 +45,7 @@ import { parseApexOptions } from "../../../src/agent/agents/apex/options";
 import { ApexPolicy, View } from "../../../src/agent/agents/apex/policy";
 import { ApexState, createState } from "../../../src/agent/agents/apex/state";
 import {
+  attackWhy,
   counterTroops,
   deterrence,
   DeterrenceParams,
@@ -66,6 +68,7 @@ import { Config } from "../../../src/core/configuration/Config";
 import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
 import { NationExecution } from "../../../src/core/execution/NationExecution";
+import { TransportShipExecution } from "../../../src/core/execution/TransportShipExecution";
 import {
   Cell,
   Difficulty,
@@ -79,7 +82,16 @@ import {
 } from "../../../src/core/game/Game";
 import { createGame } from "../../../src/core/game/GameImpl";
 import { GameMapImpl } from "../../../src/core/game/GameMap";
-import { AGENT_CLIENT, AGENT_ID, Field, GAME_CONFIG, Harness } from "./Field";
+import {
+  AGENT_CLIENT,
+  AGENT_ID,
+  Field,
+  field,
+  GAME_CONFIG,
+  Harness,
+  own,
+  rect,
+} from "./Field";
 
 // ── Stand-ins ────────────────────────────────────────────────────────────
 
@@ -419,7 +431,7 @@ describe("deterrence floor in homeFloors (stand-ins)", () => {
     expect(f.calls).toEqual([]);
   });
 
-  test("on: H = max(spec floor, det); the TN floor follows through tnKeep, the strike floor is H", () => {
+  test("on: H = max(spec floor, det), the strike floor is H; the TN floor is tnKeep·H, below the line", () => {
     const f = fake({ A: { T: 60_000, smallID: 1 } });
     const fl = homeFloors(
       inputs(f, { deterrence: true }, ["A"]),
@@ -429,6 +441,9 @@ describe("deterrence floor in homeFloors (stand-ins)", () => {
     expect(fl.detBy).toBe("A");
     expect(fl.H).toBeCloseTo(line(60_000));
     expect(fl.tn).toBeCloseTo(Math.max(17_000, 0.5 * line(60_000)));
+    // Free land is not held at the line (HomeTarget.ts): it may spend home
+    // down to tnKeep of it.
+    expect(fl.tn).toBeLessThan(fl.det!);
     expect(fl.strike).toBeCloseTo(fl.H);
     expect(fl.econ).toBeCloseTo(30_000);
     expect(fl.vw).toBeCloseTo(17_000);
@@ -1047,5 +1062,141 @@ describe("potentialSend (stand-ins)", () => {
     );
     // Never negative (below its reserve).
     expect(potentialSend(nmWith(50_000, 0), models, N, 0, 7)).toBe(0);
+  });
+});
+
+// ── Boat diagnostics (logs only) ─────────────────────────────────────────
+
+describe("boat diagnostics: what the nation saw at the launch (logs only)", () => {
+  /** x 0-9 the nation's island, x 10-19 ocean, x 20-29 our land but for
+   *  y 0-2 there (free land on the shore); the DefenseController alone. */
+  async function sea() {
+    const f = await field({
+      width: 30,
+      height: 12,
+      terrain: (x) => (x >= 10 && x < 20 ? "water" : "plains"),
+    });
+    const nation = f.game.addPlayer(
+      new PlayerInfo("nation", PlayerType.Nation, null, NATION_ID),
+    );
+    own(nation, rect(f.game, 0, 0, 10, 12));
+    own(f.me, rect(f.game, 20, 3, 30, 12));
+    const s = createState();
+    const policy = new ApexPolicy(parseApexOptions({ ...DEFENSE_ONLY }), s);
+    const h = new Harness(f, (ctx) => policy.tick({ ...ctx, gameID: "boats" }));
+    for (let i = 0; i < 60; i++) h.step();
+    return { f, nation, h, s };
+  }
+  const lines = (h: Harness, what: string) =>
+    h.logs.filter((l) => l.includes(` def ${what} `));
+
+  test("a ship bound for our land is logged when first seen, with T, H and the flags then; its landing logs the launch tick and no flags", async () => {
+    const { f, nation, h, s } = await sea();
+    nation.setTroops(100_000);
+    f.me.setTroops(50_000);
+    const launch = f.game.ticks();
+    f.game.addExecution(
+      new TransportShipExecution(nation, f.game.ref(25, 8), 20_000),
+    );
+    for (let i = 0; i < 3 && lines(h, "boat").length === 0; i++) h.step();
+    const boat = lines(h, "boat");
+    expect(boat).toHaveLength(1);
+    const at = Number(/^\[\d+\] (\d+) /.exec(boat[0])![1]);
+    expect(at - launch).toBeLessThanOrEqual(2);
+    // T is its troops before the launch (the ship took 20k of them); our
+    // home 50k is half of it: juicy and weakest.
+    expect(boat[0]).toContain(" def boat nation 20000 ");
+    expect(boat[0]).toContain("T=100000 ");
+    expect(boat[0]).toContain("H/T=0.50 ");
+    expect(boat[0]).toMatch(/\[[a-z,]*juicy,weakest\]$/);
+    // Our home and its troops move before the landing.
+    nation.setTroops(10_000);
+    f.me.setTroops(90_000);
+    for (let i = 0; i < 200 && lines(h, "why").length === 0; i++) h.step();
+    const why = lines(h, "why");
+    expect(why).toHaveLength(1);
+    expect(why[0]).toContain(`def why nation boat launch seen at ${at} `);
+    // At the landing both have moved (T 30k, H/T 3): no strategy flags.
+    expect(why[0]).toContain(" at landing T=30000 ");
+    expect(why[0]).toContain(" H/T=3.00 ");
+    expect(why[0].slice(why[0].indexOf(" def why "))).not.toContain("[");
+    expect(lines(h, "in")[0]).toContain(" boat ");
+    // The matched ship is forgotten; the memory empties once it is gone.
+    for (let i = 0; i < 30; i++) h.step();
+    expect(defenseMemory(s).boats).toEqual({});
+  });
+
+  test("attackWhy: a landed boat's attack is one of our incoming attacks, a ship at sea is not", async () => {
+    const { f, nation, h } = await sea();
+    nation.setTroops(100_000);
+    f.me.setTroops(50_000);
+    f.game.addExecution(
+      new TransportShipExecution(nation, f.game.ref(25, 8), 20_000),
+    );
+    for (let i = 0; i < 200 && f.me.incomingAttacks().length === 0; i++) {
+      h.step();
+    }
+    const [a] = f.me.incomingAttacks();
+    expect(a.sourceTile()).not.toBeNull();
+    const models = createModels(f.game);
+    const S = a.troops();
+    const safe = sendCapSafe(Difficulty.Impossible);
+    expect(attackWhy(f.me, nation, S, models, safe, "landing")).toContain(
+      " in=0 ",
+    );
+    expect(attackWhy(f.me, nation, S, models, safe, "sea")).toContain(
+      ` in=${Math.round(S)} `,
+    );
+    expect(attackWhy(f.me, nation, S, models, safe, "decision")).toMatch(
+      / in=0 .*\[.*\]$/,
+    );
+  });
+
+  test("two ships to one landing tile: a landing is matched to the ship with the nearest troops", async () => {
+    const { f, nation, h } = await sea();
+    nation.setTroops(200_000);
+    f.me.setTroops(50_000);
+    const send = (troops: number) => {
+      f.game.addExecution(
+        new TransportShipExecution(nation, f.game.ref(25, 8), troops),
+      );
+      for (let i = 0; i < 5; i++) h.step();
+    };
+    send(10_000);
+    send(30_000);
+    const seen = lines(h, "boat").map((l) => ({
+      at: Number(/^\[\d+\] (\d+) /.exec(l)![1]),
+      troops: Number(/ def boat nation (\d+) /.exec(l)![1]),
+    }));
+    expect(seen.map((x) => x.troops)).toEqual([10_000, 30_000]);
+    expect(seen[0].at).toBeLessThan(seen[1].at);
+    // The 30k ship "lands" first: its attack starts at the landing tile.
+    const [ship] = nation.units(UnitType.TransportShip);
+    const dst = ship.targetTile()!;
+    nation.conquer(dst);
+    f.game.addExecution(
+      new AttackExecution(30_000, nation, AGENT_ID, dst, false),
+    );
+    for (let i = 0; i < 3 && lines(h, "why").length === 0; i++) h.step();
+    expect(lines(h, "why")[0]).toContain(`boat launch seen at ${seen[1].at} `);
+  });
+
+  test("a ship bound for free land is not logged, even when we take its landing tile", async () => {
+    const { f, nation, h } = await sea();
+    nation.setTroops(100_000);
+    f.me.setTroops(50_000);
+    f.game.addExecution(
+      new TransportShipExecution(nation, f.game.ref(24, 1), 5_000),
+    );
+    h.step();
+    h.step();
+    const [ship] = nation.units(UnitType.TransportShip);
+    expect(ship).toBeDefined();
+    const dst = ship.targetTile()!;
+    expect(f.game.hasOwner(dst)).toBe(false);
+    f.me.conquer(dst);
+    for (let i = 0; i < 100 && ship.isActive(); i++) h.step();
+    expect(lines(h, "boat")).toEqual([]);
+    expect(lines(h, "why")).toEqual([]);
   });
 });

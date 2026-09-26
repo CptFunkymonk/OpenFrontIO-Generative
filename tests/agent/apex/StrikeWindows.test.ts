@@ -10,6 +10,8 @@ import {
   StrikeSizing,
   strikeTopUp,
   strikeWindows,
+  strikeYield,
+  topUpReason,
   WindowInput,
 } from "../../../src/agent/lib/StrikeWindows";
 
@@ -216,5 +218,106 @@ describe("StrikeWindows: posts and reviews (o.strikePosts, o.strikeRetreat)", ()
     expect(retreatReason({ ...r, cover: 1, T: 9e9, kill: true }, o)).toBeNull();
     // Nothing of ours left to call back.
     expect(retreatReason({ ...r, cover: 1, A: 0 }, o)).toBeNull();
+  });
+});
+
+describe("StrikeWindows: yield and top-up saves (review of A1)", () => {
+  // A stack of 1M on a 20,000-tile nation, 200k of it cancelled by the
+  // answer and the nation's attacks on us (left 800k), 40 troops a tile.
+  const S = 1_000_000;
+  const left = 800_000;
+
+  test("strikeYield: a kill needs all but the annex line reachable and paid for; the rest comes home", () => {
+    // 20,000 tiles, 19,901 to pay for: 796,040 <= 800,000.
+    const y = strikeYield(S, left, 40, 20_000, Infinity, 99);
+    expect(y).toMatchObject({ kill: true, pocket: false, tiles: 20_000 });
+    expect(y.spent).toBeCloseTo(40 * 19_901 + 200_000, 6);
+    expect(y.refund).toBeCloseTo(left - 40 * 19_901, 6);
+    // Reachable exactly to the line: still a kill; one tile short: not.
+    expect(strikeYield(S, left, 40, 20_000, 19_901, 99).kill).toBe(true);
+    expect(strikeYield(S, left, 40, 20_000, 19_900, 99).kill).toBe(false);
+    // Paid one troop short: it burns out.
+    const short = strikeYield(S, 796_039, 40, 20_000, Infinity, 99);
+    expect(short).toMatchObject({ kill: false, pocket: false, spent: S });
+    expect(short.refund).toBe(0);
+  });
+
+  test("strikeYield: a pocket smaller than the stack pays for is taken whole and the rest comes home", () => {
+    // 1,100 reachable of 63,000 (arena quick@20 g4: Leafer).
+    const y = strikeYield(S, left, 40, 63_000, 1_100, 99);
+    expect(y).toMatchObject({ kill: false, pocket: true, tiles: 1_100 });
+    expect(y.spent).toBe(40 * 1_100 + 200_000);
+    expect(y.refund).toBe(left - 40 * 1_100);
+    // As many reachable as it pays for: it burns out on them.
+    const burn = strikeYield(S, left, 40, 63_000, 20_000, 99);
+    expect(burn).toMatchObject({ kill: false, pocket: false, tiles: 20_000 });
+    expect(burn.spent).toBe(S);
+    // Unmeasured reach (Infinity): left/p tiles, all of it spent.
+    expect(strikeYield(S, left, 40, 63_000, Infinity, 99)).toMatchObject({
+      pocket: false,
+      tiles: 20_000,
+      spent: S,
+      refund: 0,
+    });
+  });
+
+  test("strikeYield: nothing left after the cancels buys nothing", () => {
+    expect(strikeYield(S, 0, 40, 500, Infinity, 99)).toMatchObject({
+      kill: false,
+      pocket: false,
+      tiles: 0,
+      spent: S,
+      refund: 0,
+    });
+  });
+
+  // Td 600k with a 0.35 reserve on a 1M cap: answer 250k; need is the
+  // conquest stack for it.
+  const base = {
+    A: 100_000,
+    add: 200_000,
+    need: conquestStack(600_000, 250_000, 0, O),
+    Td: 600_000,
+    answer: 250_000,
+    inc: 0,
+  };
+  const opts = { maxRatio: 1, minShare: 0.25, saveOpenOnly: false };
+
+  test("topUpReason: the ratio rule, then the save", () => {
+    // Enough to reach ratio 1 after the answer and a quarter of the need.
+    expect(
+      topUpReason({ ...base, add: 500_000 }, opts, true, () => false),
+    ).toBe("ratio");
+    // 300k < 600k: not within maxRatio, but lifts 100k over the 250k answer.
+    expect(topUpReason(base, opts, false, () => false)).toBe("save");
+    // Does not lift it over the answer: nothing.
+    expect(
+      topUpReason({ ...base, add: 150_000 }, opts, true, () => true),
+    ).toBeNull();
+    // Already above the answer: no save to make.
+    expect(
+      topUpReason({ ...base, A: 260_000 }, opts, true, () => true),
+    ).toBeNull();
+  });
+
+  test("topUpReason with saveOpenOnly: a save only where the answer is certain and the saved stack keeps maxRatio or kills", () => {
+    const o = { ...opts, saveOpenOnly: true };
+    let asked = 0;
+    const kills = (k: boolean) => () => {
+      asked++;
+      return k;
+    };
+    // Below trigger (open false): never, and the kill test is not run.
+    expect(topUpReason(base, o, false, kills(true))).toBeNull();
+    expect(asked).toBe(0);
+    // Open, far above maxRatio (ratio 350k/50k = 7 after the answer): only
+    // if it can kill.
+    expect(topUpReason(base, o, true, kills(false))).toBeNull();
+    expect(topUpReason(base, o, true, kills(true))).toBe("save");
+    // Open and within maxRatio but under the ratio rule's minimum share of
+    // the need: a save.
+    const big = { ...base, need: 10_000_000, add: 500_000 };
+    expect(topUpReason(big, opts, true, kills(false))).toBe("save");
+    expect(topUpReason(big, o, true, kills(false))).toBe("save");
   });
 });

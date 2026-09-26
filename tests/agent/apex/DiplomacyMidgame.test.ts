@@ -21,9 +21,11 @@
  */
 import { AgentIntent } from "../../../src/agent/Agent";
 import {
+  blockNeighbours,
   diplomacyMemory,
   friendPoints,
   goldChunk,
+  islandThreat,
   shoreOwners,
 } from "../../../src/agent/agents/apex/controllers/DiplomacyController";
 import { parseApexOptions } from "../../../src/agent/agents/apex/options";
@@ -256,26 +258,74 @@ describe("extensions of kept allies", () => {
       for (let i = 0; i < 6; i++) sent.push(...w.h.step());
       const ext = sent.filter((i) => i.type === "allianceExtension");
       if (on) {
-        // webExtendLead (1800) left: not yet.
+        // webExtendLead (600) left: not yet.
         expect(ext).toEqual([]);
-        const a = w.us.allianceWith(w.nation(A))!;
-        (a as unknown as { expiresAt_: number }).expiresAt_ =
-          w.game.ticks() + 1500;
-        const later: AgentIntent[] = [];
-        for (let i = 0; i < 6; i++) later.push(...w.h.step());
-        expect(later).toContainEqual({
-          type: "allianceExtension",
-          recipient: A,
-        });
-        // Once per term.
-        const again: AgentIntent[] = [];
-        for (let i = 0; i < 30; i++) again.push(...w.h.step());
-        expect(again.filter((i) => i.type === "allianceExtension")).toEqual([]);
+        expireAt(w, A, w.game.ticks() + 500);
+        const later: { tick: number; i: AgentIntent }[] = [];
+        while (w.game.ticks() < 400) {
+          const tick = w.game.ticks();
+          for (const x of w.h.step()) later.push({ tick, i: x });
+        }
+        const asks = later.filter((x) => x.i.type === "allianceExtension");
+        // Once per term, and only once A has been kept (from the first
+        // plan, tick 0) for webExtendStable (150) ticks.
+        expect(asks.map((x) => x.i)).toEqual([
+          { type: "allianceExtension", recipient: A },
+        ]);
+        expect(asks[0].tick).toBeGreaterThanOrEqual(150);
+        expect(asks[0].tick).toBeLessThanOrEqual(160);
       } else {
         expect(ext).toEqual([]);
       }
     });
   }
+
+  for (const stable of [0, 150, 300]) {
+    test(`webExtendStable ${stable}: the ask waits until the ally has been kept that long`, () => {
+      const w = synth({ webMidgame: true, webExtendStable: stable }, TROOPS);
+      w.h.step();
+      ally(w, A);
+      expireAt(w, A, w.game.ticks() + 500);
+      const kept = diplomacyMemory(w.s).keptSince![A];
+      expect(kept).toBe(0);
+      let asked = -1;
+      while (asked < 0 && w.game.ticks() < 480) {
+        const tick = w.game.ticks();
+        for (const x of w.h.step()) {
+          if (x.type === "allianceExtension") asked = tick;
+        }
+      }
+      expect(asked).toBeGreaterThanOrEqual(kept + stable);
+      expect(asked).toBeLessThanOrEqual(kept + stable + 10);
+    });
+  }
+
+  test("an ally that leaves the keep set is forgotten there: kept again, it waits webExtendStable afresh", () => {
+    const w = synth({ webMidgame: true }, TROOPS);
+    const o = (w.policy as unknown as { o: { webDangerMin: number } }).o;
+    w.h.step();
+    ally(w, A);
+    for (let i = 0; i < 5; i++) w.h.step();
+    expect(diplomacyMemory(w.s).keptSince![A]).toBe(0);
+    // No nation is dangerous enough for one plan: A leaves the keep set.
+    o.webDangerMin = 5;
+    while (diplomacyMemory(w.s).mid!.keep.includes(A)) w.h.step();
+    expect(diplomacyMemory(w.s).keptSince![A]).toBeUndefined();
+    o.webDangerMin = 0.5;
+    while (!diplomacyMemory(w.s).mid!.keep.includes(A)) w.h.step();
+    const back = diplomacyMemory(w.s).mid!.at;
+    expect(back).toBeGreaterThan(0);
+    expect(diplomacyMemory(w.s).keptSince![A]).toBe(back);
+    expireAt(w, A, w.game.ticks() + 500);
+    let asked = -1;
+    while (asked < 0 && w.game.ticks() < back + 400) {
+      const tick = w.game.ticks();
+      for (const x of w.h.step()) {
+        if (x.type === "allianceExtension") asked = tick;
+      }
+    }
+    expect(asked).toBeGreaterThanOrEqual(back + 150);
+  });
 });
 
 describe("the renew at a lapse", () => {
@@ -389,15 +439,48 @@ describe("lapse for a target (webLapseTarget)", () => {
     off.h.step();
     expect(diplomacyMemory(off.s).mid!.keep).toEqual([A, B]);
   });
+
+  test("while the weakest bordering ally's extension is asked it is not dropped (it would extend anyway), nor is a stronger ally in its place", () => {
+    const share = { [A]: 0.95, [B]: 0.8, [C]: 0.58, [D]: 0.5 };
+    const w = synth(
+      { webMidgame: true, webSlotsMax: true, stallStrike: true, web: false },
+      share,
+    );
+    while (w.game.ticks() < 110) w.h.step();
+    ally(w, B);
+    const nextPlan = () => {
+      const at = diplomacyMemory(w.s).mid!.at;
+      while (diplomacyMemory(w.s).mid!.at === at) w.h.step();
+      return diplomacyMemory(w.s).mid!;
+    };
+    w.s.web.extensionAsked[B] = w.us.allianceWith(w.nation(B))!.expiresAt();
+    expect(nextPlan().keep).toEqual([B, A]);
+    delete w.s.web.extensionAsked[B];
+    expect(nextPlan().keep).toEqual([A]);
+  });
 });
 
 describe("boat reach (webBoatReach)", () => {
-  test("a nation across open water, out of land reach, is ranked by boat at webBoatDiscount of its dmid", async () => {
-    // Land x < 60 (us) and x >= 140 (N); ocean between: 80 tiles apart.
+  /**
+   * Land x < 60 (us) and x >= 140 (N, 60 wide), ocean between: 80 tiles
+   * apart, out of the land reach (allyReachCells 1). `others` are more
+   * players on N's shore strip or on islands in the ocean.
+   */
+  async function across(
+    others: (game: Game, N: Player) => void = () => {},
+    islands: [number, number, number, number][] = [],
+  ) {
     const f = await field({
       width: 200,
       height: 100,
-      terrain: (x) => (x < 60 || x >= 140 ? "plains" : "water"),
+      terrain: (x, y) =>
+        x < 60 ||
+        x >= 140 ||
+        islands.some(
+          ([x0, y0, x1, y1]) => x >= x0 && x < x1 && y >= y0 && y < y1,
+        )
+          ? "plains"
+          : "water",
     });
     const { game, me } = f;
     own(me, rect(game, 0, 0, 60, 100));
@@ -408,6 +491,24 @@ describe("boat reach (webBoatReach)", () => {
     const cap = game.config().maxTroops(me);
     me.setTroops(cap);
     N.setTroops(cap);
+    others(game, N);
+    // PlayerExecution measures the clusters every so often (not run here).
+    for (const p of game.players()) {
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -1;
+      let y1 = -1;
+      for (const t of p.tiles()) {
+        x0 = Math.min(x0, game.x(t));
+        y0 = Math.min(y0, game.y(t));
+        x1 = Math.max(x1, game.x(t));
+        y1 = Math.max(y1, game.y(t));
+      }
+      p.largestClusterBoundingBox = {
+        min: new Cell(x0, y0),
+        max: new Cell(x1, y1),
+      };
+    }
     const o = parseApexOptions({
       expansion: false,
       boats: false,
@@ -419,37 +520,79 @@ describe("boat reach (webBoatReach)", () => {
       webMidgame: true,
       allyReachCells: 1,
     });
+    const run = (opts: Record<string, unknown> = {}) => {
+      const s = createState();
+      s.stall.since = -1000;
+      const policy = new ApexPolicy({ ...o, ...opts }, s);
+      const h = new Harness(f, (ctx) => policy.tick(ctx));
+      h.step();
+      h.step();
+      return diplomacyMemory(s).mid!;
+    };
+    return { f, game, me, N, cap, o, run };
+  }
+
+  test("an islander across open water, out of land reach, is ranked by boat at webBoatDiscount of its dmid", async () => {
+    const { game, me, N, cap, o, run } = await across();
     const race = buildRaceGrid(game, o);
     const owners = ownerGrid(game, race, 2);
     const shore = shoreOwners(owners, race, game);
     expect(shore.has(me.smallID())).toBe(true);
     expect(shore.has(N.smallID())).toBe(true);
-    for (const boat of [true, false]) {
-      const s = createState();
-      s.stall.since = -1000;
-      const policy = new ApexPolicy({ ...o, webBoatReach: boat }, s);
-      const h = new Harness(f, (ctx) => policy.tick(ctx));
-      h.step();
-      h.step();
-      const mid = diplomacyMemory(s).mid!;
-      if (boat) {
-        // T/(1.1·cap) = 0.91, discounted: 0.68 (webBoatDiscount 0.75).
-        expect(mid.dmid[N.id()]).toBeCloseTo(
-          (0.75 * N.troops()) / (1.1 * cap),
-          2,
-        );
-        expect(mid.keep).toEqual([N.id()]);
-      } else {
-        expect(mid.dmid[N.id()]).toBeUndefined();
-      }
-    }
+    // N's blocks touch only its own and water.
+    expect(blockNeighbours(owners).get(N.smallID())).toEqual([]);
+    expect(islandThreat(game, me, N, [], shore)).toBe(true);
+    const mid = run();
+    // T/(1.1·cap) = 0.91, discounted: 0.68 (webBoatDiscount 0.75).
+    expect(mid.dmid[N.id()]).toBeCloseTo((0.75 * N.troops()) / (1.1 * cap), 2);
+    expect(mid.keep).toEqual([N.id()]);
+    expect(run({ webBoatReach: false }).dmid[N.id()]).toBeUndefined();
     // With a discount of 0.5 it falls below webDangerMin.
-    const s = createState();
-    s.stall.since = -1000;
-    const policy = new ApexPolicy({ ...o, webBoatDiscount: 0.5 }, s);
-    const h = new Harness(f, (ctx) => policy.tick(ctx));
-    h.step();
-    expect(diplomacyMemory(s).mid!.rank).toEqual([]);
+    expect(run({ webBoatDiscount: 0.5 }).rank).toEqual([]);
+  });
+
+  test("a nation with a bordering enemy (here a tribe inland) attacks what it borders: no boat reach", async () => {
+    const { game, N, run } = await across((g) => {
+      const tribe = g.addPlayer(
+        new PlayerInfo("tribe", PlayerType.Bot, null, "BOTTRIBE"),
+      );
+      own(tribe, rect(g, 190, 0, 200, 100));
+    });
+    const tribe = game.player("BOTTRIBE");
+    expect(tribe.isAlive()).toBe(true);
+    // N keeps its coast (x 140): a shore owner, but not an islander.
+    const next = blockNeighbours(
+      ownerGrid(game, buildRaceGrid(game, parseApexOptions({})), 2),
+    );
+    expect(next.get(N.smallID())).toContain(tribe.smallID());
+    const mid = run();
+    expect(mid.dmid[N.id()]).toBeUndefined();
+    expect(mid.rank).toEqual([]);
+  });
+
+  test("an islander with two weaker players nearer than us boats at them: no boat reach; one nearer is not enough", async () => {
+    for (const [count, reached] of [
+      [2, false],
+      [1, true],
+    ] as const) {
+      // Islands at x 100-110, 50 tiles from N's centre (170): nearer than
+      // our centre (29, 141 away). Each owner holds 0.5 of N's troops.
+      const isles: [number, number, number, number][] = [
+        [100, 10, 110, 30],
+        [100, 70, 110, 90],
+      ].slice(0, count) as [number, number, number, number][];
+      const { N, run } = await across((g, n) => {
+        isles.forEach(([x0, y0, x1, y1], i) => {
+          const p = g.addPlayer(
+            new PlayerInfo(`isle${i}`, PlayerType.Nation, null, `NATIONI${i}`),
+          );
+          own(p, rect(g, x0, y0, x1, y1));
+          p.setTroops(Math.round(n.troops() / 2));
+        });
+      }, isles);
+      const mid = run();
+      expect(mid.dmid[N.id()] !== undefined).toBe(reached);
+    }
   });
 });
 
@@ -559,70 +702,160 @@ describe("slots and leads (v3)", () => {
     expect(diplomacyMemory(none.s).mid!.slots).toBe(1);
   });
 
-  for (const opening of [false, true]) {
-    test(`between webFrom and the first midgame plan the spec path asks with ${opening ? "webExtendLead (webExtendOpening)" : "extendLead: no early ask"}`, () => {
+  for (const stable of [0, 150]) {
+    test(`the midgame web plans at its first decision from webFrom, so the spec path never asks with the midgame's lead (webExtendStable ${stable})`, () => {
       // Not in stall mode's danger home: A is in the spec's allySet.
       const w = synth(
         {
           webMidgame: true,
           webFrom: 60,
           stallDangerHome: false,
-          webExtendOpening: opening,
+          webExtendStable: stable,
         },
         TROOPS,
       );
       w.s.stall.since = null;
       w.h.step();
       ally(w, A);
-      expireAt(w, A, w.game.ticks() + 1500);
-      const before: AgentIntent[] = [];
-      while (w.game.ticks() < 60) before.push(...w.h.step());
-      const early: AgentIntent[] = [];
-      // Plans at 0 and 51 (spec), the first midgame plan at 102.
-      while (w.game.ticks() < 100) early.push(...w.h.step());
+      // 400 ticks left at webFrom: past the spec's extendLead (300), inside
+      // webExtendLead (600).
+      expireAt(w, A, 460);
+      const sent: { tick: number; i: AgentIntent }[] = [];
+      while (w.game.ticks() < 300) {
+        const tick = w.game.ticks();
+        for (const x of w.h.step()) sent.push({ tick, i: x });
+      }
       expect(w.s.web.allySet).toContain(A);
-      expect(before.filter((i) => i.type === "allianceExtension")).toEqual([]);
-      expect(
-        early.filter((i) => i.type === "allianceExtension").length > 0,
-      ).toBe(opening);
-      if (opening) return;
-      const late: AgentIntent[] = [];
-      while (w.game.ticks() < 110) late.push(...w.h.step());
-      expect(diplomacyMemory(w.s).mid!.keep).toContain(A);
-      expect(late).toContainEqual({ type: "allianceExtension", recipient: A });
+      const mem = diplomacyMemory(w.s);
+      // Plans at 0 and 50 (spec), the midgame's first at 60.
+      expect(mem.keptSince![A]).toBe(60);
+      const asks = sent.filter((x) => x.i.type === "allianceExtension");
+      expect(asks.map((x) => x.i)).toEqual([
+        { type: "allianceExtension", recipient: A },
+      ]);
+      expect(asks[0].tick).toBeGreaterThanOrEqual(60 + stable);
+      expect(asks[0].tick).toBeLessThanOrEqual(60 + stable + 10);
     });
   }
 });
 
-describe("the slot above A_ext (webSlotBorrow)", () => {
+describe("the ceiling: the web adds no alliance past A_ext (midCeiling)", () => {
   // A_ext = 1, A_max = 2: D (dmid 0.27, outside the keep set) holds the
-  // A_ext slot; A is kept and unallied.
+  // A_ext slot; A is kept and unallied. Our PlayerExecution expires
+  // alliances.
   const share = { [A]: 0.95, [B]: 0.05, [C]: 0.2, [D]: 0.3 };
-  for (const [name, opts, lapse, asked] of [
-    ["the weak ally lapses long before: A is asked", {}, 1000, true],
-    ["the weak ally outlives the margin: A waits", {}, 2800, false],
-    ["webSlotBorrow off: A waits", { webSlotBorrow: false }, 1000, false],
-  ] as const) {
-    test(name, () => {
-      const w = synth({ webMidgame: true, web: false, ...opts }, share);
-      while (w.game.ticks() < 110) w.h.step();
-      ally(w, D);
-      expireAt(w, D, w.game.ticks() + lapse);
-      // The web's requests from here on.
-      (w.policy as unknown as { o: { web: boolean } }).o.web = true;
-      const sent: AgentIntent[] = [];
-      for (let i = 0; i < 60; i++) sent.push(...w.h.step());
-      const mid = diplomacyMemory(w.s).mid!;
-      expect(mid.keep).toEqual([A]);
-      const toA = sent.filter(
-        (i) => i.type === "allianceRequest" && i.recipient === A,
+
+  function heldByD(opts: Record<string, unknown>, lapse: number) {
+    const w = synth({ webMidgame: true, web: false, ...opts }, share);
+    w.game.addExecution(new PlayerExecution(w.us));
+    while (w.game.ticks() < 110) w.h.step();
+    ally(w, D);
+    const lapseAt = w.game.ticks() + lapse;
+    expireAt(w, D, lapseAt);
+    // The web's requests from here on.
+    (w.policy as unknown as { o: { web: boolean } }).o.web = true;
+    return { w, lapseAt };
+  }
+
+  test("a kept nation is not requested while a weak ally holds the A_ext slot, and is the tick after it lapses", () => {
+    const { w, lapseAt } = heldByD({}, 300);
+    const sent: { tick: number; i: AgentIntent }[] = [];
+    while (w.game.ticks() < lapseAt + 20) {
+      const tick = w.game.ticks();
+      for (const x of w.h.step()) sent.push({ tick, i: x });
+    }
+    expect(diplomacyMemory(w.s).mid!.keep).toEqual([A]);
+    const req = sent.filter((x) => x.i.type === "allianceRequest");
+    expect(req.map((x) => x.i)).toEqual([
+      { type: "allianceRequest", recipient: A },
+    ]);
+    // Expired by our PlayerExecution at lapseAt, seen at the next decision.
+    expect(req[0].tick).toBeGreaterThanOrEqual(lapseAt);
+    expect(req[0].tick).toBeLessThanOrEqual(lapseAt + 5);
+  });
+
+  for (const slotsMax of [false, true]) {
+    test(`a kept nation's own request is ${slotsMax ? "accepted at once with webSlotsMax (ceiling A_max)" : "accepted only once the weak ally has lapsed"}`, () => {
+      const { w, lapseAt } = heldByD(
+        { webSlotsMax: slotsMax, allyMinP: 2 },
+        150,
       );
-      expect(toA.length > 0).toBe(asked);
-      expect(
-        sent.filter((i) => i.type === "allianceRequest" && i.recipient !== A),
-      ).toEqual([]);
+      w.game.addExecution(new AllianceRequestExecution(w.nation(A), AGENT_ID));
+      const sent: { tick: number; i: AgentIntent }[] = [];
+      while (w.game.ticks() < lapseAt + 20) {
+        const tick = w.game.ticks();
+        for (const x of w.h.step()) sent.push({ tick, i: x });
+      }
+      const toA = sent.filter(
+        (x) => x.i.type === "allianceRequest" && x.i.recipient === A,
+      );
+      expect(toA).toHaveLength(1);
+      if (slotsMax) expect(toA[0].tick).toBeLessThan(lapseAt - 100);
+      else expect(toA[0].tick).toBeGreaterThanOrEqual(lapseAt);
+      expect(w.us.isAlliedWith(w.nation(A))).toBe(true);
     });
   }
+
+  test("at A_ext a kept nation's request waits; a nation dying mid-term takes A_max below our alliances, and a kept ally's renew restores the count only with webRenewOver", () => {
+    // A kept and allied, C kept and unallied (dmid 0.64), D (0.27) and X1
+    // allied outside the keep set.
+    const share = { [A]: 0.95, [B]: 0.05, [C]: 0.7, [D]: 0.3 };
+    for (const over of [true, false]) {
+      const w = synth(
+        { webMidgame: true, web: false, webRenewOver: over },
+        share,
+      );
+      // Eight one-tile nations far from everyone: 13 non-bot players,
+      // A_max 4, A_ext 3.
+      const extra: Player[] = [];
+      for (let i = 0; i < 8; i++) {
+        const p = w.game.addPlayer(
+          new PlayerInfo(`x${i}`, PlayerType.Nation, null, `NATIONX${i}`),
+        );
+        p.conquer(w.game.ref(199, 90 + i));
+        extra.push(p);
+      }
+      w.game.addExecution(new PlayerExecution(w.us));
+      while (w.game.ticks() < 110) w.h.step();
+      for (const id of [A, D, extra[1].id()]) ally(w, id);
+      (w.policy as unknown as { o: { web: boolean } }).o.web = true;
+      expect(allySlots(w.game, w.us, 0)).toMatchObject({ max: 4, ext: 3 });
+      // C asks us: accepting would take us to A_max (v2 did, kept nations
+      // up to A_max).
+      w.game.addExecution(new AllianceRequestExecution(w.nation(C), AGENT_ID));
+      const sent: { tick: number; i: AgentIntent }[] = [];
+      // To a plan with the OwnerGrid (built for the web) that reaches C.
+      while (diplomacyMemory(w.s).mid!.at < 150) {
+        const tick = w.game.ticks();
+        for (const x of w.h.step()) sent.push({ tick, i: x });
+      }
+      expect(diplomacyMemory(w.s).mid!.keep).toEqual([A, C]);
+      expect(w.us.incomingAllianceRequests()).toHaveLength(1);
+      // X0 dies: 12 players, A_max 3, A_ext 2, three alliances.
+      w.nation(D).conquer(w.game.ref(199, 90));
+      expect(extra[0].isAlive()).toBe(false);
+      expect(allySlots(w.game, w.us, 0)).toMatchObject({ max: 3, ext: 2 });
+      const e = w.game.ticks() + 60;
+      expireAt(w, A, e);
+      while (w.game.ticks() < e + 20) {
+        const tick = w.game.ticks();
+        for (const x of w.h.step()) sent.push({ tick, i: x });
+      }
+      expect(diplomacyMemory(w.s).mid!.keep).toContain(A);
+      const req = sent.filter((x) => x.i.type === "allianceRequest");
+      // Neither C's counter-accept nor a request to it; then the renew of
+      // A, back to A_max, only with webRenewOver.
+      for (const r of req) expect(r.tick).toBeGreaterThanOrEqual(e);
+      expect(req.map((x) => x.i)).toEqual(
+        over ? [{ type: "allianceRequest", recipient: A }] : [],
+      );
+      if (!over) {
+        expect(
+          w.h.logs.some((l) => l.includes("dip renew nationaa: no room")),
+        ).toBe(true);
+      }
+    }
+  });
 });
 
 describe("gold for friendship (webFriendGold)", () => {
@@ -630,7 +863,11 @@ describe("gold for friendship (webFriendGold)", () => {
   const share = { [A]: 1.2, [B]: 0.05, [C]: 0.58, [D]: 0.3 };
 
   function trappedAlly(opts: Record<string, unknown>, gold: bigint) {
-    const w = synth({ webMidgame: true, web: false, ...opts }, share);
+    // webExtendStable 0: the ask goes as soon as the lead allows.
+    const w = synth(
+      { webMidgame: true, web: false, webExtendStable: 0, ...opts },
+      share,
+    );
     w.game.addExecution(new PlayerExecution(w.us));
     while (w.game.ticks() < 110) w.h.step();
     ally(w, A);
@@ -658,11 +895,19 @@ describe("gold for friendship (webFriendGold)", () => {
     // 50 + 0.05 * (e + 60 - (t + 1)): about +58.
     expect(points).toBeGreaterThanOrEqual(55);
     expect(points).toBeLessThanOrEqual(60);
+    // Priced for a payment up to 20 ticks late (the browser's latency):
+    // the gold buys points / 5 chunks when it pays by g.tick + 20, one
+    // fewer after.
+    const gold = BigInt(points / 5) * goldChunk(w.game, g.tick + 20);
     expect(g.i).toEqual({
       type: "donate_gold",
       recipient: A,
-      gold: Number(BigInt(points / 5) * goldChunk(w.game, g.tick + 2)),
+      gold: Number(gold),
     });
+    for (const paid of [g.tick + 1, g.tick + 3, g.tick + 20]) {
+      expect(gold / goldChunk(w.game, paid)).toBe(BigInt(points / 5));
+    }
+    expect(gold / goldChunk(w.game, g.tick + 21)).toBe(BigInt(points / 5 - 1));
     expect(w.nation(A).relation(w.us)).toBe(Relation.Friendly);
     const nm = nationModel(w.policy);
     expect(nm.relations.band(A, w.game.ticks())).toBe(Relation.Friendly);

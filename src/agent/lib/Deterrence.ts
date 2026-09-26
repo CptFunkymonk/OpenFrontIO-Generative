@@ -410,19 +410,37 @@ export function postSites(
   return out;
 }
 
+/** When attackWhy reads a send (log only). */
+export type WhyAt =
+  /** A land attack, seen the tick after N's decision: what N saw. */
+  | "decision"
+  /** A transport ship first seen at sea, the tick after its launch (the
+   *  ship took the troops then, PlayerImpl.buildUnit): what N saw. */
+  | "sea"
+  /** A boat's attack, which exists only once the ship lands
+   *  (TransportShipExecution.ts:271-283), often 100 ticks or more after
+   *  the launch: T and H have moved since, so the strategy flags are left
+   *  out (the random boat skips a target with more troops than N,
+   *  AiAttackBehavior.ts:243-250, yet landings logged H/T up to 1.26). */
+  | "landing";
+
 /**
- * Diagnostics for a fresh nation attack of `a` troops on us (log only):
- * N's troops before the send (its troops now plus a), its share of its cap,
- * our home against the land line T/1.1, and which strategies of the
- * Impossible list (docs/13 §5.8) matched us at that decision: ret (we attack
- * N), vw (veryWeak), traitor (N betrayed an ally: N.isTraitor()), victim,
- * juicy, hated, weakest (H < T).
+ * Diagnostics for a fresh nation send of `a` troops at us (log only): N's
+ * troops before the send (its troops now plus a), its share of its cap,
+ * our home against the land line T/safe (safe = nm.sendCapSafe()), and,
+ * but at a landing, which strategies of the Impossible list (docs/13 §5.8)
+ * matched us: ret (we attack N), vw (veryWeak), traitor (N betrayed an
+ * ally: N.isTraitor()), victim, juicy, hated, weakest (H < T). The send is
+ * one of me.incomingAttacks() but at sea, so the victim test leaves it out
+ * of the other incoming troops.
  */
 export function attackWhy(
   me: Player,
   N: Player,
   a: number,
   models: Models,
+  safe: number,
+  at: WhyAt = "decision",
 ): string {
   const T = N.troops() + a;
   const M = models.cap(N);
@@ -440,7 +458,7 @@ export function attackWhy(
   if (N.isTraitor()) flags.push("traitor");
   let incoming = 0;
   for (const x of me.incomingAttacks()) incoming += x.troops();
-  incoming -= a;
+  if (at !== "sea") incoming -= a;
   if (incoming > VICTIM_SHARE * H && H <= STRONGER_GUARD * T) {
     flags.push("victim");
   }
@@ -451,9 +469,11 @@ export function attackWhy(
   if (H < T) flags.push("weakest");
   const r = (x: number) => x.toFixed(2);
   return (
+    `${at === "landing" ? "at landing " : ""}` +
     `T=${Math.round(T)} T/M=${r(T / M)} H/T=${r(H / T)} ` +
-    `line=${r(T / 1.1 / Math.max(1, H))} H/cap=${r(H / cap)} ` +
+    `line=${r(T / safe / Math.max(1, H))} H/cap=${r(H / cap)} ` +
     `out=${Math.round(ours)} in=${Math.round(incoming)} ` +
-    `tiles ${me.numTilesOwned()}/${N.numTilesOwned()} [${flags.join(",")}]`
+    `tiles ${me.numTilesOwned()}/${N.numTilesOwned()}` +
+    (at === "landing" ? "" : ` [${flags.join(",")}]`)
   );
 }

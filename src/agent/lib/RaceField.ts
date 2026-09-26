@@ -1468,9 +1468,10 @@ export interface BoatTarget {
 }
 
 /**
- * Not in spec §2.7 (o.boatsMidgame): targets past `voyage.max`, up to
- * `max` tiles, when their landmass will still hold food when the boat lands
- * and no nation's land is close enough to reach the landing first.
+ * Not in spec §2.7 (o.boatsMidgame, o.boatMidFar): targets past
+ * `voyage.max`, up to `max` tiles, when their landmass will still hold food
+ * when the boat lands and no nation's land is close enough to reach the
+ * landing first.
  */
 export interface FarReach {
   /** Longest estimated voyage, tiles. */
@@ -1480,11 +1481,12 @@ export interface FarReach {
   foodAt: (comp: number, ticks: number) => number;
   /** Smallest projected food for a far target. */
   minFood: number;
-  /** nationLandDistance of the OwnerGrid (per sample), or null. */
-  nationDist: Int32Array | null;
+  /** nationReach of the OwnerGrid, or null (no nation test). */
+  nation: NationReach | null;
   /** Tiles a nation's front advances per tick: a far target needs its
    *  sample at least front·(voyage + hold) tiles (by land) from every
-   *  nation. */
+   *  nation seed (nation.dist), and a sample no seed reaches must lie on a
+   *  landmass without one (nation.held). */
   front: number;
   /** Ticks past the voyage the landing must stay clear of nations and its
    *  landmass keep minFood. */
@@ -1495,9 +1497,12 @@ export interface FarReach {
  * Not in spec §2.7 (o.boatsMidgame): per OwnerGrid sample, the land
  * distance in tiles to the nearest sample a Nation owns (`me` excluded):
  * a 4-connected BFS over land samples, water samples being walls, stride
- * tiles a step. −1 where no nation's land reaches (a landmass without a
- * nation). Nations take tribes and free land by land, so this bounds how
- * soon one can reach a landing. O(samples).
+ * tiles a step. −1 where no nation sample reaches at the grid's grain: a
+ * landmass without a nation, but also a sample whose four neighbours are
+ * water samples (a spit, a delta, a lagoon shore) on a nation's landmass,
+ * which is why nationReach also marks the landmasses holding one. Nations
+ * take tribes and free land by land, so this bounds how soon one can reach
+ * a landing. O(samples).
  */
 export function nationLandDistance(
   game: Game,
@@ -1506,15 +1511,121 @@ export function nationLandDistance(
 ): Int32Array {
   const kind = ownerKinds(game);
   const mine = me.smallID();
+  const seed = new Uint8Array(og.owner.length);
+  for (let i = 0; i < og.owner.length; i++) {
+    const id = og.owner[i];
+    if (id <= 0 || id === mine || id >= kind.length) continue;
+    if (kind[id] === KIND_NATION) seed[i] = 1;
+  }
+  return landDistance(og, seed);
+}
+
+/**
+ * Not in spec §2.7 (o.boatsMidgame, o.boatMidFar): where nations can hold
+ * land before a far boat lands, per OwnerGrid sample. The seeds are the
+ * samples a Nation owns (`me` excluded, as in nationLandDistance) and, with
+ * `boatBox` > 0, every free or tribe sample within `boatBox` tiles
+ * (Chebyshev, rounded up to whole strides) of a Nation sample on an
+ * ocean-shore race cell: a nation's random boat lands on a random tile
+ * within ±150 tiles (x and y) of one of its shore tiles, unowned or tribe
+ * land first (AiAttackBehavior.attackWithRandomBoat and findRandomBoatTarget,
+ * AiAttackBehavior.ts:159-220). O(samples).
+ */
+export interface NationReach {
+  /** Per sample: land tiles to the nearest seed (4-neighbours, water
+   *  samples walls, stride tiles a step); −1 where none reaches at the
+   *  grid's grain. */
+  dist: Int32Array;
+  /** Per race-grid landmass id (grid.comp): 1 when a seed lies on it. A
+   *  sample dist leaves at −1 on such a landmass is cut off by the grain
+   *  (a spit, a delta, a lagoon shore between water samples), not free of
+   *  nations. */
+  held: Uint8Array;
+}
+
+export function nationReach(
+  game: Game,
+  grid: RaceGrid,
+  og: OwnerGrid,
+  me: Player,
+  boatBox: number,
+): NationReach {
+  const kind = ownerKinds(game);
+  const mine = me.smallID();
+  const W = game.width();
+  const H = game.height();
+  const { owner, ow, oh, stride } = og;
+  const { cell, cw } = grid;
+  const half = Math.floor(stride / 2);
+  const n = owner.length;
+  const cellAt = (i: number) => {
+    const bx = i % ow;
+    const by = (i - bx) / ow;
+    return (
+      Math.floor(Math.min(H - 1, by * stride + half) / cell) * cw +
+      Math.floor(Math.min(W - 1, bx * stride + half) / cell)
+    );
+  };
+  const seed = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const id = owner[i];
+    if (id <= 0 || id === mine || id >= kind.length) continue;
+    if (kind[id] === KIND_NATION) seed[i] = 1;
+  }
+  const r = boatBox > 0 ? Math.ceil(boatBox / stride) : 0;
+  if (r > 0) {
+    // Prefix sums of the nation samples on an ocean-shore cell, then a box
+    // query around every free or tribe sample.
+    const pw = ow + 1;
+    const sum = new Int32Array(pw * (oh + 1));
+    for (let by = 0; by < oh; by++) {
+      let row = 0;
+      for (let bx = 0; bx < ow; bx++) {
+        const i = by * ow + bx;
+        if (seed[i] === 1 && grid.shore[cellAt(i)] === 1) row++;
+        sum[(by + 1) * pw + bx + 1] = sum[by * pw + bx + 1] + row;
+      }
+    }
+    const zone: number[] = [];
+    for (let by = 0; by < oh; by++) {
+      const y0 = Math.max(0, by - r) * pw;
+      const y1 = Math.min(oh, by + r + 1) * pw;
+      for (let bx = 0; bx < ow; bx++) {
+        const i = by * ow + bx;
+        const id = owner[i];
+        if (id === OWNER_WATER || seed[i] === 1) continue;
+        if (id !== 0 && (id >= kind.length || kind[id] !== KIND_BOT)) continue;
+        const x0 = Math.max(0, bx - r);
+        const x1 = Math.min(ow, bx + r + 1);
+        if (sum[y1 + x1] - sum[y0 + x1] - sum[y1 + x0] + sum[y0 + x0] > 0) {
+          zone.push(i);
+        }
+      }
+    }
+    for (const i of zone) seed[i] = 1;
+  }
+  let maxComp = -1;
+  for (const c of grid.compLand.keys()) maxComp = Math.max(maxComp, c);
+  const held = new Uint8Array(maxComp + 1);
+  for (let i = 0; i < n; i++) {
+    if (seed[i] !== 1) continue;
+    const comp = grid.comp[cellAt(i)];
+    if (comp >= 0 && comp <= maxComp) held[comp] = 1;
+  }
+  return { dist: landDistance(og, seed), held };
+}
+
+/** Land tiles from the `seed` samples: a 4-connected BFS over land
+ *  samples, water samples being walls, stride tiles a step; −1 where none
+ *  reaches. */
+function landDistance(og: OwnerGrid, seed: Uint8Array): Int32Array {
   const { owner, ow, oh, stride } = og;
   const n = owner.length;
   const dist = new Int32Array(n).fill(-1);
   const queue = new Int32Array(n);
   let tail = 0;
   for (let i = 0; i < n; i++) {
-    const id = owner[i];
-    if (id <= 0 || id === mine || id >= kind.length) continue;
-    if (kind[id] !== KIND_NATION) continue;
+    if (seed[i] !== 1) continue;
     dist[i] = 0;
     queue[tail++] = i;
   }
@@ -1723,11 +1834,13 @@ export function voyageAt(f: VoyageField, grid: RaceGrid, c: number): number {
  * With `voyage` (not in the spec): the distance is the sample cell's
  * estimated voyage (voyageAt) instead, and a sample the field does not
  * reach, or farther than `voyage.max` tiles, is no candidate. With
- * `voyage.far` (o.boatsMidgame), a sample past `voyage.max` but within
- * `far.max` is one when its landmass's food projected to far.hold ticks
- * after the landing (far.foodAt) is at least far.minFood and no nation's
- * land lies within far.front·(voyage + far.hold) tiles of it
- * (far.nationDist); it is scored by that projected food.
+ * `voyage.far` (o.boatsMidgame, o.boatMidFar), a sample past `voyage.max`
+ * but within `far.max` is one when its landmass's food projected to
+ * far.hold ticks after the landing (far.foodAt) is at least far.minFood
+ * and no nation seed (far.nation: nation land, and the land nation boats
+ * reach) lies within far.front·(voyage + far.hold) tiles of it by land, or,
+ * when no seed reaches it at the grid's grain, none lies on its landmass;
+ * it is scored by that projected food.
  */
 export function boatTargets(
   game: Game,
@@ -1839,8 +1952,17 @@ export function boatTargets(
       if (dist > voyage.max) {
         const far = voyage.far;
         if (far === undefined || dist > far.max) continue;
-        const nd = far.nationDist === null ? -1 : far.nationDist[i];
-        if (nd >= 0 && nd < far.front * (dist + far.hold)) continue;
+        if (far.nation !== null) {
+          const nd = far.nation.dist[i];
+          // Unreached: nation-free only on a landmass without a seed.
+          if (
+            nd < 0
+              ? far.nation.held[comp] === 1
+              : nd < far.front * (dist + far.hold)
+          ) {
+            continue;
+          }
+        }
         projected = far.foodAt(comp, dist + far.hold);
         if (!(projected >= far.minFood)) continue;
         f = projected;

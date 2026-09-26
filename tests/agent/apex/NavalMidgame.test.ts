@@ -1,9 +1,11 @@
 import type { AgentIntent } from "../../../src/agent/Agent";
 import {
   boatTrigger,
+  farTargets,
   foodProjection,
   landmassFood,
   LandmassFood,
+  localFoodLow,
   NavalController,
   navalMemory,
   nearWarship,
@@ -29,6 +31,7 @@ import {
   cellOf,
   FarReach,
   nationLandDistance,
+  nationReach,
   OWNER_WATER,
   OwnerGrid,
   ownerGrid,
@@ -61,13 +64,14 @@ import { UserSettings } from "../../../src/core/game/UserSettings";
 import { GameConfig } from "../../../src/core/Schemas";
 
 // Package A2, the naval midgame (o.boatsMidgame; spec §3.7, §5.4; chapter
-// 13 §2.12, §5.11). Far targets past boatMaxVoyage when their landmass keeps
-// food and no nation's land can reach the landing first, the "surplus"
-// trigger, the food trend, the far tribe's sizing, and the warship guard on
-// the estimated sea route (voyageRoute). Synthetic maps as in
-// Naval.test.ts: the real Config at Impossible; no PlayerExecution runs, so
-// troops stay where the test puts them. Tests may mutate the game; the
-// agent never does.
+// 13 §2.12, §5.11). The "surplus" trigger, the warship guard on the
+// estimated sea route (voyageRoute, o.boatMidRouteGuard), and, with
+// o.boatMidFar, far targets past boatMaxVoyage (in the midgame only) when
+// their landmass keeps food and no nation can get to the landing first
+// (nationReach), the food trend and the far tribe's sizing. Synthetic maps
+// as in Naval.test.ts: the real Config at Impossible; no PlayerExecution
+// runs, so troops stay where the test puts them. Tests may mutate the game;
+// the agent never does.
 
 const ME = seatClientID(0);
 const MY_ID = "AGENTID1";
@@ -336,13 +340,14 @@ describe("naval midgame (o.boatsMidgame)", () => {
         max: 2400,
         foodAt: (_c: number, _v: number) => 2000,
         minFood: 1000,
-        nationDist: null,
+        nation: null,
         front: 0.15,
         hold: 0,
         ...over,
       };
       return boatTargets(game, race, og, me, 8, { field, max: 400, far });
     };
+    const held = new Uint8Array(race.compLand.size);
     const got = reach({});
     expect(got.length).toBeGreaterThan(0);
     for (const t of got) {
@@ -368,11 +373,23 @@ describe("naval midgame (o.boatsMidgame)", () => {
     expect(reach({ max: 500 })).toHaveLength(0);
     // A nation 50 tiles (by land) from every candidate: in reach of a front
     // of 0.15 tiles a tick over a ~590-tile voyage, not of 0.05.
-    const nationDist = new Int32Array(og.owner.length).fill(50);
-    expect(reach({ nationDist })).toHaveLength(0);
-    expect(reach({ nationDist, front: 0.05 }).length).toBeGreaterThan(0);
+    const nation = {
+      dist: new Int32Array(og.owner.length).fill(50),
+      held,
+    };
+    expect(reach({ nation })).toHaveLength(0);
+    expect(reach({ nation, front: 0.05 }).length).toBeGreaterThan(0);
     // The hold: 0.05 × (~590 + 500) tiles is past 50.
-    expect(reach({ nationDist, front: 0.05, hold: 500 })).toHaveLength(0);
+    expect(reach({ nation, front: 0.05, hold: 500 })).toHaveLength(0);
+    // A sample no seed reaches is nation-free only on a landmass without
+    // one.
+    const unreached = new Int32Array(og.owner.length).fill(-1);
+    expect(reach({ nation: { dist: unreached, held } }).length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      reach({ nation: { dist: unreached, held: held.slice().fill(1) } }),
+    ).toHaveLength(0);
     // Near targets are untouched by a FarReach.
     const near = boatTargets(game, race, og, me, 8, {
       field,
@@ -381,7 +398,7 @@ describe("naval midgame (o.boatsMidgame)", () => {
         max: 2400,
         foodAt: () => 0,
         minFood: 1e9,
-        nationDist: null,
+        nation: { dist: new Int32Array(og.owner.length).fill(0), held },
         front: 1,
         hold: 0,
       },
@@ -458,15 +475,19 @@ describe("naval midgame (o.boatsMidgame)", () => {
     }
   });
 
-  test("a far free island gets a boat only with the flag; the send is logged far", () => {
+  test("a far free island gets a boat only with boatsMidgame and boatMidFar; the send is logged far", () => {
     const game = farGame();
+    const far = { boatsMidgame: true, boatMidFar: true };
     for (const [over, want] of [
       [{}, 0],
-      [{ boatsMidgame: true }, 1],
+      // Far targets are off by default under the flag.
+      [{ boatsMidgame: true }, 0],
+      [{ boatMidFar: true }, 0],
+      [far, 1],
       // Its 2,000 tiles never reach a boatMidMinFood of 2,500.
-      [{ boatsMidgame: true, boatMidMinFood: 2500 }, 0],
+      [{ ...far, boatMidMinFood: 2500 }, 0],
       // A voyage (about 590 tiles) past boatMidMaxVoyage.
-      [{ boatsMidgame: true, boatMidMaxVoyage: 500 }, 0],
+      [{ ...far, boatMidMaxVoyage: 500 }, 0],
     ] as const) {
       const r = rig(game, over);
       r.me.setTroops(100_000);
@@ -493,7 +514,11 @@ describe("naval midgame (o.boatsMidgame)", () => {
 
   test("a far island whose food is being eaten fast gets no far boat", () => {
     const game = farGame();
-    const r = rig(game, { boatsMidgame: true, boatMidMinFood: 500 });
+    const r = rig(game, {
+      boatsMidgame: true,
+      boatMidFar: true,
+      boatMidMinFood: 500,
+    });
     r.me.setTroops(100_000);
     // The island held 12,000 food tiles 200 ticks ago: 50 a tick lost, so
     // nothing is left at the landing ~640 ticks out.
@@ -526,7 +551,12 @@ describe("naval midgame (o.boatsMidgame)", () => {
       );
       fill(game, b, 600, 640, 0, 20);
       b.setTroops(5_000);
-      const r = rig(game, { boatsMidgame: true, boatMidMinFood: 500, ...over });
+      const r = rig(game, {
+        boatsMidgame: true,
+        boatMidFar: true,
+        boatMidMinFood: 500,
+        ...over,
+      });
       r.me.setTroops(Math.floor(r.models.cap(r.me)));
       decideOnce(r);
       const bs = boats(r);
@@ -617,8 +647,13 @@ describe("naval midgame (o.boatsMidgame)", () => {
     expect(routeNearWarship(game, race, field, landing, [], 40)).toBe(false);
   });
 
-  test("with the flag a boat whose sea route passes a hostile warship is not sent", () => {
-    const sent = (flag: boolean, at: [number, number]) => {
+  test("a far boat, and with boatMidRouteGuard a near one, whose sea route passes a hostile warship is not sent", () => {
+    const sent = (
+      flag: boolean,
+      at: [number, number],
+      guard = true,
+      over: Record<string, unknown> = { boatMaxVoyage: 2400 },
+    ) => {
       const game = synthGame(
         600,
         300,
@@ -627,8 +662,9 @@ describe("naval midgame (o.boatsMidgame)", () => {
       );
       const r = rig(game, {
         boatsMidgame: flag,
+        boatMidRouteGuard: guard,
         boatMidMinFood: 500,
-        boatMaxVoyage: 2400,
+        ...over,
       });
       fill(game, r.me, 0, 20, 0, 300);
       r.me.setSpawnTile(game.ref(10, 150));
@@ -649,10 +685,24 @@ describe("naval midgame (o.boatsMidgame)", () => {
     // Under the wall's south end: over 150 tiles from the landing and from
     // the line along the top, next to the route.
     expect(sent(true, [400, 250])).toEqual({ boats: 0, routed: true });
-    // Without the flag only the straight line is checked: the boat goes.
+    // Without the flag, or with the route guard off, only the straight line
+    // is checked: the boat goes.
     expect(sent(false, [400, 250])).toEqual({ boats: 1, routed: false });
+    expect(sent(true, [400, 250], false)).toEqual({ boats: 1, routed: false });
     // The SE corner guards nothing.
     expect(sent(true, [590, 290])).toEqual({ boats: 1, routed: false });
+    // At the default boatMaxVoyage the island (about 700 tiles of sea) is a
+    // far target (boatMidFar; our land is all ours, so the midgame gate
+    // holds): its route is checked with the near boats' guard off.
+    const far = { boatMidFar: true };
+    expect(sent(true, [400, 250], false, far)).toEqual({
+      boats: 0,
+      routed: true,
+    });
+    expect(sent(true, [590, 290], false, far)).toEqual({
+      boats: 1,
+      routed: false,
+    });
   });
 
   test("at the default front a far landmass a nation holds gets no boat; a nation-free one does", () => {
@@ -666,12 +716,279 @@ describe("naval midgame (o.boatsMidgame)", () => {
         );
         fill(game, n, 680, 700, 0, 20);
       }
-      const r = rig(game, { boatsMidgame: true, boatMidMinFood: 500 });
+      const r = rig(game, {
+        boatsMidgame: true,
+        boatMidFar: true,
+        boatMidMinFood: 500,
+      });
       r.me.setTroops(100_000);
       decideOnce(r);
       return boats(r).length;
     };
     expect(sent(false)).toBe(1);
     expect(sent(true)).toBe(0);
+  });
+
+  test("nationReach: nation samples and the land within boatBox of a nation's shore seed it; held marks their landmasses", () => {
+    // 200×20: land x 0-19 (a nation holds its shore side, x 10-19), x
+    // 100-119 (free) and x 180-199 (a tribe). The nation's shore (x 19) is
+    // 81 tiles (Chebyshev) from the free landmass and 161 from the tribe's.
+    const game = synthGame(
+      200,
+      20,
+      (x) => x < 20 || (x >= 100 && x < 120) || x >= 180,
+    );
+    const n = game.addPlayer(
+      new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+    );
+    fill(game, n, 10, 20, 0, 20);
+    const bot = game.addPlayer(
+      new PlayerInfo("tribe", PlayerType.Bot, null, "BOT00001"),
+    );
+    fill(game, bot, 180, 200, 0, 20);
+    const me = game.player(MY_ID);
+    const race = buildRaceGrid(game, parseApexOptions());
+    const og = ownerGrid(game, race, 2);
+    const at = (d: Int32Array, x: number) =>
+      d[Math.floor(10 / 2) * og.ow + Math.floor(x / 2)];
+    const comp = (x: number) => race.comp[cellOf(race, game, game.ref(x, 10))];
+    // boatBox 0: the land BFS alone, as nationLandDistance. Samples at x =
+    // 1, 3, ...: the nation's from x = 11, 2 tiles a step.
+    const land = nationReach(game, race, og, me, 0);
+    expect([...land.dist]).toEqual([...nationLandDistance(game, og, me)]);
+    expect(at(land.dist, 12)).toBe(0);
+    expect(at(land.dist, 0)).toBe(10);
+    expect(at(land.dist, 110)).toBe(-1);
+    expect(land.held[comp(5)]).toBe(1);
+    expect(land.held[comp(110)]).toBe(0);
+    expect(land.held[comp(190)]).toBe(0);
+    // boatBox 150: the free landmass lies in the nation's boat box, its
+    // samples seeds (0); the tribe's, 161 tiles out, do not.
+    const boat = nationReach(game, race, og, me, 150);
+    expect(at(boat.dist, 100)).toBe(0);
+    expect(at(boat.dist, 118)).toBe(0);
+    expect(boat.held[comp(110)]).toBe(1);
+    expect(at(boat.dist, 190)).toBe(-1);
+    expect(boat.held[comp(190)]).toBe(0);
+    // A nation without a shore launches no boat: no box.
+    const inland = synthGame(
+      200,
+      20,
+      (x) => x < 20 || (x >= 100 && x < 120) || x >= 180,
+    );
+    const n2 = inland.addPlayer(
+      new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+    );
+    fill(inland, n2, 0, 10, 0, 20);
+    const race2 = buildRaceGrid(inland, parseApexOptions());
+    const og2 = ownerGrid(inland, race2, 2);
+    const r2 = nationReach(inland, race2, og2, inland.player(MY_ID), 150);
+    expect(r2.dist[Math.floor(10 / 2) * og2.ow + 50]).toBe(-1);
+    // Our land is never a seed, nor seeded by the box: our samples x = 101
+    // and 103 are 4 and 2 tiles from the free sample x = 105.
+    fill(game, me, 100, 104, 0, 20);
+    const og3 = ownerGrid(game, race, 2);
+    const mine = nationReach(game, race, og3, me, 150);
+    expect(mine.dist[Math.floor(10 / 2) * og3.ow + 50]).toBe(4);
+    expect(mine.dist[Math.floor(10 / 2) * og3.ow + 51]).toBe(2);
+    expect(mine.dist[Math.floor(10 / 2) * og3.ow + 52]).toBe(0);
+  });
+
+  test("a far tribe on a spit the OwnerGrid cuts off from its nation's landmass gets no far boat", () => {
+    // 700×20: us x 0-59; a far landmass x 600-699, a tribe on its west
+    // part (x 600-639) and on a spit: a strip along row 12 (x 570-599)
+    // with a stub up to (570, 10). At stride 4 (samples at 4k + 2) the
+    // stub's sample (570, 10) has only water samples around it; by tiles
+    // it is the landmass's (race-grid links). A nation holds x 640-699.
+    const run = (nation: boolean, over: Record<string, unknown> = {}) => {
+      const game = synthGame(
+        700,
+        20,
+        (x, y) =>
+          x < 60 ||
+          x >= 600 ||
+          (y === 12 && x >= 570) ||
+          (x === 570 && y >= 10 && y <= 12),
+      );
+      const me = game.player(MY_ID);
+      fill(game, me, 0, 60, 0, 20);
+      me.setSpawnTile(game.ref(5, 10));
+      const b = game.addPlayer(
+        new PlayerInfo("tribe", PlayerType.Bot, null, "BOT00001"),
+      );
+      fill(game, b, 570, 640, 0, 20);
+      b.setTroops(5_000);
+      if (nation) {
+        const n = game.addPlayer(
+          new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+        );
+        fill(game, n, 640, 700, 0, 20);
+      }
+      const r = rig(game, {
+        boatsMidgame: true,
+        boatMidFar: true,
+        boatMidMinFood: 500,
+        ...over,
+      });
+      r.me.setTroops(Math.floor(r.models.cap(r.me)));
+      r.owners = ownerGrid(game, r.race, 4);
+      return { game, r, b };
+    };
+    // The precondition: the stub's sample is the tribe's, unreached by the
+    // land BFS (the old far test read that as nation-free), on the
+    // nation's landmass.
+    {
+      const { game, r, b } = run(true, { boatMidNationBoat: 0 });
+      const og = r.owners!;
+      const spit = Math.floor(10 / 4) * og.ow + Math.floor(570 / 4);
+      expect(og.owner[spit]).toBe(b.smallID());
+      expect(nationLandDistance(game, og, r.me)[spit]).toBe(-1);
+      const reach = nationReach(game, r.race, og, r.me, 0);
+      expect(reach.dist[spit]).toBe(-1);
+      const comp = r.race.comp[cellOf(r.race, game, game.ref(570, 10))];
+      expect(comp).toBe(r.race.comp[cellOf(r.race, game, game.ref(650, 10))]);
+      expect(reach.held[comp]).toBe(1);
+      // Without held (the old test) the spit is a far candidate.
+      const field = voyageField(game, r.race, [game.ref(59, 10)]);
+      const far = (held: Uint8Array): FarReach => ({
+        max: 1500,
+        foodAt: () => 3000,
+        minFood: 500,
+        nation: { dist: reach.dist, held },
+        front: 0.8,
+        hold: 150,
+      });
+      const old = boatTargets(game, r.race, og, r.me, 8, {
+        field,
+        max: 400,
+        far: far(new Uint8Array(reach.held.length)),
+      });
+      expect(old.some((t) => game.x(t.tile) <= 572)).toBe(true);
+      const now = boatTargets(game, r.race, og, r.me, 8, {
+        field,
+        max: 400,
+        far: far(reach.held),
+      });
+      expect(now).toHaveLength(0);
+      decideOnce(r);
+      expect(boats(r)).toHaveLength(0);
+    }
+    // With the nation's boat box too (the default).
+    {
+      const { r } = run(true);
+      decideOnce(r);
+      expect(boats(r)).toHaveLength(0);
+    }
+    // Without the nation the tribe gets its far boat.
+    {
+      const { game, r, b } = run(false);
+      decideOnce(r);
+      expect(boats(r)).toHaveLength(1);
+      expect(game.owner(boats(r)[0].dst)).toBe(b);
+    }
+  });
+
+  test("a far island within a nation's boat box (boatMidNationBoat) gets no far boat", () => {
+    // farGame(60)'s map (us x 0-59, a free far island x 600-699) and a
+    // nation on a small island (20 tiles wide, y 0-9) whose east shore
+    // lies `gap` tiles west of the far island.
+    const sent = (gap: number, box?: number) => {
+      const x1 = 600 - gap;
+      const game = synthGame(
+        700,
+        20,
+        (x, y) => x < 60 || x >= 600 || (x >= x1 - 20 && x < x1 && y < 10),
+      );
+      const me = game.player(MY_ID);
+      fill(game, me, 0, 60, 0, 20);
+      me.setSpawnTile(game.ref(5, 10));
+      const n = game.addPlayer(
+        new PlayerInfo("nation", PlayerType.Nation, null, "NATION01"),
+      );
+      fill(game, n, x1 - 20, x1, 0, 10);
+      const r = rig(game, {
+        boatsMidgame: true,
+        boatMidFar: true,
+        boatMidMinFood: 500,
+        ...(box !== undefined ? { boatMidNationBoat: box } : {}),
+      });
+      r.me.setTroops(100_000);
+      decideOnce(r);
+      return boats(r).filter((x) => game.x(x.dst) >= 600).length;
+    };
+    // 131 tiles: inside the default ±150 box.
+    expect(sent(131)).toBe(0);
+    expect(sent(131, 0)).toBe(1);
+    // 281 tiles: outside it.
+    expect(sent(281)).toBe(1);
+  });
+
+  test("far targets only in the midgame: stall mode, or our landmass's food nearly gone (farTargets)", () => {
+    const o = parseApexOptions({ boatsMidgame: true, boatMidFar: true });
+    const v = { o, tick: 5000 } as unknown as View;
+    const food = (left: number): LandmassFood => ({
+      ours: new Set([0]),
+      free: new Map([[0, left]]),
+      tribe: new Map(),
+    });
+    const s = createState();
+    s.spawn.endTick = 5000;
+    // At age 0 we expect to take about 2,950 tiles in 300 ticks; twice that
+    // is "nearly gone".
+    expect(localFoodLow(v, s, food(10_000))).toBe(false);
+    expect(localFoodLow(v, s, food(1_000))).toBe(true);
+    expect(farTargets(v, s, food(10_000), "blocked")).toBe(false);
+    expect(farTargets(v, s, food(10_000), "surplus")).toBe(false);
+    expect(farTargets(v, s, food(1_000), "blocked")).toBe(true);
+    expect(farTargets(v, s, food(10_000), "stall")).toBe(true);
+    s.stall.since = 5000 - o.stallTicks;
+    expect(farTargets(v, s, food(10_000), "blocked")).toBe(true);
+    for (const over of [{ boatsMidgame: true }, { boatMidFar: true }]) {
+      const off = { ...v, o: parseApexOptions(over) } as View;
+      expect(farTargets(off, s, food(1_000), "stall")).toBe(false);
+    }
+
+    // Through decide: our landmass (x 0-249, y 0-29) holds a tribe of 7,200
+    // tiles next to us; a far free island x 600-699. Troops idle at home
+    // (a trigger holds), but the far island gets its boat only in stall
+    // mode.
+    const far = (stall: boolean) => {
+      const game = synthGame(
+        700,
+        40,
+        (x, y) => (x < 250 && y < 30) || x >= 600,
+      );
+      const me = game.player(MY_ID);
+      fill(game, me, 0, 10, 0, 30);
+      me.setSpawnTile(game.ref(5, 15));
+      const b = game.addPlayer(
+        new PlayerInfo("tribe", PlayerType.Bot, null, "BOT00001"),
+      );
+      fill(game, b, 10, 250, 0, 30);
+      b.setTroops(1_000_000);
+      const r = rig(game, {
+        boatsMidgame: true,
+        boatMidFar: true,
+        boatMidMinFood: 500,
+      });
+      r.me.setTroops(400_000);
+      if (stall) r.s.stall.since = game.ticks() - 1000;
+      const v2 = view(r);
+      const f = landmassFood(game, r.race, r.owners!, r.me);
+      expect(localFoodLow(v2, r.s, f)).toBe(false);
+      expect(boatTrigger(v2, r.s, f)).not.toBeNull();
+      r.ctrl.decide(v2, r.s);
+      r.scheduler.flush(
+        (intent) => {
+          r.sent.push(intent);
+          return "ok";
+        },
+        r.ledger,
+        v2.tick,
+      );
+      return boats(r).filter((x) => game.x(x.dst) >= 600).length;
+    };
+    expect(far(false)).toBe(0);
+    expect(far(true)).toBe(1);
   });
 });
