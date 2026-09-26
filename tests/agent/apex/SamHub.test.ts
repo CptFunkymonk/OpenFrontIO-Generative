@@ -484,6 +484,9 @@ describe("B3 round 2: the SAM's lifetime (samHorizon, hubDoom, samRebuild)", () 
       gold: 2_500_000n,
       line: 2_500_000n,
     });
+    // At the default nukePayShare (0.5) the same gold is also half a
+    // hydrogen bomb, which the killer test reads first.
+    expect(samKiller(w.game, plan(w, "H"), O, 1, 0)?.why).toBe("hydro");
     // The real nation: no aim point at the covered city, one slot short.
     const nuke = brain(w, "N", false);
     expect(nuke.findBestNukeTarget()).toBe(H);
@@ -554,9 +557,7 @@ describe("B3 round 2: the SAM's lifetime (samHorizon, hubDoom, samRebuild)", () 
     // 1.5M + 500k x 300 / 100 = 3M: past the 2.5M line.
     expect(planSam(w.game, H, { ...O2, samHorizon: 300 }, at())).toBe("salvo");
     // 600 ticks: 4.5M, past the hydrogen share too (0.8 x 5M).
-    expect(planSam(w.game, H, { ...O2, samHorizon: 600 }, at())).toBe(
-      "hydro",
-    );
+    expect(planSam(w.game, H, { ...O2, samHorizon: 600 }, at())).toBe("hydro");
     // 1.5M + 500k x 50 / 100 = 1.75M: short; so is the gold now (the
     // default, samHorizon 0).
     expect(typeof planSam(w.game, H, { ...O2, samHorizon: 50 }, at())).toBe(

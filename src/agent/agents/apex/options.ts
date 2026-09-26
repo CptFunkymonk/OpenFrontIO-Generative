@@ -133,26 +133,31 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  the arrival field without that nation (A and B capped by the land
    *  connected to the site when that land is landlocked), and verified in
    *  a second fork (the nation disappears and no other nation is cut).
-   *  A3 round 1 (margin −0.25, no guard, quick 32 games against apex): the
-   *  gain is in the opening and the peak, not in survival. @4: ≥ top
-   *  nation at minute 3 50% → 72%. @20: progress +0.058 [+0.034, +0.085]
-   *  and peak +4.6 points, but final land +1.4 [−1.2, +4.2], survival −0.3
-   *  min [−1.7, +1.0], lost before minute 20 (any cause) 14 → 14; top 3 at
-   *  minute 10 3 → 11 of 28 on maps with 4+ nations (8-0) and 4 → 0 of 4 on
-   *  Bering Strait and Onion, where the nations left win sooner. */
+   *  A3 round 2, with the defaults below, against apex @20: the gain is in
+   *  the opening and the peak, not in survival. quick (32 games): progress
+   *  +0.035 [+0.022, +0.051], 25/4, peak +2.8 points, top 3 at minute 10
+   *  7 → 14 (8-1), but final land +1.5 [−1.1, +4.3], survival +0.4 min
+   *  [−0.5, +1.5], lost before minute 20 (any cause) 14 → 14. dev, out of
+   *  sample (46 games: maps with 4 or fewer nations and the margin band):
+   *  progress +0.040 [+0.017, +0.064], final land +4.4 [+1.0, +8.3],
+   *  survival +0.1 min [−1.1, +1.3]. */
   spawnErase: boolean;
   /** An erasure site must score above (1 + this) × the best race
-   *  candidate's score. −0.25 is provisional: chosen on the quick@4 games
-   *  it was reported on (+0.1 < 0 < −0.1 < −0.25; it erases in 31 of 32). */
+   *  candidate's score. Tuned in-sample on quick@4 (+0.1 < 0 < −0.1 <
+   *  −0.25); on dev @20, out of sample, the games only −0.25 erases (score
+   *  0.75-0.9× the race best, 38 games) gain progress +0.032 [+0.010,
+   *  +0.056] (survival −0.3 min [−1.7, +1.1]), and those only −0.4 would
+   *  add (0.6-0.75×, 14 games) lose −0.027 [−0.087, +0.030]. */
   spawnEraseMargin: number;
   /** Most erasure sites scored exactly (each a full nation search). */
   spawnEraseK: number;
   /** Nations that must be left after an erasure (the layout's placed
-   *  nations minus the erased ones). 2 never leaves a duel: in a 1v1 every
-   *  nation attack and nuke is ours (NationNukeBehavior targets the other
-   *  player once two are left), and each of the 4 Bering Strait erasures of
-   *  round 1 lost by minute 6.1-7.0 against 9.5-19.1 for apex. 0: no guard
-   *  (round 1). */
+   *  nations minus the erased ones). 2 never leaves a duel, where every
+   *  nation attack is ours and, once only two players (tribes included)
+   *  are alive, every nuke too (NationNukeBehavior): 4 of the 5 Bering
+   *  Strait erasures seen lost by minute 6.1-7.0 against 9.5-19.1 for
+   *  apex. 3 would also keep 3-nation maps, where erasures went 2 worse
+   *  (Onion) and 2 better (Tourney 3 Teams). 0: no guard (round 1). */
   spawnEraseMinLeft: number;
   /** Without a verified erasure, send the preview's race best at tick 1
    *  anyway (round 1). It is apex's tile, but landing in tick 2 instead of
@@ -1004,10 +1009,11 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  now), or fired a hydrogen bomb or a salvo at our SAMs within
    *  nukeMemory ticks; hubDoom repeats the test at every city check.
    *  conf1 g39: a latent Alaska took 2 silo upgrades and salvoed the hub
-   *  600 ticks after the order. A projection does not foresee that (0.35M
-   *  flat until it ate 31 tribes) and, at 300 or 600 ticks, would have
-   *  refused the SAM in 4 of the 5 games it helped (shadow run over the 9
-   *  games round 1 changed): 0. -1 = round 1's gate only (samSlotGate). */
+   *  600 ticks after the order. No projection foresaw it (Alaska attacked
+   *  no one at the order and had gained nothing for 300 ticks; then it ate
+   *  31 tribes): in a shadow run over the 9 games round 1 changed, 300 or
+   *  600 ticks refused none of the SAMs that 0 allows except one that
+   *  helped (dev216, at 600): 0. -1 = round 1's gate only (samSlotGate). */
   samHorizon: number;
   /** The hub's upkeep: once a SAM stands, the samHorizon test at every
    *  city check (against its interceptors) dooms the hub for nukeMemory

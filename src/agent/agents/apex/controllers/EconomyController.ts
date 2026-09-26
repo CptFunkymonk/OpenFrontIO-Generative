@@ -526,9 +526,14 @@ export function planCity(
 // once 31 conquered tribes had raised Alaska to 4M; the hub's cities then
 // fell to aimed atoms and a hydrogen bomb, and apex was eliminated; the
 // champion lost the same cities earlier and survived. No gold projection
-// foresaw that windfall (Alaska attacked no one at the order), and at 300
-// or 600 ticks one would have refused the SAM in 4 of the 5 round-1 games
-// where it helped, so the default reads the gold now.
+// foresaw that windfall (Alaska attacked no one at the order and had
+// gained nothing for 300 ticks), and in a shadow run over the 9 games
+// round 1 changed, reading 300 or 600 ticks ahead refused only one more
+// SAM, one that helped (dev216, at 600), so the default reads the gold now.
+// The same run: the new gates refused conf1 g35's SAM (Korpoström had fired
+// a hydrogen bomb 7 ticks earlier) and dev216's two rebuilds under the
+// shooter, and doomed ab3 g3's hub before a 2585 upgrade (Alaska's
+// hydrogen bomb at 2543); they did not refuse conf1 g39's.
 
 /** A nation that could nuke a structure of ours (see nukeThreats). */
 export interface NukeThreat {
@@ -971,11 +976,11 @@ export type SamIdle =
  * The SAM hub rule (o.samHub): with threats, none with a hydrogen bomb
  * among its bombs (nukeThreats), fewer than o.samMax SAMs of ours
  * (finished or not), and gold for one, the site farther than
- * hubRing().min from every structure of ours
- * (a salvo at it spares them) whose covered ring holds the most finished
- * city levels (then the deepest, then the lowest tile), at least
- * o.cityMinDepth deep; built only if it covers o.samMinLevels levels or our
- * gold also pays the next city level. With o.samSlotGate, none while a
+ * hubRing().min from every structure of ours (a salvo at it spares them)
+ * whose covered ring holds the most finished city levels (then the
+ * deepest, then the lowest tile), at least o.cityMinDepth deep; built only
+ * if it covers o.samMinLevels levels or our gold also pays the next city
+ * level. With o.samSlotGate, none while a
  * current threat could salvo it at once: two ready slots and real gold for
  * two atoms, or one of each while nothing else of ours is nukeable (a SAM
  * under construction covers nothing, so one bomb takes it). With

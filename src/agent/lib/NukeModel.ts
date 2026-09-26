@@ -171,15 +171,9 @@ export class NukeModel {
   private ranking: Ranking | null = null;
   private exposureAt = Number.NEGATIVE_INFINITY;
   private exposureCache: NukeExposure[] = [];
-  /** Gold of each nation at exposures() calls, oldest first, over about
-   *  GOLD_WINDOW ticks (projectedGold). */
+  /** Gold of each silo owner at exposures() calls, oldest first, over
+   *  about GOLD_WINDOW ticks (projectedGold). */
   private readonly goldLog = new Map<
-    PlayerID,
-    { tick: number; gold: bigint }[]
-  >();
-  /** Gold each nation paid for the bombs observe() saw, by tick, over about
-   *  two GOLD_WINDOWs (projectedGold adds it back). */
-  private readonly bought = new Map<
     PlayerID,
     { tick: number; gold: bigint }[]
   >();
@@ -241,15 +235,7 @@ export class NukeModel {
       lastHydro: Number.NEGATIVE_INFINITY,
       lastSalvo: Number.NEGATIVE_INFINITY,
     };
-    // The price NukeExecution charged when it built the bomb (its first
-    // tick), the real one.
     const tick = this.game.ticks();
-    const paid = this.game.config().unitInfo(u.type()).cost(this.game, owner);
-    const bought = (this.bought.get(id) ?? []).filter(
-      (b) => b.tick > tick - 2 * GOLD_WINDOW,
-    );
-    bought.push({ tick, gold: paid });
-    this.bought.set(id, bought);
     if (u.type() === UnitType.HydrogenBomb) {
       l.hydros++;
       l.lastHydro = tick;
@@ -593,10 +579,9 @@ export class NukeModel {
     const out: NukeExposure[] = [];
     for (const N of g.players()) {
       if (N === this.me || N.type() !== PlayerType.Nation) continue;
-      // Every nation's gold: a silo bought later finds its history.
-      this.sampleGold(N, tick);
       // maybeSendNuke's first gate (:115-124): no silo, no decision.
       if (N.units(UnitType.MissileSilo).length === 0) continue;
+      this.sampleGold(N, tick);
       const rungs = this.rungs(N, false);
       if (rungs.length === 0) continue;
       const at = rungs.findIndex((x) => x.target === this.me);
@@ -635,17 +620,18 @@ export class NukeModel {
 
   /**
    * N's gold `horizon` ticks ahead at its net gain since the oldest sample
-   * of its last ~GOLD_WINDOW ticks (exposures() samples every nation), or
-   * its gold now if it gained nothing. Bombs it bought in the window
-   * (observe()) count as gold it still has: a purchase shows that it can
-   * pay, not that it earns nothing (package B3 review: Korpoström, 7.9M,
-   * fired a hydrogen bomb at 10948 and read 3.05M with no income at 10955,
-   * which opened the SAM gate). Other spending lowers the rate, as round 1
-   * had it (a gross rate, spending left out, flagged most of the SAMs that
-   * helped in round 1 as near a hydrogen bomb). Nations gain gold in bursts
-   * (conquest takes a tribe's ~50 gold a tick since the spawn phase;
-   * quick@20 Bering Strait: Alaska from under 2.5M to 6M within about 300
-   * ticks, then a hydrogen bomb), so the rate is read, not the wages.
+   * of its last ~GOLD_WINDOW ticks (exposures() samples silo owners), or
+   * its gold now if it gained nothing. Nations gain gold in bursts
+   * (conquest; quick@20 Bering Strait: Alaska from under 2.5M to 6M within
+   * about 300 ticks, then a hydrogen bomb), so the rate is read, not the
+   * wages. A purchase reads as no income (package B3 review: Korpoström,
+   * 7.9M, fired a hydrogen bomb at 10948 and projected 3.05M at 10955);
+   * hydroSince covers that case. Rates that ignore spending (a gross rate,
+   * or bombs bought added back) and samples taken before a nation's silo
+   * moved the SAM rule both ways in a shadow run over the 9 games round 1
+   * changed (refused 3 of the 5 SAMs that helped, ordered one at 1835 in
+   * the game where round 1's v2 lost its hub to a hydrogen bomb), so the
+   * rate stays round 1's.
    */
   projectedGold(n: PlayerID, horizon: number): bigint {
     const N = this.game.player(n);
@@ -654,13 +640,8 @@ export class NukeModel {
     if (log === undefined || log.length === 0 || horizon <= 0) return gold;
     const first = log[0];
     const dt = this.game.ticks() - first.tick;
-    if (dt <= 0) return gold;
-    let had = gold;
-    for (const b of this.bought.get(n) ?? []) {
-      if (b.tick > first.tick) had += b.gold;
-    }
-    if (had <= first.gold) return gold;
-    return gold + ((had - first.gold) * BigInt(horizon)) / BigInt(dt);
+    if (dt <= 0 || gold <= first.gold) return gold;
+    return gold + ((gold - first.gold) * BigInt(horizon)) / BigInt(dt);
   }
 
   /**

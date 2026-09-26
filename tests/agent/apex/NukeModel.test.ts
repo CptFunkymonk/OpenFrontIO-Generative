@@ -271,7 +271,7 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     );
   });
 
-  it("projectedGold: the net gain since the oldest sample of the window, carried forward; exposures() lists silo owners only but samples every nation", () => {
+  it("projectedGold: the gain since the oldest sample of the window, carried forward; exposures() lists and samples silo owners only", () => {
     const w = world(
       SIDE,
       SIDE,
@@ -294,49 +294,13 @@ describe("NukeModel prices and observation (NNB:487-531, :814-823)", () => {
     // +500k in 100 ticks: +1.5M over the next 300.
     expect(m.projectedGold(N.id(), 300)).toBe(3_000_000n);
     expect(m.projectedGold(N.id(), 0)).toBe(1_500_000n);
-    // No silo, sampled all the same: B rose 400k over the 100 ticks.
-    setGold(B, 9_400_000n);
-    expect(m.projectedGold(B.id(), 100)).toBe(9_800_000n);
-    // Spending other than on bombs leaves no rate.
+    // No silo, no samples: its gold as it is.
+    expect(m.projectedGold(B.id(), 300)).toBe(9_000_000n);
+    // Spending leaves no rate (a hydrogen bomb bought: hydroSince).
     tick(w, 30);
     setGold(N, 200_000n);
     m.exposures();
     expect(m.projectedGold(N.id(), 300)).toBe(200_000n);
-  });
-
-  it("projectedGold: a bomb bought in the window keeps the rate (package B3 review: a hydrogen bomb read its buyer as earning nothing)", () => {
-    const w = world(
-      200,
-      100,
-      { N: PlayerType.Nation, H: PlayerType.Human },
-      columns([
-        ["N", 60],
-        [null, 40],
-        ["H", 100],
-      ]),
-    );
-    const { N, H } = w.p;
-    w.game.addPlayer(new PlayerInfo("X", PlayerType.Nation, null, idOf("X")));
-    w.game.player(idOf("X")).conquer(w.game.ref(80, 0));
-    siloAt(w, N, 10, 50, 5);
-    pastImmunity(w);
-    setGold(N, 8_000_000n);
-    const m = model(w, "H");
-    m.exposures();
-    tick(w, 100);
-    setGold(N, 9_000_000n);
-    m.exposures();
-    expect(m.projectedGold(N.id(), 300)).toBe(12_000_000n);
-    const nuke = brain(w, "N", false);
-    nuke.sendNuke(w.game.ref(150, 50), UnitType.HydrogenBomb, H);
-    tick(w, 2); // init, then the first tick builds the bomb: 5M paid
-    m.observe();
-    m.exposures();
-    expect(N.gold()).toBe(4_000_000n);
-    // Had it kept the 5M: 9M, 1M above the first sample, 102 ticks ago.
-    expect(m.projectedGold(N.id(), 300)).toBe(
-      4_000_000n + (1_000_000n * 300n) / 102n,
-    );
   });
 
   it("salvoLine: the salvo's atoms at the real price, a silo level (1M) per missing launch slot, and at least the perceived atom price", () => {
