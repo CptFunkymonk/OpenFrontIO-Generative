@@ -142,7 +142,10 @@ export function strikeStack(
 //   (troopsAt/1.1 where its gates are open, at its decision
 //   o.strikeDetHorizon ticks ahead) and 0.34× each bordering ally's troops
 //   (betrayal); with o.strikeDetNearTarget also above those of the
-//   nations bordering the target, which the conquest makes ours.
+//   nations bordering the target, which the conquest makes ours. With
+//   o.strikeFloorReplica (package WP7b, off) an unallied bordering
+//   nation's land line is lowered to its replica line (replicaLine), never
+//   below o.strikeFlowFloor·cap.
 // - Value: tiles expected (all of them and gold/strikeGoldPerTile on a
 //   kill, else the stack's worth at the loss per tile) per troop spent (on
 //   a kill the tiles' losses and the answer's cancel, the rest comes home;
@@ -354,6 +357,17 @@ export function windowInput(
  * reserve (the free-land lock is not read: their state may be one full
  * refresh old, and their free land may be gone by the time they border
  * us), allies at the betrayal line.
+ *
+ * Package WP7b R1 FLOOR (o.strikeFloorReplica, off): each unallied
+ * bordering nation's line is its replicaLine instead, in [lo, land line]
+ * with lo = o.strikeFlowFloor·cap (its land line where that is not above
+ * lo), so the floor is never above A1's. Only where NationModel's last
+ * full refresh saw the nation on our border: the replica reads that
+ * refresh's borders, so a nation it has not seen there "cannot attack" us.
+ * Those keep their land lines, as the target's neighbours do. The flow-wt5
+ * prototype read every nation through the replica, which drops the unseen
+ * ones to lo (o.strikeFloorReplicaUnseen), and kept the floor itself at
+ * least lo (o.strikeFlowFloorMin): see those options.
  */
 export function deterrenceFloor(
   v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models">,
@@ -364,6 +378,13 @@ export function deterrenceFloor(
   const safe = v.nm.sendCapSafe();
   if (!Number.isFinite(safe)) return 0;
   const horizon = Math.max(0, v.o.strikeDetHorizon);
+  const replica = v.o.strikeFloorReplica;
+  const lo = replica ? v.o.strikeFlowFloor * v.models.cap(v.me) : 0;
+  // o.strikeFlowFloorMin (the prototype's): the floor itself is at least lo.
+  const least = replica && v.o.strikeFlowFloorMin ? lo : 0;
+  // o.strikeFloorReplicaUnseen (the prototype's): the replica for nations
+  // its last full refresh did not see on our border too.
+  const unseen = replica && v.o.strikeFloorReplicaUnseen;
   let floor = 0;
   const seen = new Set<PlayerID>();
   for (const info of v.wm.nations) {
@@ -380,9 +401,14 @@ export function deterrenceFloor(
     }
     const g = v.nm.gates(info.id, d);
     if (g === "locked" || g === "belowReserve") continue;
-    floor = Math.max(floor, (v.nm.troopsAt(info.id, d) + 1) / safe);
+    const land = (v.nm.troopsAt(info.id, d) + 1) / safe;
+    const read =
+      unseen || (replica && v.nm.get(info.id)?.sharesBorderWithUs === true);
+    floor = Math.max(floor, read ? replicaLine(v, info.id, d, lo, land) : land);
   }
-  if (!v.o.strikeDetNearTarget || except === null) return floor;
+  if (!v.o.strikeDetNearTarget || except === null) {
+    return Math.max(floor, least);
+  }
   for (const N of near ?? targetNeighbours(v, except)) {
     const id = N.id();
     if (seen.has(id)) continue;
@@ -394,9 +420,56 @@ export function deterrenceFloor(
     }
     const T = v.nm.troopsAt(id, d);
     if (T < v.nm.params(id).reserve * v.models.cap(N)) continue;
-    floor = Math.max(floor, (T + 1) / safe);
+    const land = (T + 1) / safe;
+    floor = Math.max(floor, unseen ? replicaLine(v, id, d, lo, land) : land);
   }
-  return floor;
+  return Math.max(floor, least);
+}
+
+/** Bisection steps of replicaLine: the line to (land − lo)/256. */
+export const REPLICA_STEPS = 8;
+
+/**
+ * Package WP7b R1 FLOOR (o.strikeFloorReplica; docs/14-m4-plan.md §2.7
+ * item 7b; ported from the flow-wt5 prototype, flow.md §5-6): nation id's
+ * line on our home at its decision d, the smallest home in [lo, land] at
+ * which NationModel's replica says it cannot land-attack us
+ * (canLandAttackUs: its send cap against that home and the 20% floor) or
+ * its Impossible strategy list picks another player first (wouldTargetUs,
+ * our troops replaced by that home), found by bisection in REPLICA_STEPS
+ * steps; `land` when it would pick us at every home below it. Both tests
+ * get easier to pass as the home rises (canLandAttackUs exactly; the list
+ * as the home leaves juicy, weakest, victim and veryWeak), so the
+ * bisection keeps a picked home below and an unpicked one above, and
+ * returns the unpicked end. `land` where lo is not below it, or where the
+ * replica has no full refresh of the nation (it would answer "cannot
+ * attack" from nothing). The replica reads one decision on the borders
+ * of the nation's last full refresh: one that refresh did not see on our
+ * border (the target's neighbours; a nation whose border with us is newer
+ * than its refresh) "cannot attack" us (canLandAttackUs needs a shared
+ * border), so deterrenceFloor reads those through it only with
+ * o.strikeFloorReplicaUnseen. Read-only.
+ */
+export function replicaLine(
+  v: Pick<View, "nm">,
+  id: PlayerID,
+  d: number,
+  lo: number,
+  land: number,
+): number {
+  const picked = (H: number) =>
+    v.nm.canLandAttackUs(id, H, d) && v.nm.wouldTargetUs(id, H) !== null;
+  if (lo >= land) return land;
+  if (v.nm.get(id)?.full !== true) return land;
+  if (!picked(lo)) return lo;
+  let a = lo;
+  let b = land;
+  for (let i = 0; i < REPLICA_STEPS; i++) {
+    const m = (a + b) / 2;
+    if (picked(m)) a = m;
+    else b = m;
+  }
+  return b;
 }
 
 /** The live nations (type Nation) in the target's nearby() but us and the
@@ -974,6 +1047,16 @@ export class StrikeController implements Controller {
           (o.strikeDetNearTarget
             ? ` det=${k(deterrenceFloor(v, info.id, near))}` +
               (near !== undefined ? ` near=${near.length}` : "")
+            : "") +
+          // Package WP7b: the land-line floor the replica replaced (logs).
+          (o.strikeFloorReplica && v.log !== undefined
+            ? ` land=${k(
+                deterrenceFloor(
+                  { ...v, o: { ...o, strikeFloorReplica: false } },
+                  info.id,
+                  near,
+                ),
+              )}`
             : ""),
       };
     }

@@ -865,4 +865,62 @@ describe("apex window strikes (§5.2, package A1)", () => {
       }
     }
   });
+
+  // ── Package WP7b R1 FLOOR (tests/agent/apex/StrikeReplicaFloor.test.ts
+  //    has the bisection) ─────────────────────────────────────────────────
+
+  test("strikeFloorReplica: a W1 strike that B's land line blocks goes when B's list would pick the target first", async () => {
+    // T (the target, under its reserve) over B, both right of us. B
+    // borders us and T and holds 0.9 of its cap: its land line is above our
+    // home, so without the replica no strike on T goes. B's strategy list
+    // picks T (very weak) before us at any home of ours from 0.35 of our
+    // cap up: with it, the floor is 0.35 of our cap.
+    for (const replica of [false, true]) {
+      const f = await field({ width: 120, height: 40 });
+      const { game, me, config } = f;
+      own(me, rect(game, 0, 0, 30, 40));
+      const nationObj = new Nation(
+        new Cell(75, 10),
+        new PlayerInfo("t", PlayerType.Nation, null, "NATIONT1"),
+      );
+      const T = game.addPlayer(nationObj.playerInfo);
+      own(T, rect(game, 30, 0, 120, 20));
+      const B = game.addPlayer(
+        new PlayerInfo("b", PlayerType.Nation, null, "NATIONB1"),
+      );
+      own(B, rect(game, 30, 20, 120, 40));
+      for (let i = 0; i < 60; i++) game.executeNextTick();
+      B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+      const sc: Scene = { f, nation: T, rate: 0, phase: 0, answers: [] };
+      const r = run(sc, stalled());
+      const p = r.nm.params(T.id());
+      sc.rate = p.rate;
+      sc.phase = p.phase;
+      const o = parseApexOptions({ strikeFloorReplica: replica });
+      const home = Math.round(0.95 * config.maxTroops(me));
+      const land = B.troops() / r.nm.sendCapSafe();
+      expect(land).toBeGreaterThan(home);
+      const launch = untilLaunch(sc, r, o, 0.08, 3 * sc.rate);
+      if (!replica) {
+        expect(launch).toBeNull();
+        expect(strikeMemory(r.s).stats.skips.budget ?? 0).toBeGreaterThan(0);
+        continue;
+      }
+      expect(launch).not.toBeNull();
+      const intent = launch!.intent;
+      if (intent.type !== "attack") throw new Error("not an attack");
+      expect(intent.targetID).toBe(T.id());
+      expect(intent.troops).toBeLessThanOrEqual(
+        home - 0.35 * config.maxTroops(me),
+      );
+      // The launch line: the replica's floor, and the land line it lowered.
+      const line = r.logs.find((l) => l.includes("wstrike NATIONT1"));
+      expect(line).toBeDefined();
+      const k = (x: number) => `${Math.round(x / 1000)}k`;
+      expect(line).toContain(` det=${k(0.35 * config.maxTroops(me))}`);
+      expect(line).toMatch(/ land=\d+k$/);
+      const logged = Number(/ land=(\d+)k$/.exec(line!)![1]) * 1000;
+      expect(logged).toBeGreaterThan(home);
+    }
+  });
 });

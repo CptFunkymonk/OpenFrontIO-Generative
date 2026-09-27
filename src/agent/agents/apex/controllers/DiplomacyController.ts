@@ -48,6 +48,14 @@ import { inStall } from "./ExpansionController";
 //                          extension of a dangerous bordering ally expires;
 //                          every other ally lapses (never a break). The logs
 //                          name every alliance change (`dip ally+/~/-`).
+//   WP7a web keep          (o.webKeepStrong; docs/14-m4-plan.md §2.7 item 7a)
+//                          every strong bordering ally (maxTroops ≥
+//                          webKeepCapRatio × ours, or troops ≥
+//                          webKeepHomeRatio × our home) is asked to extend,
+//                          kept or not, at the lead; the earlier of two
+//                          strong expiries within webKeepGap is asked
+//                          sooner (planStrong, keepAskTicks); one that
+//                          lapses gets a fresh request (o.webKeepRenew).
 //
 // The recall (§3.3.2) is the DefenseController's; both take the dedupe key
 // `ally:<id>`, so no nation gets two requests in a tick. Slots: requests from
@@ -189,6 +197,14 @@ export interface DiplomacyMemory {
   midLogged?: { keep: string; at: number };
   /** o.webPeakKeep: each nation's peak dmid, as of the last plan. */
   peak?: Record<PlayerID, number>;
+  /** Package WP7a (o.webKeepStrong): the strong bordering allies of the
+   *  last decision with their ask ticks, soonest expiry first
+   *  (planStrong; logs and tests). */
+  strong?: StrongAlly[];
+  /** Package WP7a (o.webKeepRenew): the expiry of each strong bordering
+   *  ally's alliance, for the fresh request at its lapse (set each
+   *  decision; the entry of a lapsed one stays until onTick has seen it). */
+  strongRenew?: Record<PlayerID, number>;
   stats: {
     plans: number;
     requests: number;
@@ -205,7 +221,62 @@ export interface DiplomacyMemory {
     /** o.webFriendGold donations sent, and their gold. */
     goldGifts?: number;
     goldGiven?: number;
+    /** Package WP7a: extensions asked by the strong rule for allies outside
+     *  the keep list (allySet or the midgame keep set), asks it moved
+     *  earlier for webKeepGap, and webKeepRenew requests sent. */
+    keepAsks?: number;
+    keepEarly?: number;
+    keepRenews?: number;
   };
+}
+
+/** Package WP7a (o.webKeepStrong): a strong bordering ally (planStrong). */
+export interface StrongAlly {
+  id: PlayerID;
+  /** Its alliance's expiry. */
+  e: number;
+  /** The first tick its extension is asked (keepAskTicks). */
+  askAt: number;
+  /** The strong ally expiring next within webKeepGap, which moved askAt
+   *  earlier (null: askAt is e − lead). */
+  before: PlayerID | null;
+  /** maxTroops(Z) / maxTroops(us), and troops(Z) / our home troops. */
+  cap: number;
+  home: number;
+}
+
+/**
+ * Package WP7a (o.webKeepStrong): the ask tick of each strong ally, `rows`
+ * sorted by expiry (e, then id): e − lead, but at least `gap` before the
+ * ask tick of the next strong ally (a passed extension restarts the term
+ * at the nation's yes, so terms asked `gap` apart end `gap` apart; the
+ * later ask may itself have moved); never earlier than e − (duration −
+ * gap), so a term just begun is not asked again at once. Fills `askAt`
+ * and `before` in place.
+ */
+export function keepAskTicks(
+  rows: StrongAlly[],
+  lead: number,
+  gap: number,
+  duration: number,
+): void {
+  let next: StrongAlly | null = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    r.askAt = r.e - lead;
+    r.before = null;
+    if (gap > 0 && next !== null && next.askAt - r.askAt < gap) {
+      const by = Math.max(
+        next.askAt - gap,
+        r.e - Math.max(lead, duration - gap),
+      );
+      if (by < r.askAt) {
+        r.askAt = by;
+        r.before = next.id;
+      }
+    }
+    next = r;
+  }
 }
 
 /** o.webMidgame's plan (planMid), plain data. */
@@ -487,7 +558,196 @@ export class DiplomacyController implements Controller {
         if (v.o.webFriend) this.friends(v, mem, mem.mid);
       }
     }
+    // Package WP7a: after B2's renew, which takes the same ally's key.
+    if (
+      v.o.webKeepStrong &&
+      v.o.webKeepRenew &&
+      s.diplomacy?.strongRenew !== undefined
+    ) {
+      this.renewStrong(v, s, s.diplomacy);
+    }
+    if (v.o.webKeepStrong && v.o.webKeepGift && s.diplomacy !== undefined) {
+      const mem = s.diplomacy;
+      // B2's onTick sees its own gifts with the midgame web on.
+      if (mem.giftsPending !== undefined && !midActive(v)) {
+        this.seeGifts(v, mem);
+      }
+      this.keepGifts(v, mem);
+    }
     this.counterAccept(v, s);
+  }
+
+  /**
+   * Package WP7a (o.webKeepGift, every tick): gold for the friendship of a
+   * strong bordering ally (planStrong) whose extension we asked and it has
+   * not agreed to, webKeepGiftLead ticks or fewer before the expiry, while
+   * its extension forecast at its next decision is below webKeepGiftMinP
+   * for a reason friendship fixes (not our treachery or the spawn guard).
+   * B2's gold gift (goldFriends, o.webFriendGold) without the midgame web:
+   * gold worth friendPoints, paid in turn t + 1 and priced for a payment up
+   * to GIFT_PAY_WITHIN ticks late, keeps it Friendly (≥ 50, decay 0.05 a
+   * tick) until FRIEND_PAST_EXPIRY ticks past the expiry. Friendly is
+   * decided before the extension trap and the strength tests (accepted 67%
+   * of the time at each decision left, and at the renew's), after
+   * hasTooManyAlliances [PIN FriendDonation]. One gift a term, while its
+   * relation band is Neutral, from at most webKeepGiftShare of our gold;
+   * `donate:<id>` dedupes it with B2's gifts in a tick.
+   */
+  private keepGifts(v: View, mem: DiplomacyMemory): void {
+    const { o, me, nm, game, tick: t } = v;
+    if (mem.strong === undefined || mem.strong.length === 0) return;
+    const gifts = (mem.gifts ??= {});
+    for (const st of mem.strong) {
+      const id = st.id;
+      if (!game.hasPlayer(id)) continue;
+      const N = game.player(id);
+      const a = me.allianceWith(N);
+      if (a === null) continue;
+      const e = a.expiresAt();
+      if (e - t > o.webKeepGiftLead || e <= t || gifts[id] === e) continue;
+      // Package WP1 (review F1): no gift for a foe mark's extension.
+      if (v.scheduler.vetoed(`ext:${id}`)) continue;
+      if (!a.agreedToExtend(me) || a.agreedToExtend(N)) continue;
+      if (N.relation(me) !== Relation.Neutral) continue;
+      if (me.hasEmbargoAgainst(N) || !me.canDonateGold(N)) continue;
+      const f = nm.acceptsAlliance(id, {
+        kind: "extension",
+        createdAt: t,
+        atTick: nm.nextDecision(id, t + 1),
+        embargoStoppedBy: null,
+      });
+      if (f.p >= o.webKeepGiftMinP) continue;
+      if (f.branch === "traitor" || f.branch === "spawnPhase") continue;
+      const paid = t + 1;
+      const r = Math.min(
+        FRIENDLY_FROM - 1,
+        Math.max(0, nm.relations.value(id, paid)),
+      );
+      const points = friendPoints(r, paid, e + FRIEND_PAST_EXPIRY);
+      if (points === null) continue;
+      const gold =
+        BigInt(points / GOLD_POINTS) * goldChunk(game, t + GIFT_PAY_WITHIN);
+      if (Number(gold) > o.webKeepGiftShare * Number(me.gold())) {
+        if ((mem.giftsSkipped ??= {})[id] !== e) {
+          mem.giftsSkipped[id] = e;
+          v.log?.(
+            `${t} dip keep-gift ${N.name()} unaffordable: ${gold} gold for +${points} ` +
+              `(have ${me.gold()}, ext p=${f.p.toFixed(2)} ${f.branch})`,
+          );
+        }
+        continue;
+      }
+      const ok = v.scheduler.offer({
+        intent: { type: "donate_gold", recipient: id, gold: Number(gold) },
+        prio: Prio.Diplomacy,
+        cls: "diplomacy",
+        key: `donate:${id}`,
+      });
+      if (!ok) continue;
+      gifts[id] = e;
+      (mem.giftsPending ??= {})[id] = { at: t, points };
+      mem.stats.goldGifts = (mem.stats.goldGifts ?? 0) + 1;
+      mem.stats.goldGiven = (mem.stats.goldGiven ?? 0) + Number(gold);
+      v.log?.(
+        `${t} dip keep-gift ${N.name()} ${gold} gold for +${points} (relation ~${r.toFixed(1)}, ` +
+          `ext p=${f.p.toFixed(2)} ${f.branch}, expires ${e}, ` +
+          `cap=${st.cap.toFixed(2)}x home=${st.home.toFixed(2)}H)`,
+      );
+    }
+  }
+
+  /**
+   * Package WP7a (o.webKeepRenew, every tick): a strong bordering ally
+   * (planStrong) whose alliance lapsed, its extension refused or not yet
+   * agreed, gets a fresh request the first tick we see it gone, as
+   * o.webRenew does for the midgame web's kept allies. The nation answers
+   * it at its next decision before it creates any attack there
+   * (handleAllianceRequests precedes attacks), and decides it afresh: our
+   * alliances are one fewer (hasTooManyAlliances passes where the
+   * extension failed at A_max) and we are not counted as its bordering
+   * friend (the extension trap refuses a request only when every other
+   * non-bot neighbour of the nation is its friend) [PIN NationAlliance
+   * "the extension counts us as its bordering friend"]. Sent while our
+   * alliances and pending requests are below A_max (a request at A_max is
+   * refused) and the forecast is at least webKeepRenewMinP; one attempt
+   * per lapse (the web's own requests retry after the 300-tick cooldown).
+   */
+  private renewStrong(v: View, s: ApexState, mem: DiplomacyMemory): void {
+    const { o, me, nm, game, tick: t } = v;
+    const rec = mem.strongRenew!;
+    let limit: number | null = null;
+    let held = 0;
+    for (const [id, e] of Object.entries(rec)) {
+      const N = game.hasPlayer(id) ? game.player(id) : null;
+      if (N === null || !N.isAlive()) {
+        delete rec[id];
+        continue;
+      }
+      const allied = me.isAlliedWith(N);
+      if (t < e) {
+        // Gone before its expiry: broken (a betrayal), not a lapse.
+        if (!allied) delete rec[id];
+        continue;
+      }
+      if (allied) {
+        // Not expired yet as we see it (or extended: planStrong updates).
+        if (t > e + RENEW_WAIT) delete rec[id];
+        continue;
+      }
+      delete rec[id];
+      // B2's renew (o.webRenew) or the recall asked it this tick.
+      if (s.web.requested[id] === t) continue;
+      if (v.scheduler.vetoed(`ally:${id}`)) {
+        v.log?.(`${t} dip keep-renew ${N.name()}: foe of the search`);
+        continue;
+      }
+      if (!me.canSendAllianceRequest(N)) {
+        v.log?.(`${t} dip keep-renew ${N.name()}: cannot request`);
+        continue;
+      }
+      if (limit === null) {
+        limit = allySlots(game, me, o.allySlotsReserve).max;
+        held =
+          me.alliances().length +
+          me.outgoingAllianceRequests().length +
+          sentThisTick(v, s);
+      }
+      if (held >= limit) {
+        v.log?.(
+          `${t} dip keep-renew ${N.name()}: no room (alliances ${held}/${limit})`,
+        );
+        continue;
+      }
+      const d = nm.nextDecision(id, t + 1);
+      const stoppedBy = this.stoppedBy(v, s, N);
+      const f = nm.acceptsAlliance(id, {
+        kind: "request",
+        createdAt: t,
+        atTick: d,
+        embargoStoppedBy: stoppedBy,
+      });
+      if (f.p < o.webKeepRenewMinP) {
+        v.log?.(
+          `${t} dip keep-renew ${N.name()}: p=${f.p.toFixed(2)} ${f.branch} (not sent)`,
+        );
+        continue;
+      }
+      if (stoppedBy === t && !offerEmbargoStop(v, s, N, Prio.Recall)) continue;
+      const ok = v.scheduler.offer({
+        intent: { type: "allianceRequest", recipient: id },
+        prio: Prio.Recall,
+        cls: "defense",
+        key: `ally:${id}`,
+      });
+      if (!ok) continue;
+      held++;
+      s.web.requested[id] = t;
+      mem.stats.keepRenews = (mem.stats.keepRenews ?? 0) + 1;
+      v.log?.(
+        `${t} dip keep-renew ${N.name()} p=${f.p.toFixed(2)} ${f.branch} d=${d} ` +
+          `(alliances ${held}/${limit})`,
+      );
+    }
   }
 
   /**
@@ -772,12 +1032,20 @@ export class DiplomacyController implements Controller {
     }
     const slots = allySlots(v.game, v.me, v.o.allySlotsReserve);
     const mid = midActive(v) ? mem.mid : undefined;
+    // Package WP7a: the strong bordering allies, asked at the same lead.
+    const strong = v.o.webKeepStrong
+      ? this.planStrong(
+          v,
+          mem,
+          mid !== undefined ? v.o.webExtendLead : v.o.extendLead,
+        )
+      : null;
     if (mid !== undefined) {
       if (v.o.web) {
         this.requests(v, s, mem, mid.keep, this.midRoom(v, s, mid, slots));
       }
       if (v.o.extensions) {
-        this.extensions(v, s, mem, slots, mid.keep, v.o.webExtendLead);
+        this.extensions(v, s, mem, slots, mid.keep, v.o.webExtendLead, strong);
       }
       if (v.o.webRenew) this.noteRenew(v, mem, mid);
       return;
@@ -788,8 +1056,60 @@ export class DiplomacyController implements Controller {
       this.requests(v, s, mem, s.web.allySet, slots.webTarget - held);
     }
     if (v.o.extensions) {
-      this.extensions(v, s, mem, slots, s.web.allySet, v.o.extendLead);
+      this.extensions(v, s, mem, slots, s.web.allySet, v.o.extendLead, strong);
     }
+  }
+
+  /**
+   * Package WP7a (o.webKeepStrong, every decision): our allies that border
+   * us (land contact at this decision's scan, WorldModel.nations) and are
+   * strong, by troops (troops(Z) ≥ webKeepHomeRatio × our home troops: a
+   * nation can land-attack us once unallied while our home is below its
+   * troops over 1.1, AiAttackBehavior's send cap, plan §1.4) or by cap
+   * (Config.maxTroops(Z) ≥ webKeepCapRatio × ours: it soon holds them).
+   * Soonest expiry first, with their ask ticks (keepAskTicks, `lead` the
+   * web's extension lead). Records each one's expiry for the renew
+   * (o.webKeepRenew) and forgets allies no longer strong or bordering;
+   * returns them by id.
+   */
+  private planStrong(
+    v: View,
+    mem: DiplomacyMemory,
+    lead: number,
+  ): Map<PlayerID, StrongAlly> {
+    const { o, me, game } = v;
+    const cfg = game.config();
+    const ourCap = Math.max(1, cfg.maxTroops(me));
+    const home = Math.max(1, me.troops());
+    const border = new Set<number>();
+    for (const n of v.wm.nations) border.add(n.smallID);
+    const found: { row: StrongAlly; sid: number }[] = [];
+    const renew = o.webKeepRenew ? (mem.strongRenew ??= {}) : null;
+    for (const a of me.alliances()) {
+      const N = a.other(me);
+      if (N.type() !== PlayerType.Nation) continue;
+      const id = N.id();
+      const troops = N.troops() / home;
+      const cap = border.has(N.smallID()) ? cfg.maxTroops(N) / ourCap : 0;
+      if (
+        cap === 0 ||
+        (cap < o.webKeepCapRatio && troops < o.webKeepHomeRatio)
+      ) {
+        if (renew !== null) delete renew[id];
+        continue;
+      }
+      const e = a.expiresAt();
+      if (renew !== null) renew[id] = e;
+      found.push({
+        row: { id, e, askAt: e - lead, before: null, cap, home: troops },
+        sid: N.smallID(),
+      });
+    }
+    found.sort((a, b) => a.row.e - b.row.e || a.sid - b.sid);
+    const rows = found.map((x) => x.row);
+    keepAskTicks(rows, lead, o.webKeepGap, cfg.allianceDuration());
+    mem.strong = rows;
+    return new Map(rows.map((r) => [r.id, r]));
   }
 
   /** o.webRenew: records the expiry of every kept alliance (entries of
@@ -1477,6 +1797,14 @@ export class DiplomacyController implements Controller {
    * webExtendStable ticks running (`keptSince`): v2 (1,800 ticks ahead,
    * no such test) won 127 of its 529 extensions (arena quick@20) for
    * allies the keep set had dropped within 600 ticks.
+   *
+   * Package WP7a (`strong`, o.webKeepStrong): a strong bordering ally
+   * (planStrong) is asked from its ask tick on, in `keep` or not, with no
+   * stability wait: at the lead, or sooner when the next strong expiry is
+   * within webKeepGap (keepAskTicks). The ask can go any time in the term
+   * (AllianceExtensionExecution has no timing check), and an earlier yes
+   * restarts the term earlier [PIN NationAlliance "allianceExtension works
+   * any time"].
    */
   private extensions(
     v: View,
@@ -1485,6 +1813,7 @@ export class DiplomacyController implements Controller {
     slots: AllySlots,
     keep: readonly PlayerID[],
     lead: number,
+    strong: ReadonlyMap<PlayerID, StrongAlly> | null = null,
   ): void {
     const { o, me, tick: t } = v;
     const since = midActive(v) ? (mem.keptSince ?? {}) : null;
@@ -1492,7 +1821,12 @@ export class DiplomacyController implements Controller {
       const N = a.other(me);
       const id = N.id();
       if (N.type() !== PlayerType.Nation) continue;
-      if (!keep.includes(id)) {
+      // Package WP7a: a strong bordering ally is asked at its ask tick
+      // (the lead, or sooner for webKeepGap), kept or not, without the
+      // midgame web's stability wait.
+      const st = strong?.get(id);
+      const kept = keep.includes(id);
+      if (!kept && st === undefined) {
         if (
           o.webDiag &&
           a.expiresAt() - t <= Math.min(lead, o.extendLead) &&
@@ -1513,11 +1847,17 @@ export class DiplomacyController implements Controller {
         }
         continue;
       }
-      if (a.expiresAt() - t > lead) continue;
+      if (st !== undefined ? t < st.askAt : a.expiresAt() - t > lead) continue;
       if (a.agreedToExtend(me) || s.web.extensionAsked[id] === a.expiresAt()) {
         continue;
       }
-      if (since !== null && t - (since[id] ?? t) < o.webExtendStable) continue;
+      if (
+        st === undefined &&
+        since !== null &&
+        t - (since[id] ?? t) < o.webExtendStable
+      ) {
+        continue;
+      }
       const ok = v.scheduler.offer({
         intent: { type: "allianceExtension", recipient: id },
         prio: Prio.Diplomacy,
@@ -1540,6 +1880,19 @@ export class DiplomacyController implements Controller {
           embargoStoppedBy: null,
         });
         why = ` p=${f.p.toFixed(2)} ${f.branch}`;
+      }
+      if (st !== undefined) {
+        // Package WP7a: the ratios that make it strong (a kept ally too),
+        // and whether the strong rule alone asked it, or asked it early.
+        const early = a.expiresAt() - lead - st.askAt;
+        if (!kept) mem.stats.keepAsks = (mem.stats.keepAsks ?? 0) + 1;
+        if (st.before !== null) {
+          mem.stats.keepEarly = (mem.stats.keepEarly ?? 0) + 1;
+        }
+        why +=
+          ` strong cap=${st.cap.toFixed(2)}x home=${st.home.toFixed(2)}H` +
+          `${kept ? "" : " (outside the web)"}` +
+          `${st.before !== null ? ` early ${early} for ${v.game.player(st.before).name()}` : ""}`;
       }
       v.log?.(
         `${t} dip extend ${N.name()} expires=${a.expiresAt()} ` +

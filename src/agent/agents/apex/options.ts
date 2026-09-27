@@ -614,6 +614,53 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  NationModel entries lazily, so it is off for A/B runs). */
   webDiag: boolean;
 
+  // ── Package WP7a WEB KEEP: keep the strong bordering allies
+  //    (DiplomacyController planStrong, extensions, renewStrong;
+  //    docs/14-m4-plan.md §2.7 item 7a). A base rule: the search's
+  //    rollouts copy it. Off by default. ──────────────────────────────────
+  /** Ask the extension of every bordering ally (land contact) that is
+   *  strong, in allySet (or the midgame keep set) or not: troops(Z) at
+   *  least webKeepHomeRatio times our home troops, or maxTroops(Z) at
+   *  least webKeepCapRatio times ours. Asked at the web's lead (extendLead;
+   *  webExtendLead with webMidgame), sooner for webKeepGap. Arena quick@20,
+   *  UE's 32 games: former allies sent 214M of the 435M nation troops sent
+   *  at apex (51M after a lapse never asked, 162M after a refused
+   *  extension); 11 strong allies lapsed unasked and then attacked. */
+  webKeepStrong: boolean;
+  /** Strong by cap: maxTroops(Z) at least this multiple of ours. */
+  webKeepCapRatio: number;
+  /** Strong by troops: troops(Z) at least this multiple of our home. */
+  webKeepHomeRatio: number;
+  /** No two strong allies' alliances expire within this many ticks: the
+   *  earlier one is asked sooner, gap before the later one's ask (a passed
+   *  extension restarts the term at the nation's yes), but never more than
+   *  allianceDuration() − gap before its expiry. 0: asks at the lead
+   *  only. */
+  webKeepGap: number;
+  /** A strong bordering ally whose alliance lapsed gets a fresh request
+   *  the first tick we see it gone: decided with our alliances one fewer
+   *  and without the extension trap (we are not its friend any more), and
+   *  answered before the nation's attacks at its next decision. Sent below
+   *  A_max alliances with a forecast of at least webKeepRenewMinP. Needs
+   *  webKeepStrong. */
+  webKeepRenew: boolean;
+  /** Smallest forecast for the webKeepRenew request. */
+  webKeepRenewMinP: number;
+  /** Gold for the friendship of a strong bordering ally whose asked
+   *  extension would still be refused (forecast below webKeepGiftMinP; the
+   *  strength tests or the extension trap, not treachery): webKeepGiftLead
+   *  ticks before its expiry, gold that keeps it Friendly until 60 ticks
+   *  past the expiry (B2's webFriendGold without the midgame web; Friendly
+   *  is accepted 67% of the time at each decision, before those tests). One
+   *  gift a term, while its relation is Neutral. Needs webKeepStrong. */
+  webKeepGift: boolean;
+  /** Ticks before the expiry from which the webKeepGift is given. */
+  webKeepGiftLead: number;
+  /** Most of our gold one webKeepGift may take. */
+  webKeepGiftShare: number;
+  /** Give only while the extension forecast is below this. */
+  webKeepGiftMinP: number;
+
   // ── Defense (§3.3) ───────────────────────────────────────────────────
   /** Recall an incoming nation attack by alliance (§3.3.2). E8. */
   recall: boolean;
@@ -942,6 +989,45 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  DefenseController's recall runs first). Review of A1: quick@20 g17
    *  6730, 724k sent at Hellsö next to a recall, 0 tiles. */
   strikeLiveCheck: boolean;
+
+  // ── Package WP7b R1 FLOOR: the replica strike floor (docs/14-m4-plan.md
+  //    §2.7 item 7b; StrikeController.deterrenceFloor and replicaLine,
+  //    ported from the flow-wt5 prototype, flow.md §5-6). A base rule: the
+  //    search's rollouts copy it ────────────────────────────────────────
+  /** strikeDeterrence's line for each unallied bordering nation whose land
+   *  line is above strikeFlowFloor·cap, and whose last full NationModel
+   *  refresh saw it on our border, is the lowest home in
+   *  [strikeFlowFloor·cap, its land line] at which NationModel's replica
+   *  says it cannot land-attack us at its next decision or its strategy
+   *  list picks another player first (canLandAttackUs, wouldTargetUs;
+   *  bisection in 8 steps). So the floor is never above A1's. Off. The
+   *  prototype (flow R1: this with strikeFloorReplicaUnseen and
+   *  strikeFlowFloorMin), quick@20 32 pairs against UE: 63 launches against
+   *  45 at 40 troops a tile against 44, land at minute 15 +1.8 points
+   *  [−0.2, +4.0], 4 eliminated against 4. */
+  strikeFloorReplica: boolean;
+  /** With strikeFloorReplica: the replica's lowest home, as a share of our
+   *  cap (regrowth there is 98% of its peak). */
+  strikeFlowFloor: number;
+  /** With strikeFloorReplica, read through the replica the nations its
+   *  last full refresh did not see on our border too, as the prototype did:
+   *  the target's neighbours (strikeDetNearTarget), and bordering nations
+   *  whose border with us is newer than that refresh (up to a decision
+   *  interval old). The replica's canLandAttackUs needs that border, so
+   *  their lines drop to strikeFlowFloor·cap and A1's near-target floor is
+   *  gone. Prototype, quick@20 Bering Strait g3: the strike on Russia at
+   *  5330 went with Alaska, Russia's neighbour, at 1577k instead of its land
+   *  line 2485k; at 5374 Alaska bordered us but its refresh did not know;
+   *  it land-attacked 1.87M at 5401. Off: those keep their land lines. */
+  strikeFloorReplicaUnseen: boolean;
+  /** With strikeFloorReplica, the floor itself is at least
+   *  strikeFlowFloor·cap, as the prototype's was: it binds only where every
+   *  line is lower (the purse keeps homeX·cap anyway), and there it only
+   *  shrinks or stops strikes. In the prototype it stopped or cut the
+   *  first strike of three of its four named losses (quick@20 Mississippi
+   *  River g10 at 4538, Europe g22 at 3596, North America g31 at 4254).
+   *  Off: only the replica lines are bounded by it. */
+  strikeFlowFloorMin: boolean;
 
   // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
   //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
@@ -1372,6 +1458,18 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   webFriendHome: 0.8,
   webDiag: false,
 
+  // Package WP7a WEB KEEP.
+  webKeepStrong: false,
+  webKeepCapRatio: 1.1,
+  webKeepHomeRatio: 1,
+  webKeepGap: 600,
+  webKeepRenew: true,
+  webKeepRenewMinP: 0.25,
+  webKeepGift: false,
+  webKeepGiftLead: 120,
+  webKeepGiftShare: 0.5,
+  webKeepGiftMinP: 0.5,
+
   recall: true,
   recallMinP: 0.8,
   embargoStop: true,
@@ -1455,6 +1553,12 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeSaveOpenOnly: false,
   strikeReachModel: false,
   strikeLiveCheck: true,
+
+  // Package WP7b R1 FLOOR.
+  strikeFloorReplica: false,
+  strikeFlowFloor: 0.35,
+  strikeFloorReplicaUnseen: false,
+  strikeFlowFloorMin: false,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
