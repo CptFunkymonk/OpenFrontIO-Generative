@@ -298,9 +298,7 @@ describe("apex window strikes (§5.2, package A1)", () => {
     });
     // At the default value rule it is not worth it.
     const dear = run(sc, stalled());
-    expect(
-      untilLaunch(sc, dear, front4(STRIKES), 0.8, sc.rate + 2),
-    ).toBeNull();
+    expect(untilLaunch(sc, dear, front4(STRIKES), 0.8, sc.rate + 2)).toBeNull();
     expect(strikeMemory(dear.s).stats.skips.value).toBeGreaterThan(0);
     const launch = untilLaunch(sc, r, front4(ANY_VALUE), 0.8, 3 * sc.rate);
     expect(launch).not.toBeNull();

@@ -62,7 +62,10 @@ const CHECK_EVERY = 100;
 // Where §10.6 measured the fork: World at tick 3,000.
 const WORLD_FORK_TICK = 3000;
 const WORLD_LOCKSTEP_TICKS = 100;
-const TIMEOUT = 60_000;
+// Generous: each test plays a real game tick by tick (World to tick 3,000
+// in the last), on a machine the suite may share with arena runs (17-84 s
+// a test at load 17 on 4 cores).
+const TIMEOUT = 300_000;
 
 function hash(game: Game): number {
   return (game as unknown as { hash(): number }).hash();

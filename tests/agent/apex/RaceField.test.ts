@@ -604,7 +604,7 @@ describe("spawn candidates", () => {
   );
 
   test(
-    "GiantWorldMap: grid, static arrival and candidates in under 1 s",
+    "GiantWorldMap: grid, static arrival and candidates in under 5 s (under 1 s on an idle machine)",
     async () => {
       const { game, me } = await spawnGame(GameMapType.GiantWorldMap);
       const o = APEX_DEFAULTS;
@@ -630,7 +630,10 @@ describe("spawn candidates", () => {
       console.log(
         `GiantWorldMap spawn search: ${best.toFixed(0)} ms: ${parts}`,
       );
-      expect(best).toBeLessThan(1000);
+      // Wall time, on a machine the suite may share with arena runs (3.1 s
+      // at load 17 on 4 cores): the bound only catches a regression by
+      // several times. The time is logged above.
+      expect(best).toBeLessThan(5000);
     },
     TIMEOUT,
   );

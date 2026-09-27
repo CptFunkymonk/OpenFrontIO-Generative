@@ -1149,7 +1149,9 @@ describe("NationModel: acceptsAlliance", () => {
       expect(Math.abs(rate - p)).toBeLessThan(0.17);
     }
     if (process.env.NM_DEBUG) process.stderr.write(rows.join("\n") + "\n");
-  });
+    // Generous: 300 worlds, 9 s at load 17 on 4 cores (the suite may share
+    // the machine with arena runs).
+  }, 120_000);
 });
 
 // ── Forked accuracy (spec §4 step 3, reduced) ───────────────────────────
@@ -1498,5 +1500,8 @@ describe("NationModel: forked accuracy of canLandAttackUs", () => {
     expect(horizon.safe).toBeGreaterThanOrEqual(0.98);
     expect(nowcast.accuracy).toBeGreaterThanOrEqual(0.9);
     expect(nowcast.safe).toBeGreaterThanOrEqual(0.98);
-  }, 120_000);
+    // Generous: two real games played 1,800 turns, each forked at 12
+    // moments, took over 120 s at load 17 on 4 cores (the suite may share
+    // the machine with arena runs); the wall time is in the NM_DEBUG report.
+  }, 600_000);
 });

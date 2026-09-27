@@ -651,5 +651,7 @@ describe("a whole tune", () => {
         quiet,
       ),
     ).rejects.toThrow(/round-1 holds another arena run than this round's/);
-  });
+    // Generous: six tune runs, 3.2 s at load 17 on 4 cores against vitest's
+    // 5 s default (the suite may share the machine with arena runs).
+  }, 60_000);
 });

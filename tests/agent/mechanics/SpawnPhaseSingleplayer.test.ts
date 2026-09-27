@@ -111,7 +111,9 @@ const MAPS = path.join(__dirname, "../../../resources/maps");
 const MAP = GameMapType.World;
 const BOTS = 400;
 const ME = seatClientID(0);
-const TIMEOUT = 20_000;
+// Generous: real World games, up to 11 s a test at load 17 on 4 cores (the
+// suite may share the machine with arena runs).
+const TIMEOUT = 120_000;
 
 interface Sim {
   runner: GameRunner;

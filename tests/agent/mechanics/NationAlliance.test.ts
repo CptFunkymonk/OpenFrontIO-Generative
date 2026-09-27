@@ -878,6 +878,9 @@ describe("NationAlliance: which requests an Impossible nation accepts", () => {
 
 describe("NationAlliance: the random gates, over 100 seeds", () => {
   const SEEDS = 100;
+  // The tests below have generous timeouts: 100-200 worlds each took
+  // about 4 s at load 17 on 4 cores, against vitest's 5 s default (the
+  // suite may share the machine with arena runs).
 
   test("traitors are refused ~90% (nextInt(0, 100) >= 10); the rest fall through to the threat test", () => {
     let traitorAccepted = 0;
@@ -907,7 +910,7 @@ describe("NationAlliance: the random gates, over 100 seeds", () => {
     expect(controlAccepted).toBe(SEEDS);
     expect(traitorAccepted).toBeGreaterThanOrEqual(3);
     expect(traitorAccepted).toBeLessThanOrEqual(20);
-  });
+  }, 120_000);
 
   test("a Friendly relation (>= 50) gets a weak requester in ~67% of the time (nextInt(0, 100) >= 33)", () => {
     // isAlliancePartnerFriendly (NationAllianceBehavior.ts:339-358, :162-168).
@@ -926,7 +929,7 @@ describe("NationAlliance: the random gates, over 100 seeds", () => {
     // 71 of 100 here.
     expect(accepted).toBeGreaterThanOrEqual(52);
     expect(accepted).toBeLessThanOrEqual(80);
-  });
+  }, 120_000);
 
   test("early game: before tick 600 + numSpawnPhaseTurns() = 700 ~30% of plain requests pass; after, none", () => {
     // A weak requester (0.4x troops, 0.75x tiles), neutral: not a threat,
@@ -954,7 +957,7 @@ describe("NationAlliance: the random gates, over 100 seeds", () => {
     expect(late).toBe(0);
     expect(early).toBeGreaterThanOrEqual(18);
     expect(early).toBeLessThanOrEqual(42);
-  });
+  }, 120_000);
 });
 
 describe("NationAlliance: duration", () => {

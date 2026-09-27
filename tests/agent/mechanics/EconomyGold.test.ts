@@ -1084,5 +1084,7 @@ describe("H7 economy: the arena game", () => {
     expect(g.lootedAlive).toBe(1);
     // No trade or train gold at all in the first 130 s.
     expect(g.nationTradeGold).toBe(0n);
-  }, 60_000);
+    // Generous: 36 s at load 17 on 4 cores (the suite may share the machine
+    // with arena runs).
+  }, 300_000);
 });
