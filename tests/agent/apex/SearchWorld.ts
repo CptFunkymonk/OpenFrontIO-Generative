@@ -46,11 +46,26 @@ export const W = 200;
 export const H = 100;
 const LAND = 0x80 | 5;
 
+export type Rect = readonly [number, number, number, number];
+
 export interface NationSpec {
   id: string;
   /** [x0, y0, x1, y1): its tiles. */
-  rect: readonly [number, number, number, number];
+  rect: Rect;
+  /** More rectangles of its tiles. */
+  also?: readonly Rect[];
   troops: number;
+}
+
+export interface WorldSpec {
+  allianceMinutes?: number;
+  nations?: readonly NationSpec[];
+  /** The terrain byte of tile (x, y) (default: every tile plains land;
+   *  GameMapImpl's bits: 0x80 land, 0x40 shoreline, 0x20 ocean, low bits
+   *  the magnitude). */
+  terrain?: (x: number, y: number) => number;
+  /** Our tiles (default x < 100). */
+  ours?: Rect;
 }
 
 /** A (5,000 tiles, bordering us) and B (beyond A), as the directive tests'
@@ -87,13 +102,30 @@ export interface World {
 
 export function world(
   options: Record<string, unknown> = {},
-  o2: { allianceMinutes?: number; nations?: readonly NationSpec[] } = {},
+  o2: WorldSpec = {},
 ): World {
   const specs = o2.nations ?? NATIONS;
-  const t = new Uint8Array(W * H).fill(LAND);
-  const m = new Uint8Array((W / 2) * (H / 2)).fill(LAND);
-  const map = new GameMapImpl(W, H, t, W * H);
-  const mini = new GameMapImpl(W / 2, H / 2, m, (W * H) / 4);
+  const terrain = o2.terrain ?? (() => LAND);
+  const t = new Uint8Array(W * H);
+  let land = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const b = terrain(x, y);
+      t[y * W + x] = b;
+      if (b & 0x80) land++;
+    }
+  }
+  const m = new Uint8Array((W / 2) * (H / 2));
+  let miniLand = 0;
+  for (let y = 0; y < H / 2; y++) {
+    for (let x = 0; x < W / 2; x++) {
+      const b = terrain(2 * x, 2 * y);
+      m[y * (W / 2) + x] = b;
+      if (b & 0x80) miniLand++;
+    }
+  }
+  const map = new GameMapImpl(W, H, t, land);
+  const mini = new GameMapImpl(W / 2, H / 2, m, miniLand);
   const config = new Config(
     o2.allianceMinutes === undefined
       ? GAME_CONFIG
@@ -117,15 +149,17 @@ export function world(
   );
   game.endSpawnPhase();
   const us = game.player(AGENT_ID);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < 100; x++) us.conquer(game.ref(x, y));
-  }
-  for (const n of specs) {
-    const p = game.player(n.id);
-    const [x0, y0, x1, y1] = n.rect;
+  const fill = (p: Player, r: Rect) => {
+    const [x0, y0, x1, y1] = r;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) p.conquer(game.ref(x, y));
     }
+  };
+  fill(us, o2.ours ?? [0, 0, 100, H]);
+  for (const n of specs) {
+    const p = game.player(n.id);
+    fill(p, n.rect);
+    for (const r of n.also ?? []) fill(p, r);
     p.setTroops(n.troops);
   }
   us.setTroops(400_000);

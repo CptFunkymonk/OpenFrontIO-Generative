@@ -30,7 +30,8 @@ import { ApexState, NEVER } from "./state";
 //   largest held betrayal line of our bordering allies, so tribe, boat,
 //   free-land and strike sends (and the search's directive sends, sized
 //   from the same purse) keep home at it. Snacks and defense keep vw (the
-//   DefenseController's o.counter, off by default, keeps H). The lines
+//   DefenseController's o.counter, off by default, keeps H: a counter of
+//   ours spends nothing below a line either, review F6). The lines
 //   are for the allies' decisions until the next recompute (thinkEvery
 //   ticks on), and a break, MIRV or bomb of the search's directive due by
 //   then that ends an alliance counts us a traitor already (review F1: the

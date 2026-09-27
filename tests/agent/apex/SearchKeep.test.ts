@@ -170,7 +170,10 @@ function view(nats: Nat[], env: Env = {}): SearchView {
 /** The expected gift for relation r, sent at `at`, held to `until`. */
 function price(r: number, at: number, until: number): bigint {
   const points = friendPoints(r, at + 1, until)!;
-  return BigInt(points / 5) * goldChunk(CONFIG as never, at + GIFT_PAY_WITHIN);
+  return (
+    BigInt(points / 5) *
+    goldChunk({ config: () => CONFIG } as never, at + GIFT_PAY_WITHIN)
+  );
 }
 
 describe("keep candidates", () => {
@@ -191,13 +194,13 @@ describe("keep candidates", () => {
           M: 3_600_000,
           expiresAt: T + 600,
         },
-        // Strong by cap, expiring within the lead: kept.
+        // Strong by cap (1.13 × ours), expiring within the lead: kept.
         {
           id: "V",
           smallID: 4,
           contact: 40,
           troops: 10,
-          M: 3_300_000,
+          M: 3_400_000,
           expiresAt: T + 350,
         },
         // Unallied, and thinly bordering allies: nothing.
@@ -377,6 +380,10 @@ describe("keep:A played live", () => {
   ): void {
     w.probe.onTick = (ctx, host) => {
       if (ctx.tick !== at) return;
+      // The counter-accept put A in the web's keep list (the web itself is
+      // off here, so nobody asks its extension): keep:A is for allies
+      // outside it.
+      w.s.web.allySet.length = 0;
       const sv = liveView(w, { searchKeep: true, searchKeepMinShare: 0, ...o });
       const [c] = KEEP.generate(sv, NO_BASE);
       expect(c.name).toBe(`keep:${A}`);
@@ -438,6 +445,12 @@ describe("keep:A played live", () => {
     let gold = 0n;
     w.probe.onTick = (ctx, host) => {
       if (ctx.tick !== at) return;
+      // The alliance made A Friendly (a gift is for a Neutral ally): set
+      // its relation to exactly 0, the estimate the gift is priced at.
+      const N0 = w.nation(A);
+      N0.updateRelation(w.us, -200);
+      N0.updateRelation(w.us, 100);
+      expect(N0.relation(w.us)).toBe(Relation.Neutral);
       const sv = liveView(w);
       const g = keepGift(
         sv,

@@ -12,6 +12,7 @@
  * so that NationModel.troopsAt (their regrowth to the next decision) is
  * their troops now.
  */
+import type { AgentIntent } from "../../../src/agent/Agent";
 import {
   alliancesEndedBy,
   BETRAY_SAFE_SHARE,
@@ -30,7 +31,6 @@ import {
   noteGold,
   safeTotal,
 } from "../../../src/agent/lib/LeaderGuard";
-import type { AgentIntent } from "../../../src/agent/Agent";
 import { createModels } from "../../../src/agent/lib/Models";
 import { NationModel } from "../../../src/agent/lib/NationModel";
 import { Player, PlayerType, UnitType } from "../../../src/core/game/Game";
@@ -433,7 +433,8 @@ describe(
       const pastDecision = () => {
         const d = nm.nextDecision(id, w.game.ticks() + 1);
         tick(w, d - w.game.ticks() + 1);
-        const prev = nm.nextDecision(id, w.game.ticks() + 1) - nm.params(id).rate;
+        const prev =
+          nm.nextDecision(id, w.game.ticks() + 1) - nm.params(id).rate;
         expect(nm.nearbyAt(id)).toBeLessThan(prev);
       };
       // We leave B's border: a strip of free land between us.
@@ -458,7 +459,7 @@ describe(
       expect(lines().map((l) => [l.id, l.fresh])).toEqual([[id, false]]);
     });
 
-    test("F3: with a stale list, a \"locked\" gate (read from the same refresh) skips the ally only while it borders free land now", () => {
+    test('F3: with a stale list, a "locked" gate (read from the same refresh) skips the ally only while it borders free land now', () => {
       const f = setup("lg-lock", 20_000, 30_000, true);
       const { B, US } = f.w.p;
       const id = B.id();
@@ -569,14 +570,20 @@ describe("LeaderGuard: betrayalFloor and levelsFor", () => {
   test("review F4: a line above maxShare x cap that home holds now stays the floor and still asks for cap; one home is under drops out", () => {
     const lines = [line("a", 3_500_000, 3_500_000, "alone")];
     // cap 4M: max 3.2M; 3.5M / 0.8 - 4M = 375k of cap asked either way.
-    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_600_000)).toEqual({
+    expect(
+      betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_600_000),
+    ).toEqual({
       floor: 3_500_000,
       by: "a",
       capShort: 375_000,
       shortBy: "a",
     });
-    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_500_000).floor).toBe(3_500_000);
-    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_499_999)).toEqual({
+    expect(
+      betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_500_000).floor,
+    ).toBe(3_500_000);
+    expect(
+      betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_499_999),
+    ).toEqual({
       floor: 0,
       by: null,
       capShort: 375_000,

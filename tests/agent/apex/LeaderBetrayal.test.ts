@@ -420,8 +420,7 @@ function playBreak(options: Record<string, unknown>, lead: number, off = 0) {
       tick - s.timers.lastThink === (off === 0 ? think : off)
     ) {
       const off =
-        (((n.attackTick - tick) % n.attackRate) + n.attackRate) %
-        n.attackRate;
+        (((n.attackTick - tick) % n.attackRate) + n.attackRate) % n.attackRate;
       if (off === lead) {
         t0 = tick;
         break;

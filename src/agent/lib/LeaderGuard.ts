@@ -265,7 +265,8 @@ export function betrayalLines(
   const allies = me
     .allies()
     .filter(
-      (Z) => Z.type() === PlayerType.Nation && Z.isAlive() && !leaving.has(Z.id()),
+      (Z) =>
+        Z.type() === PlayerType.Nation && Z.isAlive() && !leaving.has(Z.id()),
     )
     .sort((a, b) => a.smallID() - b.smallID());
   for (const Z of allies) {
