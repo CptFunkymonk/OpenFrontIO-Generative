@@ -1474,6 +1474,30 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  F2). */
   searchNukeWindow: number;
 
+  // Package SLICE, the time-sliced search (controllers/SearchController.ts,
+  // lib/search/Slicer.ts, lib/search/Rounds.ts roundsSteps; docs/14-m4-plan.md
+  // §2.6 "Browser"): a search spreads its rollouts over the live ticks after
+  // its trigger and acts when its rounds finish. The slice decides only WHEN
+  // the work happens: the rollouts are forks of the trigger's tick, judged
+  // and priced (live-tick equivalents, the degrade order) as an unsliced
+  // search. Off by default: the arena's clock is game time and its runs
+  // replay; the browser autopilot (docs/10-agent-interface.md §10.5) sets
+  // searchSliceMs so its worker's tick stays short.
+  /** > 0: at most this many ms of wall time (performance.now, in the
+   *  agent's thread) of search work per live tick; the search acts at the
+   *  tick its rounds finish (the log's k=). 0: a search runs whole in its
+   *  tick, blocking it for seconds to minutes. */
+  searchSliceMs: number;
+  /** A sliced search still running this many ticks after its trigger is
+   *  given up (logged `skipped=slice`; what it spent is charged). */
+  searchSliceMaxTicks: number;
+  /** A plan chosen k > 0 ticks after its search is re-based to the tick it
+   *  is adopted (its steps' ticks and foe marks shift by k) unless its
+   *  target died, changed alliance state with us or began attacking us
+   *  since, or its first step's `when` no longer holds (dropped, logged
+   *  `dropped=`). Off: such a plan is dropped (`dropped=stale`). */
+  searchSliceRebase: boolean;
+
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
   // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
   // buys City levels. Pinned by tests/agent/mechanics/NukeStructures: an
@@ -1945,6 +1969,11 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchNukeSiloReady: 110,
   searchNukeStrikeGap: 20,
   searchNukeWindow: 600,
+
+  // Package SLICE, the time-sliced search (off: the arena replays).
+  searchSliceMs: 0,
+  searchSliceMaxTicks: 300,
+  searchSliceRebase: true,
 
   // Package WP8 GOLD.
   goldPolicy: "exposure",

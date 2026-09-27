@@ -185,41 +185,47 @@ export class Runner implements Roll {
    * Steps to horizon `to` (or the death), snapping at every checkpoint of
    * the grid and at the death, and returns the snap at the runner's tick
    * (made there if no checkpoint fell there, unless `snapEnd` is off: then
-   * the last snap).
+   * the last snap). Package SLICE: stepTick is one iteration of this loop,
+   * so a sliced search (Rounds' generator) steps a rollout tick by tick
+   * between live ticks and gets the very same snaps.
    */
   advance(to: number, snapEnd = true): Snap {
-    const want = this.grid;
-    const me = this.me;
-    while (this.h < to && !this.dead) {
-      const g = this.f.game;
-      if (this.send !== null && this.sent === null && this.h === this.send.h) {
-        this.sent = this.sendState();
-      }
-      const s0 = performance.now();
-      stepRollout(this.f, me, this.gameID, this.policy, this.budget);
-      this.simMs += performance.now() - s0;
-      this.h++;
-      for (const a of me.incomingAttacks()) {
-        if (a.attacker().type() === PlayerType.Bot || this.seen.has(a.id())) {
-          continue;
-        }
-        this.seen.add(a.id());
-        this.natAtks++;
-        this.natTroops += a.troops();
-        const id = a.attacker().id();
-        const prev = this.attackers.get(id);
-        if (prev === undefined) {
-          this.attackers.set(id, { h: this.h, troops: a.troops() });
-        } else prev.troops += a.troops();
-      }
-      if (this.allied !== null) this.trackAlliances();
-      if (me.hasSpawned() && !me.isAlive()) this.dead = true;
-      if (want.has(this.h) || this.dead) this.push(g);
-    }
+    while (this.h < to && !this.dead) this.stepTick();
     const last = this.snaps[this.snaps.length - 1];
     if (last !== undefined && (last.h === this.h || !snapEnd)) return last;
     this.push(this.f.game);
     return this.last();
+  }
+
+  /** One tick of the rollout: the send's state if this is its tick, one
+   *  step of the fork, the attacks and alliance ends seen, the death, and a
+   *  snap at a checkpoint of the grid or at the death. */
+  stepTick(): void {
+    const me = this.me;
+    const g = this.f.game;
+    if (this.send !== null && this.sent === null && this.h === this.send.h) {
+      this.sent = this.sendState();
+    }
+    const s0 = performance.now();
+    stepRollout(this.f, me, this.gameID, this.policy, this.budget);
+    this.simMs += performance.now() - s0;
+    this.h++;
+    for (const a of me.incomingAttacks()) {
+      if (a.attacker().type() === PlayerType.Bot || this.seen.has(a.id())) {
+        continue;
+      }
+      this.seen.add(a.id());
+      this.natAtks++;
+      this.natTroops += a.troops();
+      const id = a.attacker().id();
+      const prev = this.attackers.get(id);
+      if (prev === undefined) {
+        this.attackers.set(id, { h: this.h, troops: a.troops() });
+      } else prev.troops += a.troops();
+    }
+    if (this.allied !== null) this.trackAlliances();
+    if (me.hasSpawned() && !me.isAlive()) this.dead = true;
+    if (this.grid.has(this.h) || this.dead) this.push(g);
   }
 
   /** The nations bordering us now with at least `minContact` contact

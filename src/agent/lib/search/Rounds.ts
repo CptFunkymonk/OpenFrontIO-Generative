@@ -56,6 +56,9 @@ export interface Roll {
   readonly land0: number;
   /** Steps to `to` (or the death); a snap at `to` unless snapEnd is off. */
   advance(to: number, snapEnd?: boolean): Snap;
+  /** Package SLICE: one tick of the rollout, advance's loop body (Runner);
+   *  a roll without it is advanced whole. */
+  stepTick?(): void;
   last(): Snap;
   at(h: number): Snap;
   landAt(h: number): number;
@@ -215,6 +218,27 @@ export function breakGate(
 }
 
 /**
+ * Package SLICE: advances `r` to `to` as r.advance(to, snapEnd) does, one
+ * tick at a time when the roll can step (Runner.stepTick), yielding between
+ * ticks: a time-sliced search stops at a yield and goes on at its next live
+ * tick. The steps and the snaps are exactly advance's (advance's loop, then
+ * its end snap on a roll that is already there).
+ */
+export function* advanceSteps(
+  r: Roll,
+  to: number,
+  snapEnd = true,
+): Generator<void, Snap, void> {
+  if (r.stepTick !== undefined) {
+    while (r.h < to && !r.dead) {
+      r.stepTick();
+      yield;
+    }
+  }
+  return r.advance(to, snapEnd);
+}
+
+/**
  * Runs rounds 1-3 and 2b. `base` is the base rollout (advanced to H1 here
  * if it is not yet); `open` makes a candidate's rollout; `defend` makes
  * round 2b's candidates from the base's whole horizon (none: no round 2b).
@@ -226,6 +250,28 @@ export function runRounds(
   open: (c: Candidate) => Roll,
   defend?: (b: BaseView) => Candidate[],
 ): RoundsResult {
+  const g = roundsSteps(p, base, cands, open, defend);
+  for (;;) {
+    const r = g.next();
+    if (r.done) return r.value;
+  }
+}
+
+/**
+ * The rounds as a generator (package SLICE): the same rounds, yielding
+ * between the ticks of every rollout and before every fork, so a
+ * time-sliced search (SearchController, lib/search/Slicer.ts) can spread
+ * them over live ticks; drained in one go (runRounds) it is the rounds
+ * exactly. Nothing here reads the clock: what is searched and judged is
+ * the same however the yields are spaced.
+ */
+export function* roundsSteps(
+  p: RoundsParams,
+  base: Roll,
+  cands: readonly Candidate[],
+  open: (c: Candidate) => Roll,
+  defend?: (b: BaseView) => Candidate[],
+): Generator<void, RoundsResult, void> {
   const fresh = (cand: Candidate, roll: Roll): Judged => ({
     cand,
     roll,
@@ -243,13 +289,15 @@ export function runRounds(
   });
 
   // Round 1.
-  base.advance(p.H1);
+  yield* advanceSteps(base, p.H1);
   const baseT1 = base.last().tiles;
-  const judged = cands.map((c) => {
+  const judged: Judged[] = [];
+  for (const c of cands) {
+    yield;
     const r = open(c);
-    r.advance(p.H1);
-    return fresh(c, r);
-  });
+    yield* advanceSteps(r, p.H1);
+    judged.push(fresh(c, r));
+  }
   const v1 = (j: Judged) => valueAt(j.roll, j.roll.last(), p);
   const alive1 = judged.filter((j) => {
     const sn = j.roll.last();
@@ -302,7 +350,7 @@ export function runRounds(
     j.round = 2;
     j.h = Math.max(p.H, roundUp(j.cand.lastSend + p.H, p.grid));
     if (!j.cand.strongCheck || p.HStrong <= p.H) continue;
-    j.roll.advance(j.cand.lastSend + 1, false);
+    yield* advanceSteps(j.roll, j.cand.lastSend + 1, false);
     const s = j.roll.sent;
     if (
       s === null ||
@@ -329,7 +377,7 @@ export function runRounds(
   // so the order changes nothing), so that the break round buys its looks
   // from what they leave. The base goes through every horizon in ascending
   // order; round 3's break steps are judged as the base reaches them.
-  for (const j of finals) j.roll.advance(j.h!);
+  for (const j of finals) yield* advanceSteps(j.roll, j.h!);
   let step = 0;
   const pending = new Set<number>([p.H]);
   for (const j of finals) pending.add(j.h!);
@@ -342,15 +390,15 @@ export function runRounds(
   while (pending.size > 0) {
     const h = Math.min(...pending);
     pending.delete(h);
-    base.advance(h);
+    yield* advanceSteps(base, h);
     baseAt.set(h, valueAt(base, base.last(), p));
     if (brk === null) continue;
     if (brk.gated) {
-      if (h === brk.h) brk.roll.advance(h);
+      if (h === brk.h) yield* advanceSteps(brk.roll, h);
       continue;
     }
     if (step >= steps.length || steps[step] !== h) continue;
-    brk.roll.advance(h);
+    yield* advanceSteps(brk.roll, h);
     const g = gainOver(brk.roll, base, h, baseAt.get(h)!, p);
     brk.steps.push({ h, gain: g.gain });
     const leads = !g.dipped && g.gain > p.need;
@@ -406,8 +454,9 @@ export function runRounds(
         snaps: base.snaps,
       };
       for (const c of defend(view)) {
+        yield;
         const r = open(c);
-        r.advance(hmax);
+        yield* advanceSteps(r, hmax);
         const j = fresh(c, r);
         j.round = 4;
         j.h = hmax;

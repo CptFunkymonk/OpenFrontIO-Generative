@@ -111,15 +111,15 @@ own bookkeeping arrives as `console.debug`, which Chrome hides until you set
 the console's level dropdown ("Default levels") to include **Verbose**
 (`src/client/AgentAutopilot.ts:152-158` `[code]`). The kinds of lines:
 
-| Line                                                                                                        | Meaning                                                                                                                                                                                                                                                                                                                                                               |
-| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `starting autopilot "apex"`, `ready`                                                                        | Worker loaded, replica of the game built, agent constructed.                                                                                                                                                                                                                                                                                                          |
-| `[t] spawn plan (race): …`, `[t] spawn (race) at x,y`                                                       | The spawn search: candidates scored (snack = tribes to eat, threat = nations nearby), and the tile it chose.                                                                                                                                                                                                                                                          |
-| `[t] status t=… tiles=… home=… cap=… tribes=… nations=… plans={…}`                                          | Periodic self-report: land, troops at home, troop cap, tribes and nations in contact, plans in flight.                                                                                                                                                                                                                                                                |
-| `[t] tn …`, `[t] snack …`, `[t] dip plan …`                                                                 | An expansion order, a tribe being eaten, the diplomacy plan (alliance slots and who it courts).                                                                                                                                                                                                                                                                       |
-| `tick N, behind B, sent S, rate-limited R, last think T ms, errors E`                                       | _(Verbose)_ every 50 ticks, 5 s of game time (`AgentWorker.worker.ts:20`; `[ran]` at ticks 70, 121, 172, 241): `behind` is how many turns the replica still has to catch up (0 is healthy), `sent` intents so far, how many the client-side rate limit held back, the last decision's cost. `[ran]`: `behind 0 … last think 746.8 ms` at tick 4, `0.2 ms` at tick 54. |
-| `game over for the agent: …`                                                                                | Your seat won or died; the agent stops.                                                                                                                                                                                                                                                                                                                               |
-| `stopped: replica diverged from the real game at tick N; the agent stopped (did it mutate the game state?)` | The worker's replica and the real game produced different hashes. The agent is stopped and your seat goes idle. This never happened in the runs here; if you see it, it is a bug worth an issue (`src/agent/browser/AgentWorker.worker.ts:81-95` `[code]`).                                                                                                           |
+| Line                                                                                                        | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `starting autopilot "apex"`, `ready`                                                                        | Worker loaded, replica of the game built, agent constructed.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `[t] spawn plan (race): …`, `[t] spawn (race) at x,y`                                                       | The spawn search: candidates scored (snack = tribes to eat, threat = nations nearby), and the tile it chose.                                                                                                                                                                                                                                                                                                                                                                                 |
+| `[t] status t=… tiles=… home=… cap=… tribes=… nations=… plans={…}`                                          | Periodic self-report: land, troops at home, troop cap, tribes and nations in contact, plans in flight.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `[t] tn …`, `[t] snack …`, `[t] dip plan …`                                                                 | An expansion order, a tribe being eaten, the diplomacy plan (alliance slots and who it courts).                                                                                                                                                                                                                                                                                                                                                                                              |
+| `tick N, behind B, sent S, rate-limited R, last think T ms, errors E`                                       | _(Verbose)_ every 50 ticks, 5 s of game time (`AgentWorker.worker.ts:20`), posted at the end of the batch of turns that crosses the 50-tick mark (`:135`), which is why the ticks are not round (`[ran]` at ticks 70, 121, 172, 241): `behind` is how many turns the replica still has to catch up (0 is healthy), `sent` intents so far, how many the client-side rate limit held back, the last decision's cost. `[ran]`: `behind 0 … last think 746.8 ms` at tick 4, `0.2 ms` at tick 54. |
+| `game over for the agent: …`                                                                                | Your seat won or died; the agent stops.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `stopped: replica diverged from the real game at tick N; the agent stopped (did it mutate the game state?)` | The worker's replica and the real game produced different hashes. The agent is stopped and your seat goes idle. This never happened in the runs here; if you see it, it is a bug worth an issue (`src/agent/browser/AgentWorker.worker.ts:81-95` `[code]`).                                                                                                                                                                                                                                  |
 
 **Options.** Add `&agentOptions=<url-encoded JSON>` to hand apex any key of
 `src/agent/agents/apex/options.ts` (`createAgent` in
@@ -147,14 +147,17 @@ Keys a viewer may want:
   with `GameType.Private` on Iceland spawned in time with this option, with
   the defaults and with `spawnMode: "plan"`). In the browser the worker
   applies every queued turn and then thinks once
-  (`src/agent/browser/AgentWorker.worker.ts:118-128`), so when the plan (a
-  fork stepped 28 ticks with 400 tribes, then the race field) takes longer
-  than the ticks left, the next thought comes after the phase has ended,
-  `inSpawnPhase()` is false, and the seat is dead for good. `[ran]`: twice
-  on Iceland in this loaded container, `[170] spawn plan (race): … send at
-197`, then `sent 0` in every status line to tick 1076. Singleplayer has no
-  such deadline (its phase ends when you spawn), so the option is harmless
-  there and pointless.
+  (`src/agent/browser/AgentWorker.worker.ts:118-132`), and the controller
+  sends only in a thought at tick 197 or later while the phase still runs
+  (`SpawnController.ts:207`, `policy.ts:743`). When the thoughts come in
+  jumps (§16.4b, "Why the first spawn misses here"), none may fall in ticks
+  197–199; after tick 200 `inSpawnPhase()` is false and the seat is dead
+  for good. `[ran]`: three times on Iceland in this loaded container, plans
+  at ticks 170, 179 and 188 (the plan itself took `last think 941.5 ms`),
+  each `spawn plan (race): … send at 197`, then `sent 0` in every status
+  line (to tick 1076 and 887; in the third the seat was dead with 0 tiles at
+  tick 596 when the harness stopped). Singleplayer has no such deadline (its
+  phase ends when you spawn), so the option is harmless there and pointless.
 - `&agentRateLimit=off` (separate parameter, not an option) lifts the
   client-side 10/s, 150/min intent limit the arena enforces (§10.5). Leave
   it on to see what the arena sees.
@@ -224,13 +227,13 @@ and nations hop until it ends. Apex plans at tick 170 on the state its
 replica shows, the plan itself takes about a second, so the intent lands
 around tick 180 on a map that has moved on; when the disc is taken it sends
 the next candidate at its next thought at least ten ticks later
-(`RESEND_TICKS`, `SpawnController.ts:77`). `[ran]`, six lobbies: on World
-the first spawn failed in all four (`[197] spawn at 1504,104 failed`), the
-second landed in three of them, and in one the second came after the phase
-had ended and the seat stayed dead (`isAlive: false`, 0 tiles, through tick
-972); on Iceland, twice, the first failed and the second landed (at tick
-187: 130 tiles at tick 229, 901 at 383; at tick 191: 2,100 tiles at tick
-600). So: prefer a map with few nations,
+(`RESEND_TICKS`, `SpawnController.ts:77`). `[ran]`, five lobbies: on World
+the first spawn failed in all three (`[197] spawn at 1504,104 failed`), the
+second landed in two of them, and in one the second went out at tick 194 by
+the replica's clock, never landed, and the seat stayed dead (`isAlive:
+false`, 0 tiles, through tick 972); on Iceland, twice, the first failed and
+the second landed (at tick 187: 130 tiles at tick 229, 901 at 383; at tick
+191: 2,100 tiles at tick 600). So: prefer a map with few nations,
 watch for the `failed` line, and if the seat is dead when the phase ends,
 start a new lobby. Do not try to "fix" it with `spawnWallBudgetMs` (§16.3:
 that made the seat dead every time here). The cheapest spawn,
@@ -239,7 +242,31 @@ a few ms), was no cure either `[ran]` once: planned and sent at tick 175
 (`spawn (plan) at 1471,904`, `sent 1`), it did not land, no thought came
 before the phase ended, and the seat was dead.
 
-MECH
+**Why the first spawn misses here.** The bot's tab hands each turn it
+receives from the game WebSocket to the agent worker
+(`ClientGameRunner.ts:1189-1192` `[code]`); the worker applies every turn
+that has queued up and then lets apex think once, on the newest state
+(`AgentWorker.worker.ts:118-132` `[code]`). Turns arriving one at a time
+give a thought per tick; turns arriving in bursts, or piling up behind a
+long thought, give one thought per burst, and the ticks in between are never
+seen. Apex resends a spawn that has not landed at its first thought at least
+10 ticks after the send (`SpawnController.ts:192`), and in the lobbies here
+that thought came 25, 11 and 16 ticks after the send on World and 17 and 19
+on Iceland (`[172] spawn (race) at …` → `[197] … failed`; `[170]` → `[187]`;
+`[172]` → `[191]`), so each first intent was judged on a replica 10–25 ticks
+behind the game, and the resend sent at tick 194 (above) never landed. With
+`spawnWallBudgetMs: 20000` the plan waits for a single send tick, 197, and
+the thoughts fell at 170, 179 or 188 and then past 200, so nothing was sent.
+The status lines of §16.3 show the same batching: they are posted at the end
+of the batch that crosses each 50-tick mark and came at ticks 70, 121, 172
+and 82, 148, 205 rather than 50, 100, 150. A record of the wall-clock gaps
+between WebSocket turns on the bot's main thread was set up for the last
+Iceland lobby, but that run's headless browser closed before it printed, so
+no gap figures exist; the tick gaps above are the only measurements. The
+test harness's frame throttle was ruled out (a run without it showed the
+same 19-tick gap). On an idle machine turns should arrive every 100 ms and
+the worker should think every tick, which would make this a loaded-machine
+problem rather than a rule; that was not verifiable here.
 
 Why the second profile: the server identifies a player by a persistent ID
 that lives in the browser profile's `localStorage`
@@ -300,7 +327,7 @@ node .claude/skills/run-openfront/autopilot.mjs apex Pangaea 90
 The `npm install --no-save` line is what `.claude/hooks/session-start.sh:58-64`
 does for cloud sessions (`--no-save` keeps `package.json` and the lockfile
 untouched); the cloud image has the browser pre-installed, your machine
-needs the `npx playwright install chromium`. The script opens `?agent=apex`,
+needs the `npx playwright install chromium` (so that part was not run here). The script opens `?agent=apex`,
 starts a solo game on the map you name against 100 bots at Impossible, never
 clicks, prints every `[agent]` line and the seat's state every 10 s, and
 screenshots each time. Requirements and gotchas are in
@@ -344,7 +371,9 @@ territory PNG per game into `<out>/images/`, `--image-every M` adds one every
 M game minutes (`npm run arena -- --help` `[ran]`). The `showcase` suite
 (World, Europe, Alps, ArchipelagoSea, BeringStrait, Mena, seed `showcase`)
 already sets `--play-out --image-every 1` (`src/agent/arena/Suites.ts:112-120`
-`[code]`), so:
+`[code]`). The three commands below were **not run** in this container (the
+CPU budget for this guide was one smoke game); their flags were checked
+against `--help` and the suite definition `[ran]`:
 
 ```bash
 npm run arena -- --suite showcase --agent apex --images --out arena-results/showcase-apex
@@ -367,9 +396,6 @@ files it as `docs/progress/<date>-my-run.jpg` with an entry in
 `docs/progress/galleries.json` (`src/agent/arena/Progress.ts` header
 `[code]`). The galleries already filed are in `docs/progress/`; the latest,
 `2026-09-27-m2-signoff.jpg`, is what to expect from the command above.
-
-Not run in this container: the CPU budget for this guide was one smoke game.
-The flags were checked against `--help` and the suite definition.
 
 ## 16.7 What to expect from apex
 
@@ -433,13 +459,20 @@ All runs on 2026-09-27 in a 4-core cloud container shared with arena runs
 (load average 16–23), dev server from this checkout, Chromium 1194 through
 Playwright 1.56.1 with SwiftShader.
 
-| Claim                                                         | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Dev server URL and port                                       | `npm run dev`; `curl http://localhost:9000` answered 200; Vite printed `Local: http://localhost:9000/`.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Autopilot spawns and grows, replica never diverges            | `node .claude/skills/run-openfront/autopilot.mjs apex Pangaea 90`, four times. Two runs were cut short by a Vite reload from another engineer's edit (one crashed the script at `autopilot.mjs:47`). Two runs with only Vite's HMR socket neutralised in the test browser ran the full 90 s: tiles 52 → 661 and 96 → 259, `behind 0`, no `diverged` line, six screenshots each; the stock `ok` test was false both times, `/spawn .*at \d+,\d+/` true.                                                                                          |
-| Status line cadence, bad option, `thinkEvery`, `P`            | Solo Iceland with `?agent=apex&agentOptions={"bogus":1}`: `console.error` `[agent] stopped: agent init failed: Error: apex has no option "bogus" (it has thinkEvery, …)`. With `{"thinkEvery":10}` it played; status lines at ticks 70, 121, 172, 241; `P` at tick 19 froze the game at tick 21 for 12 s, a second `P` released it.                                                                                                                                                                                                             |
-| Click beside the bot; `?agent=off` in singleplayer            | Solo games with `?agent=apex` (Pangaea, Iceland): attack ratio set to 37%, a scripted click on unowned land next to apex's border produced a new outgoing attack of 13,007 troops (home 32,026 → 22,069) while apex kept playing; then `?agent=off` returned the tab to the home page with the game gone (twice).                                                                                                                                                                                                                               |
-| Private lobby against apex; spawn timing; takeover; same seat | Six lobbies in two Chromium profiles (four World, two Iceland): tab 1 `Create Lobby`, tab 2 `/game/<ID>?agent=apex` seated from the URL, tab 1 `Start Game`. First spawn failed in all six; the second landed in five (World: 17,882 tiles by tick 1115; Iceland: 9,916 by tick 817 and 2,100 by tick 600); in one World lobby the seat stayed dead. `?agent=off` in the bot's tab rejoined the same seat in about 6 s, cleared the setting, zero `[agent]` lines after. A second page in the bot's own profile took the bot's seat and closed the first page's socket. |
-| `spawnWallBudgetMs: 20000` in a lobby                         | Two Iceland lobbies with `&agentOptions=%7B%22spawnWallBudgetMs%22%3A20000%7D`: `[170] spawn plan (race): … send at 197` (once at 179), then `sent 0` in every status line to tick 1076 and 824; seat dead. The same option in the arena harness (scratch copy of `tests/agent/apex/Spawn.test.ts`, `GameType.Private`, Iceland, stepped to tick 230) spawned in time, as did the defaults and `spawnMode: "plan"`.                                                                                                                             |
-| Arena flags                                                   | `npm run arena -- --help`; `Suites.ts` read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Speed keys, replay guard, duplicated-tab storage              | Read in code only (files cited inline); not exercised headless.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Claim                                                         | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dev server URL and port                                       | `npm run dev`; `curl http://localhost:9000` answered 200; Vite printed `Local: http://localhost:9000/`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Autopilot spawns and grows, replica never diverges            | `node .claude/skills/run-openfront/autopilot.mjs apex Pangaea 90`, four times. Two runs were cut short by a Vite reload from another engineer's edit (one crashed the script at `autopilot.mjs:47`). Two runs with only Vite's HMR socket neutralised in the test browser ran the full 90 s: tiles 52 → 661 and 96 → 259, `behind 0`, no `diverged` line, six screenshots each; the stock `ok` test was false both times, `/spawn .*at \d+,\d+/` true.                                                                                                                                                                          |
+| Status line cadence, bad option, `thinkEvery`, `P`            | Solo Iceland with `?agent=apex&agentOptions={"bogus":1}`: `console.error` `[agent] stopped: agent init failed: Error: apex has no option "bogus" (it has thinkEvery, …)`. With `{"thinkEvery":10}` it played; status lines at ticks 70, 121, 172, 241; `P` at tick 19 froze the game at tick 21 for 12 s, a second `P` released it.                                                                                                                                                                                                                                                                                             |
+| Click beside the bot; `?agent=off` in singleplayer            | Solo games with `?agent=apex` (Pangaea, Iceland): attack ratio set to 37%, a scripted click on unowned land next to apex's border produced a new outgoing attack of 13,007 troops (home 32,026 → 22,069) while apex kept playing; then `?agent=off` returned the tab to the home page with the game gone (twice).                                                                                                                                                                                                                                                                                                               |
+| Private lobby against apex; spawn timing; takeover; same seat | Five lobbies in two Chromium profiles (three World, two Iceland): tab 1 `Create Lobby`, tab 2 `/game/<ID>?agent=apex` seated from the URL, tab 1 `Start Game`. First spawn failed in all five; the second landed in four (World: 17,882 tiles by tick 1115; Iceland: 9,916 by tick 817 and 2,100 by tick 600); in one World lobby the second went out at tick 194 and the seat stayed dead. `?agent=off` in the bot's tab rejoined the same seat in about 6 s, cleared the setting, zero `[agent]` lines after. A second page in the bot's own profile took the bot's seat and closed the first page's socket.                  |
+| `spawnWallBudgetMs: 20000` in a lobby                         | Three Iceland lobbies with `&agentOptions=%7B%22spawnWallBudgetMs%22%3A20000%7D`: `spawn plan (race): … send at 197` at ticks 170, 179 and 188, then `sent 0` in every status line to tick 1076 and 887; the third run's seat was dead with 0 tiles at tick 596 when its headless browser closed, before the run could print the WebSocket turn-gap statistics it had been set up to record (so no such figures exist). The same option in the arena harness (scratch copy of `tests/agent/apex/Spawn.test.ts`, `GameType.Private`, Iceland, stepped to tick 230) spawned in time, as did the defaults and `spawnMode: "plan"`. |
+| Turn batching (§16.4b, "Why the first spawn misses here")     | Tick gaps between a spawn send and the thought that noticed it had failed, from the lobbies above: 25, 11 and 16 (World), 17 and 19 (Iceland); status lines at ticks 70, 121, 172, 241 and 82, 148, 205 rather than multiples of 50; a lobby run without the harness's frame throttle showed the same 19-tick gap. Wall-clock gaps between WebSocket turns were not measured (row above).                                                                                                                                                                                                                                       |
+| Arena flags                                                   | `npm run arena -- --help`; `Suites.ts` read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Speed keys, replay guard, duplicated-tab storage              | Read in code only (files cited inline); not exercised headless.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+The raw evidence (the two-tab lobby run's `mp-test.log`, `mp-trace.json` and
+screenshots `mp-1-host-lobby.png` … `mp-5-guest-after-agent-off.png`, the
+solo run's `solo-takeover.log`, the watcher's `autopilot-{0..5}.png`, and the
+six `lobby-opt-*.log` lobby runs) was kept with the run notes outside the
+repository; nothing of it is committed.
