@@ -1,5 +1,5 @@
-import { PlayerType } from "../../../../core/game/Game";
 import type { PlayerID } from "../../../../core/game/Game";
+import { PlayerType } from "../../../../core/game/Game";
 import type { AgentContext, AgentOutcome } from "../../../Agent";
 import type { ForkSource, GameFork } from "../../../Fork";
 import { BudgetMirror } from "../../../lib/Lookahead";

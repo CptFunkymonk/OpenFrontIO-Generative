@@ -308,15 +308,9 @@ describe("core search candidates", () => {
     expect(strong["strike:A:1"]).toBe(false);
     expect(strong["strike:B:1"]).toBe(true);
     // act3 on the same state: K is reached at B; nothing on top.
-    expect(
-      CORE.generate(view(nations, ACT3), base).map((c) => c.name),
-    ).toEqual([
-      "strike:A:0.5",
-      "strike:A:1",
-      "strike:B:0.5",
-      "strike:B:1",
-      "ally:Y",
-    ]);
+    expect(CORE.generate(view(nations, ACT3), base).map((c) => c.name)).toEqual(
+      ["strike:A:0.5", "strike:A:1", "strike:B:0.5", "strike:B:1", "ally:Y"],
+    );
   });
 
   test("the plan: an expiring ally counts once (its breaks), not twice", () => {

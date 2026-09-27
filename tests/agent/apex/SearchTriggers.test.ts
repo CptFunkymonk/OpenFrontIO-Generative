@@ -7,12 +7,13 @@
  * - T1 fires once per alliance term, in (extendLead, lapseLead] ticks
  *   before a bordering ally's expiry, whatever the gap since the last try;
  *   a budget refusal does not use the term up: T1 fires again at the
- *   budget's retry tick while the window is open.
+ *   budget's retry tick, or at the window's last tick if that comes first.
  * - T2 fires `chain` ticks after an act; T3 at the stall onset, every
  *   stallEvery ticks in stall, and sooner when a bordering nation's
  *   alliance flips, an unallied one appears, or its troops fall by
  *   stallChange; never while a chain is pending, and the chain search
- *   takes T3's snapshot.
+ *   takes T3's snapshot. An ally lost (allied at the last search,
+ *   unallied now) is high priority, like the onset.
  * - T4 fires at a nation attack of at least attackMin of our home unless a
  *   search RAN in the last minGap ticks (a refusal or a trigger with no
  *   plan does not count), then never for that attack; T5 when the followed
@@ -128,7 +129,7 @@ describe("search triggers", () => {
     ]);
   });
 
-  test("T1 refused: retried at the budget's tick while the window is open, else given up", () => {
+  test("T1 refused: retried at the budget's tick, or at the window's last tick, then given up", () => {
     const tr = new Triggers(P);
     drive(tr, 2400, 2400);
     const retries: Fate[] = [{ retryAt: 2600 }, "run"];
@@ -145,7 +146,8 @@ describe("search triggers", () => {
       [2500, "end"],
       [2600, "end"],
     ]);
-    // A retry tick past the window: the term is given up.
+    // A retry tick past the window: tried once more at the window's last
+    // tick (2,699: 301 left, the shortest look), then given up.
     const late = new Triggers(P);
     drive(late, 2400, 2400);
     expect(
@@ -154,9 +156,12 @@ describe("search triggers", () => {
         2401,
         2999,
         () => ({ nations: [ally(3000)] }),
-        () => ({ retryAt: 2700 }),
+        () => ({ retryAt: 2800 }),
       ),
-    ).toEqual([[2500, "end"]]);
+    ).toEqual([
+      [2500, "end"],
+      [2699, "end"],
+    ]);
   });
 
   test("T2: chain ticks after an act; a search just before it counts as the chain", () => {
@@ -192,9 +197,7 @@ describe("search triggers", () => {
       5000,
       (t) => ({
         inStall: t >= 2800,
-        nations: [
-          nbr(t >= 4500 ? 700_000 : t >= 4100 ? 1_300_000 : 1_000_000),
-        ],
+        nations: [nbr(t >= 4500 ? 700_000 : t >= 4100 ? 1_300_000 : 1_000_000)],
       }),
       undefined,
       true,
@@ -275,8 +278,7 @@ describe("search triggers", () => {
       4600,
       (t) => ({
         inStall: t >= 2500,
-        nations:
-          t < 4000 ? [] : [ally(4400), ...(t >= 4100 ? [unallied] : [])],
+        nations: t < 4000 ? [] : [ally(4400), ...(t >= 4100 ? [unallied] : [])],
       }),
       () => fates.shift() ?? "run",
       true,
@@ -289,6 +291,32 @@ describe("search triggers", () => {
       [3900, "stall", "every"],
       [4000, "end", "end:Z"],
       [4500, "stall", "new:N"],
+    ]);
+  });
+
+  test("an ally lost in stall is high priority: it fires through a low hold", () => {
+    const tr = new Triggers(P);
+    // In stall with Z allied from the first search on.
+    const Z = (allied: boolean): NationObs =>
+      allied
+        ? ally(9000)
+        : { id: "Z", allied: false, expiresAt: null, troops: 500_000 };
+    const fates: Fate[] = ["run", { retryAt: 6000 }, "run"];
+    const fired = drive(
+      tr,
+      2400,
+      4000,
+      (t) => ({ inStall: true, nations: [Z(t < 3900)] }),
+      () => fates.shift() ?? "run",
+      true,
+    );
+    // The first search at 2,400 (the onset); "every" at 3,600 refused and
+    // holding the low ones to 6,000; Z's alliance ends at 3,900 (it broke
+    // with us, or refused the extension): searched at once.
+    expect(fired).toEqual([
+      [2400, "stall", "onset"],
+      [3600, "stall", "every"],
+      [3900, "stall", "lost:Z"],
     ]);
   });
 

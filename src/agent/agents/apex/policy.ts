@@ -774,7 +774,16 @@ export class ApexPolicy {
       rt.wm = wm;
       this.refreshGrids(env, rt);
       rt.floors = homeFloors(
-        { tick: t, o, me: env.me, models: rt.models, nm: rt.nm },
+        // game and log: package WP10b's leader guard (o.leaderGuard).
+        {
+          tick: t,
+          o,
+          me: env.me,
+          models: rt.models,
+          nm: rt.nm,
+          game: env.game,
+          log: env.log,
+        },
         s,
       );
       const nuke = o.nukeReflex

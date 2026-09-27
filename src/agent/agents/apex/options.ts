@@ -628,6 +628,14 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  extension); 11 of the 13 unasked allies that attacked after their
    *  lapse held 1.1x our cap or more. */
   webKeepStrong: boolean;
+  /** The strong rule's own extension asks (at the lead, sooner for
+   *  webKeepGap). Off: a strong ally is asked only when the web keeps it
+   *  (allySet, or the midgame keep set), and webKeepRenew and webKeepGift
+   *  still apply. Screened quick@20 0:16 with it on (package WP7a v5):
+   *  asks for strong allies outside the web postponed their lapse into
+   *  the midgame, when they were bigger (Japan g8 −10.7 points at minute
+   *  20, Africa g11, Middle East g13 eliminated). */
+  webKeepAsk: boolean;
   /** Strong by cap: maxTroops(Z) at least this multiple of ours. */
   webKeepCapRatio: number;
   /** Strong by troops: troops(Z) at least this multiple of our cap (not
@@ -1321,6 +1329,45 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  quick@20 Mississippi ("free" without it): one hydrogen bomb took 15
    *  levels of cities 64 tiles apart. */
   goldHydroCap: number;
+
+  // Package WP10b LEADER GUARD, base rules for the leader phase
+  // (docs/14-m4-plan.md §2.8; lib/LeaderGuard.ts, LeaderHook.ts, called by
+  // HomeTarget.homeFloors and EconomyController.decide). Pinned by
+  // tests/agent/mechanics/Betrayal and NationMirvTargeting. Off by default.
+  /** Leader guard: every tribe, boat, free-land and strike send keeps home
+   *  at the betrayal line of each bordering allied nation, at its next
+   *  decision (NationAllianceBehavior.maybeBetray: rule (a) home + our
+   *  attacks + its other bordering players' troops < 0.33 of its troops,
+   *  rule (c) the only neighbour under a third, rule (b) a traitor under
+   *  1.2x); lines above leaderMaxShare of our cap are left out and, with
+   *  leaderCap, buy City levels. Also reads the MIRV lines (40% of the
+   *  land, the City-level leader) and who could MIRV us when, for the log
+   *  and s.leader. */
+  leaderGuard: boolean;
+  /** Multiplies the ally's troops in every line (1: the nation's edge). */
+  leaderMargin: number;
+  /** Share of the ally's own attack troops counted in its troops (an
+   *  attack that ends brings its survivors home). */
+  leaderAllyOut: number;
+  /** Share of our attack troops credited to rule (a) in the home floor
+   *  (0: home alone holds the line; attacks lose troops as they go). */
+  leaderOurOut: number;
+  /** A line above this share of our cap is not held (holding it would
+   *  freeze every send); with leaderCap it buys cap instead. */
+  leaderMaxShare: number;
+  /** Leave out an ally that sends at free land (or at a tribe holding
+   *  structures) at its next decision (NationModel.gates "locked"). */
+  leaderGates: boolean;
+  /** With leaderGuard: when today's City rule refuses every site and a
+   *  line is above leaderMaxShare of our cap, the gold arm's gate buys
+   *  City levels up to the cap that holds it, within the MIRV city-leader
+   *  and dense-target lines (goldGuard). */
+  leaderCap: boolean;
+  /** leaderCap's arm: "free" instead of "model" (lib/GoldPolicy). */
+  leaderCapFree: boolean;
+  /** Ticks of gold history behind each silo owner's net gold rate (the
+   *  MIRV danger's time to its price). */
+  leaderGoldWindow: number;
 }
 
 function deepFreeze<T>(o: T): T {
@@ -1495,6 +1542,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
 
   // Package WP7a WEB KEEP.
   webKeepStrong: false,
+  webKeepAsk: true,
   webKeepCapRatio: 1.1,
   webKeepTroopRatio: 1,
   webKeepGap: 600,
@@ -1683,6 +1731,17 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   goldReserve: 1_500_000,
   goldGuard: true,
   goldHydroCap: 0,
+
+  // Package WP10b LEADER GUARD (off).
+  leaderGuard: false,
+  leaderMargin: 1.05,
+  leaderAllyOut: 0.5,
+  leaderOurOut: 0,
+  leaderMaxShare: 0.8,
+  leaderGates: true,
+  leaderCap: true,
+  leaderCapFree: false,
+  leaderGoldWindow: 600,
 } satisfies ApexOptions);
 
 /**

@@ -305,12 +305,11 @@ describe("WP10 MIRV effect: diplomacy", () => {
     const embargo = V.getEmbargoes().find((e) => e.target === US)!;
     expect(embargo.isTemporary).toBe(false);
     // Bomb gold at each decision from now on.
-    let bombs: UnitType[] = [];
     for (let i = 0; i < 1200; i++) {
       if (isDecisionTick(nation, w.game.ticks())) setGold(V, 10_000_000n);
       tick(w);
     }
-    bombs = w.weapons.filter((x) => x.from === V).map((x) => x.type);
+    const bombs = w.weapons.filter((x) => x.from === V).map((x) => x.type);
     expect(vsilo.isActive()).toBe(true);
     expect(bombs.length).toBeGreaterThan(0);
     expect(US.units(UnitType.City)).toHaveLength(0);

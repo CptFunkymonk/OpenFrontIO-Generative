@@ -1031,7 +1031,8 @@ export class DiplomacyController implements Controller {
     }
     const slots = allySlots(v.game, v.me, v.o.allySlotsReserve);
     const mid = midActive(v) ? mem.mid : undefined;
-    // Package WP7a: the strong bordering allies, asked at the same lead.
+    // Package WP7a: the strong bordering allies (for the renew and the
+    // gift; with webKeepAsk, asked at the same lead).
     const strong = v.o.webKeepStrong
       ? this.planStrong(
           v,
@@ -1044,7 +1045,15 @@ export class DiplomacyController implements Controller {
         this.requests(v, s, mem, mid.keep, this.midRoom(v, s, mid, slots));
       }
       if (v.o.extensions) {
-        this.extensions(v, s, mem, slots, mid.keep, v.o.webExtendLead, strong);
+        this.extensions(
+          v,
+          s,
+          mem,
+          slots,
+          mid.keep,
+          v.o.webExtendLead,
+          v.o.webKeepAsk ? strong : null,
+        );
       }
       if (v.o.webRenew) this.noteRenew(v, mem, mid);
       return;
@@ -1055,7 +1064,15 @@ export class DiplomacyController implements Controller {
       this.requests(v, s, mem, s.web.allySet, slots.webTarget - held);
     }
     if (v.o.extensions) {
-      this.extensions(v, s, mem, slots, s.web.allySet, v.o.extendLead, strong);
+      this.extensions(
+        v,
+        s,
+        mem,
+        slots,
+        s.web.allySet,
+        v.o.extendLead,
+        v.o.webKeepAsk ? strong : null,
+      );
     }
   }
 

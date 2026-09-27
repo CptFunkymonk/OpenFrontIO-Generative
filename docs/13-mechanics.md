@@ -62,6 +62,21 @@ The twelve pins:
 
 All test files are in `/home/user/OpenFrontIO-Generative/tests/agent/mechanics/`.
 
+**WP10-PIN (2026-09-27, commit `84ae424`):** six more files for the leader phase, 60 tests, sharing one world builder, `LeaderWorld.ts` (not a test file). Their findings are §2.13-§2.18, §1 items 12-17, §3 items 41-49 and §5.12.
+
+| File                          | Tests | What it pins                                                                    |
+| ----------------------------- | ----- | ------------------------------------------------------------------------------- |
+| `OwnNukes.test.ts`            | 24    | our Atom, Hydrogen and MIRV launches: requirements, price, flight, SAMs (§2.13) |
+| `MirvEffect.test.ts`          | 11    | what a MIRV does to its target, its neighbours and our relations (§2.14)        |
+| `SiloStrike.test.ts`          | 7     | an Atom or Hydrogen bomb on a nation's silo (§2.15)                             |
+| `NationMirvTargeting.test.ts` | 6     | exactly when a nation MIRVs us (§2.16)                                          |
+| `Betrayal.test.ts`            | 6     | exactly when an ally betrays us (§2.17)                                         |
+| `ConquestSpoils.test.ts`      | 6     | gold, silos and cities from a conquest (§2.18)                                  |
+
+- Every test in them sets a 60 s timeout.
+- `npx tsc --noEmit -p .`, and `npx eslint`, `npx oxlint` and `npx prettier --check` on the new files: clean.
+- `npx vitest tests/agent/mechanics --run`, all 25 files together, under a load average of 20 on 4 cores: the six new files pass. Two older real-game hooks (NationTargeting's and TribeStats') hit their 60 s limit in that run; WP10 does not touch them, and run alone right after, both files pass (57 tests, 77 s).
+
 ---
 
 ## 1. Headline findings (what changes the plan)
@@ -100,6 +115,12 @@ All test files are in `/home/user/OpenFrontIO-Generative/tests/agent/mechanics/`
 9. **An arena game has one win condition: more than 80% of non-fallout land before the cap.** The cap is 36,000 absolute ticks by default, spawn phase included. Otherwise the game is recorded as a "timeout". WinCheck's 170-minute rule never fires in the arena. (BoatsAndWin.)
 10. **Nations get their early gold from tribes.** On World, 67 of 72 nations bought a City before tick 1,255, the first at tick 471. Each Impossible City level is worth 312,500 of cap. (EconomyGold.)
 11. **Every nation decides on a fixed, replayable schedule:** once every 30-49 ticks, at a fixed phase that is seeded by the gameID and the nation's id. Between decisions it cannot react, which leaves windows an agent can compute. (NationTargeting, NationRetaliate, and `NationParams.test.ts`.)
+12. **Our bombs exist 2 ticks after their intent, or never.** A `build_unit` for an Atom bomb, a Hydrogen bomb or a MIRV spawns and is paid in tick t + 2, from the nearest silo with a free slot (a level-L silo has L slots, each back 90 ticks after it fires). If gold, slot, target tile or spawn immunity fails at that tick, it is dropped silently and costs nothing. A bomb flies `trajectory().length - 1` ticks: 14 at 100 tiles, 47 at 400, 139 at 1,200. (OwnNukes.)
+13. **Every MIRV raises every nation's next MIRV by 15M, and a MIRV is a big-target weapon.** The price is 25M + 15M × MIRVs launched by anyone, so our MIRV at a tribe can put a nation's MIRV out of its reach. A MIRV gets about one warhead per 2,400 tiles of compact target. On a big target it takes about 30% of the land and leaves about 3% of the cap in troops, but units between warheads survive (179 of 300 silos did). The target then embargoes us for good, bombs our structures, and attacks no player until it regrows to its reserve (271 ticks in the pinned case: the lowest reserve, no free land). (OwnNukes, MirvEffect.)
+14. **Allies MIRV us, and the alliance breaks only when the MIRV exists.** A nation with a silo and the price MIRVs whoever holds ≥ 40% of `numLandTiles()` (fallout stays in the count) or leads in city levels (more than 8 and ≥ 1.15× the runner-up; cities under construction count), with 15/16 odds per decision. The break, its traitor mark and the −100s come in the MIRV's spawn tick, the tick after the decision. (NationMirvTargeting.)
+15. **A MIRV at us turns our other allies into betrayers.** A strong bordering ally betrays us, and attacks in the same tick, once our troops + attacks + its other neighbours and allies are under 0.33× its troops, and a MIRV leaves us at about 3% of our cap. Tribes count in that sum; the break itself moves no relation, and it never happens below the ally's reserve. (Betrayal.)
+16. **Any bomb whose outer radius (30 or 100 tiles) covers a silo destroys it, whatever its level; that is MIRV denial.** A nation without a finished silo cannot MIRV. A bomb at an ally's silo breaks the alliance, and the ally's SAM then shoots the bomb down. (SiloStrike.)
+17. **Only an annexation moves gold.** Taking tiles pays nothing, and a nation nuked out of existence takes its gold with it. Captured structures keep their levels; a captured City adds to our cap but not to our City price. (ConquestSpoils.)
 
 ---
 
@@ -672,9 +693,9 @@ It decides every 30-50 ticks.
   - A MIRV always breaks the alliance and costs -100 both ways (`MIRVExecution.ts:110-120`).
 - **Breaking:**
   - The breaker becomes a traitor for 300 ticks, unless the other side already is one (`GameImpl.ts:887`, `PlayerImpl.ts:869-879`).
-  - The betrayed gives -100 and every player in the breaker's nearby set gives -40, even when breaking with a traitor (`BreakAllianceExecution.ts:45-56`).
+  - The betrayed gives -100 and every player in the breaker's nearby set gives -40, even when breaking with a traitor (`BreakAllianceExecution.ts:45-56`). That is a break by intent; a nation's betrayal and the break a bomb or MIRV causes give neither (§2.17, item 41).
 - **The nation betraying us:** only when it is at or above its reserve, and at its trigger or on a 1-in-10 chance. It goes through `maybeBetrayAndAttack` (`AiAttackBehavior.ts:583-608`) and attacks in the same decision. The rules (`:404-491`) are:
-  - **(a) Juiciest ally:** betrayed if ally + bordering non-allies + other allies together hold < 0.33x its troops.
+  - **(a) Juiciest ally:** betrayed if ally + bordering non-allies + other allies together hold < 0.33x its troops (troops plus outgoing attacks, strictly; tribes count; the exact line is §2.17, item 42).
   - **(b) Traitor:** betrayed if it holds < 1.2x its troops.
   - **(c) Only bordering player:** betrayed if its home troops x3 < the nation's troops.
 
@@ -717,7 +738,7 @@ It decides every 30-50 ticks.
   - It is paid every tick, but not during the spawn phase (`PlayerExecution.ts:44-46, :95-100`). Starting gold is 0 (`:439-444`).
 - **Other sources:**
   - Trade: `tradeShipGold(d)` goes to both port owners (`:516-521`): 5,185 at 100 tiles, 52,500 at 300, 99,814 at 500.
-  - Conquest: the conqueror takes all of a tribe's or nation's gold and half of a human's, or nothing from a human who never attacked (`GameImpl.conquerPlayer`, `:1540-1596`; `:735-744`).
+  - Conquest: the conqueror takes all of a tribe's or nation's gold and half of a human's, or nothing from a human who never attacked (`GameImpl.conquerPlayer`, `:1540-1596`; `:735-744`). Only on annexation (§2.18, item 43).
 - **Cap (TRUE).**
   - `maxTroops = 2 x (tiles^0.6 x 1000 + 50,000) + (sum of finished City levels) x 250,000` (`:1024-1053`). An Impossible nation gets 1.25x of all of it, i.e. 312,500 per level.
   - In tiles of cap, one level is worth 3,125 at 0 tiles, 5,175 at 1,000, 6,057 at 2,000, 7,759 at 5,000 and 9,604 at 10,000.
@@ -760,7 +781,7 @@ It decides every 30-50 ticks.
   - It lifts once `ticks - createdAt > 3000`, which is 3,001 ticks, and every new attack restarts it (`PlayerExecution.ts:111-119`).
   - `canTrade` then fails (`PlayerImpl.ts:1228-1232`): no new trade ships, ships at sea sink, and train gold stops.
   - At Impossible the attack also leaves the nation Hostile for about 1,000 ticks.
-  - A permanent embargo follows a nuke, a broken alliance or the middle-finger emoji (`NationExecution.ts:336-382`).
+  - A permanent embargo follows a nuke, a broken alliance or the middle-finger emoji (`NationExecution.ts:336-382`); the exact rule is item 48.
   - An accepted alliance request does not end the embargo; only crossing requests do (`AllianceRequestExecution.ts:45-62`).
 
 **Test:** 16 cases:
@@ -817,18 +838,18 @@ It decides every 30-50 ticks.
     - -30 per tile of distance to its nearest silo, keeping at least 20%
     - -1M for each recent aim point within the bomb's inner radius; a point stays recent for 600 ticks
 - **MIRVs** (NMB):
-  - **Gates:** a silo, then the gold, then `chance(16)` hesitation.
+  - **Gates:** a silo, then the gold, then `chance(16)` hesitation (a silo under construction passes; the launch needs a ready one; item 44).
   - **Targets, in order:**
     - whoever has a MIRV in flight at it
     - the largest holder of ≥ 40% of `numLandTiles()`
-    - the holder of > 8 city levels and ≥ 1.15x the runner-up's levels
-  - Allies are valid targets. After any nation MIRVs a target, every nation skips it for 300 ticks.
+    - the holder of > 8 city levels and ≥ 1.15x the runner-up's levels (cities under construction count 1 each; item 45)
+  - Allies are valid targets. After any nation MIRVs a target, every nation skips it for 300 ticks (our own MIRVs set no skip; item 46).
   - **Price:** 25M + 15M x `mirvsLaunched()` (`Config.ts:618-630`).
 - **SAMs** (`Config.ts:1136-1151`):
   - Range is `150 - 480/(L+5)`: 70, 81.4, 90, 96.7 and 102 for levels 1-5.
   - There is no hit roll. A level-L SAM has L interceptors, each reloading in 90 ticks.
   - Only the parts of a flight within 150 tiles of the launch or aim point are targetable.
-  - SAMs ignore the MIRV carrier but do target its warheads (`SAMLauncherExecution.ts:262-267`). A MIRV has up to 350 warheads (`MIRVExecution.ts:53`).
+  - SAMs ignore the MIRV carrier but do target its warheads (`SAMLauncherExecution.ts:262-267`). A MIRV has up to 350 warheads (`MIRVExecution.ts:53`), about one per 2,400 tiles of compact target (item 47).
   - Cost: 1.5M for the first SAM, then 3M. Build time 300 ticks.
 
 **Test:** 30 cases.
@@ -920,6 +941,226 @@ It decides every 30-50 ticks.
 - Route lengths on other maps.
 - How often beachheads are retaliated against.
 - Warships and nukes on boats.
+
+### 2.13 WP10 — our own bombs (`OwnNukes.test.ts`)
+
+> Sections 2.13-2.18 were written on 2026-09-27 at commit `84ae424` by package WP10-PIN, for the leader phase (WP9 found every lost lead lost to an ally's MIRV, a two-players-left bomb or a betrayal). `src/core` had no uncommitted edits; the worlds are built by `tests/agent/mechanics/LeaderWorld.ts` (the real `Config`, FFA, Singleplayer, Impossible, all-plains maps; our intents go through `IntentSchema` and `Executor.createExec`, the path of `ctx.send`).
+
+**Claim:** what `build_unit` needs for an Atom bomb, a Hydrogen bomb and a MIRV (a finished silo, gold, the target tile, the spawn phase); how the price moves; how long a flight takes; what the target's SAM does to each.
+
+**VERDICT: pinned (new).**
+
+**Truth:**
+
+- **The path.** `build_unit` makes a `ConstructionExecution` (`ExecutionManager.ts:111-118`). Its init only checks that the unit is enabled and the tile valid (`ConstructionExecution.ts:37-53`). Its first tick adds one `NukeExecution` per bomb (`amount`, 1 by default) or one `MirvExecution`, and charges nothing (`:55-65`, `:109-136`). That execution's first tick runs `canBuild`, then `buildUnit`, which charges the price (`NukeExecution.ts:199-230`, `MIRVExecution.ts:94-107`, `PlayerImpl.ts:1392-1420`).
+  - So the bomb exists, paid, in tick t + 2, where t is the tick its `build_unit` execution was added.
+  - A check that fails then drops the bomb with a console warning: nothing is paid and nothing is retried.
+- **What `canBuild` needs** (`PlayerImpl.ts:1449-1464`, `:1573-1675`):
+  - the unit enabled, gold ≥ the price at that tick, the player alive;
+  - no spawn immunity, i.e. not in the 50 ticks after the spawn phase (this binds every player);
+  - a target tile that is not impassable. For an Atom or Hydrogen bomb that is any tile: a nation's, a tribe's, an ally's, our own, unowned land or water. A MIRV needs an owned tile (any owner, a tribe or ourselves included, `:1591-1595`);
+  - a ready silo: active, finished, not in cooldown. The nearest ready silo by Manhattan distance to the target fires (`:1666-1674`).
+- **Slots.** A silo of level L has L slots (`UnitImpl.ts:567-569`). Each launch fills one (`:558-561`; `NukeExecution.ts:264-267`, `MIRVExecution.ts:156-162`). `MissileSiloExecution` frees the oldest once `SiloCooldown()` = 90 ticks have passed, one per silo per tick (`MissileSiloExecution.ts:24-46`, `Config.ts:373-375`): a slot fired in tick s serves a bomb that spawns in tick s + 90.
+  - An upgrade costs 1M flat and happens when its intent inits (`UpgradeStructureExecution.ts:17-39`, `Config.ts:641-647`); its new slot starts in use and is free 90 ticks later (`UnitImpl.ts:738-757`).
+  - A new silo is finished at its intent tick + 102 (100 ticks of construction).
+- **Price** (`Config.ts:608-630`):
+  - Atom bomb 750k and Hydrogen bomb 5M, flat however many we have bought (the cost function ignores the count `costWrapper` passes, `:755-773`).
+  - MIRV 25M + 15M × `mirvsLaunched()`. The counter is game-wide; it moves when any player's MIRV spawns, after that MIRV paid the old price (`MIRVExecution.ts:103-107`, `GameImpl.ts:1397-1402`).
+  - So each MIRV anyone launches puts every nation's next MIRV 15M further away. Ours at a tribe does it too: a nation with 30M that could pay 25M cannot pay 40M.
+- **Flight** (`NukeExecution.ts:282-309`; `PathFinder.Parabola.ts:15-54`, `:88-103`; `utilities/Line.ts:64-82`): 10 tiles a tick (`Config.ts:1119-1130`) along a Bézier arc of height max(d/3, 50) tiles, clamped at the map's top edge, one precomputed point per tick. The bomb detonates `trajectory().length - 1` ticks after it spawns. That trajectory is `UniversalPathFinding.Parabola(game, { increment: 10 }).findPath(silo, aim)`, which an agent can compute before it launches.
+
+  | Distance (tiles) | 20  | 50  | 100 | 150 | 200 | 300 | 400 | 600 | 800 | 1,000 | 1,200 |
+  | ---------------- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ----- | ----- |
+  | Flight (ticks)   | 8   | 10  | 14  | 18  | 24  | 35  | 47  | 70  | 93  | 116   | 139   |
+
+- **A MIRV's flight:** the carrier flies to a separation point above the target (x halfway between silo and target, y = max(0, target y − 500) + 50) at a speed normalised toward 14 ticks (`MIRVExecution.ts:122-129`, `:320-393`; `Config.ts:1132-1134`). Its warheads then fly at 22-26 tiles a tick after a wait of 0-14 ticks (`:226-249`). 300 tiles out, the carrier separated 22 ticks after spawning, and its 16 warheads landed 46-67 ticks after the `build_unit`.
+- **SAMs** (`SAMLauncherExecution.ts:197-215`): a SAM shoots any nuke whose owner is not friendly with the SAM's owner, so an ally's SAM never fires at our bombs.
+  - A bomb aimed at an ally breaks the alliance at launch if its blast weighs more than 100 of the ally's tiles or reaches one of its structures (`NukeExecution.ts:148-197`, `:232-234`). From then on the ally's SAMs shoot it: a bomb at an ally's silo under its SAM is shot down.
+  - Interception is certain once a targetable trajectory tile is in range (NukeThreat): one interceptor per bomb, L per 90 ticks, so two atoms at once beat a level-1 SAM.
+  - A Hydrogen bomb aimed more than `samRange(L)` from a SAM, with its whole trajectory out of range, but within 100 tiles of it, destroys it unopposed (levels 1-4).
+  - A MIRV's carrier is never a target. The SAM downs L of its warheads, in the order they come into reach. Aimed at the SAM itself, a MIRV killed a level-1 SAM here, but a level-2 and a level-3 SAM downed the warhead aimed at them and survived.
+
+**Test:** 24 cases.
+
+- **Launch:** the spawn tick and the payment for each bomb type; six silent drops (no silo, gold one short, the only slot in use, an impassable tile, a MIRV at unowned land, a MIRV at water); spawn immunity; a silo under construction; the table of legal targets.
+- **Silos:** the nearest silo fires; slots and `amount`; the 90-tick reload at its exact tick; an upgrade.
+- **Price:** flat Atom and Hydrogen prices over four purchases; the game-wide MIRV counter; MIRV denial by price (a nation's MIRV at us refused after our MIRV at a tribe).
+- **Flight:** the table above, for both bomb types, against the path computed beforehand; the MIRV timeline.
+- **SAMs:** a hostile SAM; an allied SAM (the same bomb downed when not allied, landing when allied); a bomb at an ally's silo; a Hydrogen bomb from outside a SAM's range; a MIRV against SAM levels 1-3.
+
+**Agent implications:**
+
+- **Send a bomb 2 ticks before the tick it must exist,** with the price and a free slot in hand at that tick. A dropped bomb is silent: the unit never appears.
+- **ETA** = 2 + (trajectory length − 1) ticks after the intent's tick; the trajectory can be computed exactly beforehand.
+- **Salvos need levels:** a level-L silo fires L bombs in one tick (`amount` L), each slot back 90 ticks after it fired.
+- **MIRV denial by price:** a MIRV at a tribe (or any owned tile) raises every nation's next MIRV by 15M, for 25M.
+- **SAMs:** never aim inside a hostile SAM's range with fewer than L + 1 bombs; a Hydrogen bomb from outside its range kills a SAM of level 4 or less. Do not count on a MIRV to kill a SAM.
+
+**Open:**
+
+- Flights whose arc is clamped at the top edge of the map, and `rocketDirectionUp: false`.
+- The MIRV's timing at other distances.
+
+### 2.14 WP10 — what a MIRV does (`MirvEffect.test.ts`)
+
+**Claim:** a MIRV's effect on its target (warhead count and spread, troops left, structures, tiles and fallout); its effect on alliances and relations, with the target and with third parties; whether anyone retaliates; whether the embargo is permanent; the 300-tick skip for other MIRVers.
+
+**VERDICT: pinned (new).**
+
+**Truth:**
+
+- **Warheads** (`MIRVExecution.ts:50-53`, `:175-224`, `:259-306`): random tiles the target owns, within 1,500 tiles of the aim, at least 55 apart (Manhattan), the aim tile first, at most 350. They are drawn from 20 to 11 ticks before separation, then re-checked for ownership and topped up 10 ticks before.
+  - Random packing gives about one warhead per 2,400 tiles of compact territory: 16 on 200 × 200 and 51 on 400 × 300. That is well below the 55-tile lattice's one per 1,512.
+  - A small target gets few: a 60 × 60 one got 3.
+- **Blast** (`NukeExecution.ts:70-142`, `:387-515`; `Config.ts:1103-1106`): inner 12, outer 18. Every tile within 12 is hit; beyond, a BFS keeps each tile on a coin flip, so the ring is patchy (20-80% of it was hit). Every tile hit turns to fallout, unowned (`GameImpl.ts:298-308`; water nukes are off). A compact target keeps 65-75% of its land.
+- **Troops** (`Config.ts:1177-1193`): for each tile hit, its owner loses 500 × (1 − e^(−2x/M)), with x its troops above 3% of its cap M, M taken after that warhead's tiles are gone. Its outgoing attacks and boats lose the same way.
+  - So a big target is left with about 3% of its cap: 3.1% here, and its 400k attack in flight too.
+  - A small one keeps more: 8% of its cap with 3 warheads on 60 × 60.
+- **Units:** every unit strictly within 18 tiles of a warhead is deleted, whatever its owner or level (`NukeExecution.ts:464-483`). Units between warheads survive: of 300 level-3 silos on a 20-tile grid, 179 survived. **A MIRV does not reliably take a nation's silos out.**
+- **Diplomacy:**
+  - At launch the MIRV breaks our alliance with the target (we turn traitor unless it is one) and sets −100 both ways (`MIRVExecution.ts:110-121`; NationAlliance pins it).
+  - The warheads never break an alliance or move a relation (`NukeExecution.ts:152-155`, `:232-234`). An ally of ours next to the target lost tiles and troops, and stayed allied at the same relation.
+  - No −40 from anyone: that belongs to `BreakAllianceExecution`, which only an intent uses.
+- **What the target nation does next:**
+  - **A permanent embargo.** Its relation to us is Hostile, so at its next decision it embargoes us with `isTemporary = false`, and at Impossible nothing ever lifts it (`NationExecution.ts:336-382`). After 1,200 ticks of decay its relation was back above −50, and the embargo, with its first creation tick, still stood.
+  - **Bombs at our structures,** as soon as it has a ready silo and bomb gold: we are its most hostile player (`NationNukeBehavior.ts:289-301`), unless its cap is at least 2× ours.
+  - **No attack on any player until its troops are back at its reserve ratio** (`AiAttackBehavior.ts:289-290`). Walled in with no free land, a nation with the lowest reserve (0.30) took 271 ticks after the warheads landed. With free land beside it, it keeps sending everything above its expand ratio (10-19%) into that land; in a scratch run it stayed below its reserve for over 2,300 ticks.
+  - **A counter-MIRV only while our carrier is in the air** (22-27 ticks), and only with a ready silo and the new price (`NationMIRVBehavior.ts:171-179`, `:281-294`).
+- **Third parties:** nothing moves toward us.
+- **The 300-tick skip** (`NationMIRVBehavior.ts:32`, `:257-265`, `:303-305`) is written only by a nation's MIRV. Ours writes nothing, so a nation may MIRV the target we just MIRVed at its next decision; its own MIRV then blocks every nation for 300 ticks.
+
+**Test:** 11 cases: warhead spacing and density on two targets and a small one; the blast shape; the death formula and the troops left (target and attack); which silos survive; alliance and third-party effects; the embargo, its permanence and the nation's bombs; the paralysis to its reserve; the counter-MIRV window; no skip after our MIRV.
+
+**Agent implications:**
+
+- **A MIRV is a big-target weapon.** For 25M or more it takes about 30% of a large nation's land and all but 3% of its troops. In return that nation embargoes us for good and bombs our structures.
+- **After our MIRV the target cannot attack players for 270 ticks or more** if it has no free land: that is the window to take its land.
+- **Strike silos with Atom or Hydrogen bombs, not a MIRV.**
+- **An ally next to the target loses land and troops but stays allied.**
+
+**Open:**
+
+- The 350 cap and the 1,500-tile range (targets beyond them).
+- A MIRV against clustered SAMs.
+
+### 2.15 WP10 — a bomb on a nation's silo (`SiloStrike.test.ts`)
+
+**Claim:** an Atom or Hydrogen bomb on a nation's silo: is the silo destroyed, does a SAM in range stop it, and what happens to the alliance.
+
+**VERDICT: pinned (new).**
+
+**Truth:**
+
+- **The silo:** a bomb deletes every unit strictly inside its outer radius, Atom 30 and Hydrogen 100, a level-5 silo included. A silo exactly on the radius stays (`NukeExecution.ts:464-483`: `euclideanDistSquared < outer²`).
+- **Troops:** for each tile the blast takes, the owner loses 5 × troops / tiles left (`Config.ts:1177-1185`, floored by `PlayerImpl.removeTroops`), so taking k of n tiles leaves about ((n − k)/n)⁵ of its troops. A Hydrogen bomb deep inside a 40,000-tile nation took 69% of its land and left 4,623 of its 1M troops.
+- **Through a SAM:** one Atom bomb at a covered silo is shot down; two at once kill it (the SAM 40 tiles off survives). A Hydrogen bomb aimed 80 tiles north of the silo, 89 from its level-1 SAM, is never in the SAM's range and kills both.
+- **The nation afterwards** (`NationMIRVBehavior.ts:138-140`, `:297-309`; `NationNukeBehavior.ts:114-124`):
+  - With no silo, its MIRV and nuke decisions both stop at once.
+  - A silo under construction passes the MIRV gate, but the launch needs a ready silo. Nothing is sent and no 300-tick skip is recorded, but the decision, and its hesitation draw, are spent.
+  - A new silo takes 100 ticks to build. Nations build silos in proportion to their cities (`NationStructureBehavior.ts:634-642`).
+- **Diplomacy at launch** (`NukeExecution.ts:148-197`; `execution/Util.ts:96-129`): every player whose blast weight exceeds 100, or who has a structure within the outer radius, turns −100 toward us and, if allied, loses the alliance (we turn traitor).
+  - So a bomb at an ally's silo always breaks the alliance.
+  - A third party with a structure in the blast turns −100 too. A bystander with a few ring tiles and no structure is untouched.
+  - The bombed nation embargoes us for good at its next decision.
+
+**Test:** 7 cases: the strict radius for both bombs and every structure type; the death formula replayed tile by tile; one and two atoms through a SAM; a Hydrogen bomb outranging the SAM; the nation's MIRV and nuke gates with no silo and with a silo under construction; the relation and alliance effects on the target, a third party and a bystander; the permanent embargo.
+
+**Agent implications:**
+
+- **MIRV denial:** destroy every silo of a nation that can pay for a MIRV. It then cannot MIRV until a new silo is finished, at least 100 ticks later.
+- **A bomb on an ally's silo ends the alliance:** we become a traitor, the ally turns −100 and embargoes us for good.
+
+**Open:** how soon a real nation rebuilds a silo, as a function of its gold and cities.
+
+### 2.16 WP10 — when a nation MIRVs us (`NationMirvTargeting.test.ts`)
+
+**Claim:** the nations' MIRV targeting against us exactly: the ≥ 40% rule and fallout; the city-leader rule and levels; hesitation; affordability; whether allies MIRV us, and whether the MIRV breaks the alliance first.
+
+**VERDICT: pinned (NukeThreat pins the ladder's edges in isolation; this file pins it against us, live).**
+
+**Truth** (`NationMIRVBehavior.ts`, NMB):
+
+- **When:** once per decision tick, before its structures and attacks (`NationExecution.ts:222`).
+- **Gates** (`:133-147`): a silo in any state (one under construction counts); gold ≥ the real price, 25M + 15M × MIRVs launched; then 1 decision in 16 hesitates (NukeThreat predicts each draw).
+- **Targets, first match,** each skipped if a nation MIRVed it in the last 300 ticks:
+  1. whoever has a MIRV in flight at it (`:171-179`), even when someone else holds 40%;
+  2. the largest holder of tiles × 100 ≥ `numLandTiles()` × 40 (`:181-225`). Fallout stays in the land count: 24,000 of 60,000 tiles is a target, 23,999 is not, with or without 1,000 fallout tiles;
+  3. the holder of the most city levels, if more than 8 and ≥ 1.15× the runner-up's (`:227-254`).
+- **City levels are `unitCount(City)`** (`:311-313`; `PlayerImpl.ts:529-546`): the level sum of every City held, cities under construction included (1 each) and captured ones too. Nine City intents made us the city leader two ticks later, while our cap had not moved (the cap counts finished cities only). Tribes and the nation itself rank as runners-up, and a tribe or the nation on top blocks the rule.
+- **Allies are targets, and nothing breaks first.** Live: our ally, with a silo and 25M on the eve of its decision, MIRVed us at that decision. The MIRV spawned in the next tick, aimed at `calculateTerritoryCenter(us)`, and only then did the alliance break (it turned traitor), with −100 both ways, the 25M paid, and the skip recorded at the decision tick. Until the MIRV existed, the alliance held.
+
+**Test:** 6 cases: the live ally MIRV with its exact timing; the 40% edge with and without fallout; nine cities under construction; the level, 8, 1.15×, tribe and nation edges; counter-MIRV ahead of a 40% holder; the gold edge.
+
+**Agent implications:**
+
+- **The MIRV threat is fully readable.** A nation fires with probability 15/16 at its next decision tick (replayable) when all of this holds: it has a finished silo with a free slot, its gold is ≥ 25M + 15M × MIRVs launched, and we hold ≥ 40% of `numLandTiles()` or lead in city levels (more than 8 and ≥ 1.15× the runner-up). An alliance does not protect us.
+- **Starting a City counts toward the city rule before it adds to our cap.**
+- **Before crossing 40% of `numLandTiles()`** (fallout counts as land we do not hold), destroy the silos of every nation that can pay, or keep its gold below the price.
+
+**Open:** team games.
+
+### 2.17 WP10 — when an ally betrays us (`Betrayal.test.ts`)
+
+**Claim:** `maybeBetray` and `isSafeToBetray` exactly: the betrayer's troops against 0.33× the sum of the target, its bordering enemies and its other allies, outgoing attacks included; the juiciest-ally ranking; how often it is evaluated.
+
+**VERDICT: pinned (NationAlliance and NationTargeting pin the three rules at their basic edges; this file pins the exact line, the ranking, the cadence and the MIRV chain).**
+
+**Truth** (`NationAllianceBehavior.ts`, NAB):
+
+- **The line** (`isSafeToBetray :473-491`): the threats are the target, every bordering non-ally, and every other bordering ally (these not counted if the target is a traitor). It is safe iff the sum of their `troops()` plus their outgoing attacks' troops < 0.33 × the betrayer's troops, strictly.
+  - Our attacks in flight count with our home troops.
+  - A bordering tribe counts.
+  - A player that does not border the betrayer is not in the lists.
+- **Bordering** (`AiAttackBehavior.ts:104-133`): the owners of land 4-adjacent to its border, plus `nearby()` (land 5 tiles across water), sorted by troops, ascending. Friends are its allies; everyone else is an enemy, tribes too.
+- **The juiciest ally** (`findJuiciestAlly :464-469`, `NationUtils.ts:52-104`): for each bordering ally, three scores are min-max normalised over the allies and summed:
+  - its structure levels, silos and defense posts excluded;
+  - its empty share of cap, 1 − troops / maxTroops;
+  - its tiles.
+
+  The first highest wins. Rule (a) is for the juiciest only: a weak ally that is not the juiciest is betrayed only by rule (b) (a traitor) or (c) (the only bordering player).
+
+- **Cadence:** it is evaluated only on a decision tick that reaches the strategy list (every 30-49 ticks). Before the list come the free-land send, the 1-in-10 random boat, and the reserve and trigger gates; in the list, retaliate, bots and veryWeak come first.
+  - Below its reserve it never betrays: 20 decisions at 0.99× its reserve, with us at 1% of its troops, and no betrayal.
+  - An attack on it is answered first: in the decision it retaliated against a bordering attacker it betrayed no one, though betraying us was safe.
+- **Effects:** `betray()` is `player.breakAlliance` (`:493-497`). The nation turns traitor (unless we are one), and the break moves no relation, neither ours nor its nor a third party's. Its attack on us follows in the same decision tick, sized troops − reserveRatio × cap, and like every attack it sets our relation to it to −100 (`AttackExecution.ts:188-209`).
+- **The MIRV chain:** an ally that did not betray us at full strength (home troops 1.2× its own) betrayed us at its first decision after a third party's MIRV cut our troops below 0.33× its own. The MIRV left us at about 3% of our cap.
+
+**Test:** 6 cases: the line at its exact edge with attacks, a tribe, another ally and the traitor exemption; the juiciest ranking and rule (a)'s scope; the live betrayal (decision tick, attack size, relations); the reserve gate; retaliation first; the MIRV chain.
+
+**Agent implications:**
+
+- **Keep, for each bordering Impossible ally N:** our home troops + our attacks + N's other bordering players and allies ≥ 0.33 × N's troops, or at least do not be its juiciest bordering ally.
+- **A MIRV at us is also a betrayal trigger:** at about 3% of our cap we fall under 0.33× every strong bordering ally at its next decision.
+- **An ally below its reserve never betrays;** one being attacked answers the attack first.
+
+**Open:** real-game frequency of the list being reached by a strong ally.
+
+### 2.18 WP10 — what we get from a conquest (`ConquestSpoils.test.ts`)
+
+**Claim:** whether conquering or eliminating a nation transfers its gold; what happens to its silos and cities when we capture them.
+
+**VERDICT: pinned (new).**
+
+**Truth:**
+
+- **Gold moves only on annexation** (`GameImpl.conquerPlayer`, `GameImpl.ts:1549-1606`; `Config.ts:735-744`): all of a nation's or tribe's gold, half of a human's (none from a human who never attacked).
+  - The annexation comes when an attack leaves the target under 100 tiles (`AttackExecution.ts:447-452`) or when a cluster that is its whole territory is enclosed (`PlayerExecution.ts:505-513`; EnclosePoke).
+  - Taking tiles moves no gold.
+  - A player that dies another way (its last tiles nuked) has its gold deleted (`PlayerExecution.removeOnDeath`, `:760-777`): nobody gets it.
+- **The remnant** (`AttackExecution.ts:454-481`): the annexed player's remaining tiles are handed out in up to 100 passes, in the order the player holds them. A tile next to ours is ours; only a tile that touches another neighbour and not us goes to that neighbour. Each tile handed to us makes the next one border us, so in the tested case all 150 tiles were ours although a third player bordered the nation too.
+- **Structures** (`PlayerExecution.ts:57-77`; `UnitImpl.setOwner`, `UnitImpl.ts:247-280`): each tick, the owner's `PlayerExecution` hands each of its structures whose tile another player now owns to that player, level kept, and a silo's or SAM's reload queue kept. Defense posts are destroyed instead. A structure on a tile nobody owns is deleted.
+  - **A captured City** counts in our cap at once and in the MIRV city ranking, but not in our City price, which counts min(owned, built by us) (`Config.ts:755-773`).
+  - **A captured silo** fires our bombs: its free slots at once, a slot the nation had fired on the nation's schedule, 90 ticks after its launch.
+
+**Test:** 6 cases: gold on annexation and none before it, and the remnant; death without annexation; capture with levels and queues, defense posts destroyed; the captured City in cap, ranking and price; the captured silo firing; a structure on an unowned tile.
+
+**Agent implications:**
+
+- **Kill a rich nation by annexation, never by nukes alone:** only an annexation pays out its gold.
+- **Capturing cities raises our cap for free and does not raise our City price,** but it counts toward the MIRV city-leader rule.
+- **A captured silo is a free launcher.**
+
+**Open:** the remnant split on irregular shapes (it depends on the order of the target's tile set).
 
 ---
 
@@ -1128,6 +1369,46 @@ Each item quotes the sentence, says what is wrong, and gives corrected text with
     - **Corrected:** add "A landing's attack nets 1:1 against any attack the target has on us, and any attack the target starts later deletes it 1:1 with no refund; an Impossible nation retaliates first, so a beachhead on a nation is at best an exchange. Every launch rejects the target's pending alliance request to us, and every landing on a nation, even with 0 troops, embargoes us and makes it Hostile. A boat aimed at free land takes its landing tile from whoever holds it, an ally included. `cancel_boat` and landing on our own tile cost 25% of the troops aboard. ETA ≈ the 4-direction route length + 1 ticks."
     - **Evidence:** BoatsAndWin.
 
+### WP10 (the leader phase): corrections to this chapter
+
+These quote this chapter's own sentences (§2.9-§2.11, §5), which the WP10 pins refine.
+
+41. **§2.9: "The betrayed gives -100 and every player in the breaker's nearby set gives -40, even when breaking with a traitor."**
+    - **Imprecise:** that is a break by intent (`BreakAllianceExecution`).
+    - **Corrected:** add "A nation's betrayal, and the break a bomb or a MIRV causes, go through `player.breakAlliance`: the traitor mark only, no −100 from the betrayed and no −40 from anyone. (A bomb or MIRV adds its own −100s; the betrayer's attack sets our relation to it to −100.)"
+    - **Evidence:** Betrayal (the live betrayal), MirvEffect.
+42. **§2.9: "(a) Juiciest ally: betrayed if ally + bordering non-allies + other allies together hold < 0.33x its troops."**
+    - **Imprecise.**
+    - **Corrected:** "(a) Juiciest ally: the one bordering ally with the highest normalised structure levels (silos and defense posts excluded) + empty share of cap + tiles is betrayed if it, the bordering non-allies (tribes included) and the other bordering allies (not counted when it is a traitor), troops plus outgoing attacks, hold < 0.33× its troops, strictly."
+    - **Evidence:** Betrayal.
+43. **§2.10: "Conquest: the conqueror takes all of a tribe's or nation's gold and half of a human's, or nothing from a human who never attacked."**
+    - **Incomplete.**
+    - **Corrected:** add "…when it annexes the player: an attack that leaves it under 100 tiles, or an enclosure. Taking tiles moves no gold, and a player that dies otherwise (its last tiles nuked) loses its gold to nobody."
+    - **Evidence:** ConquestSpoils.
+44. **§2.11: "MIRVs: Gates: a silo, then the gold, then `chance(16)` hesitation."**
+    - **Imprecise.**
+    - **Corrected:** "Gates: a silo in any state (one under construction passes), gold ≥ the real price, then `chance(16)`. The launch then needs a ready silo; a launch that fails sends nothing and records no 300-tick skip, but spends the decision."
+    - **Evidence:** SiloStrike.
+45. **§2.11: "the holder of > 8 city levels and ≥ 1.15x the runner-up's levels"**
+    - **Incomplete.**
+    - **Corrected:** add "(`unitCount`: cities under construction count 1 each and captured ones count too, while the cap counts finished cities only)."
+    - **Evidence:** NationMirvTargeting, ConquestSpoils.
+46. **§2.11: "Allies are valid targets. After any nation MIRVs a target, every nation skips it for 300 ticks."**
+    - **Incomplete.**
+    - **Corrected:** add "The skip is recorded only by a nation's MIRV that was created; our own MIRVs record none. An ally's MIRV breaks the alliance in the tick the MIRV spawns (the tick after the decision), not before."
+    - **Evidence:** MirvEffect, NationMirvTargeting.
+47. **§2.11 (and item 38): "A MIRV has up to 350 warheads."**
+    - **Misleading on its own.**
+    - **Corrected:** add "(at least 55 tiles apart: about one per 2,400 tiles of compact target, 16 on 200 × 200; a big target is left with about 3% of its cap in troops and 65-75% of its land, a small one with more; units between warheads survive)."
+    - **Evidence:** MirvEffect.
+48. **§2.10: "A permanent embargo follows a nuke, a broken alliance or the middle-finger emoji."**
+    - **Imprecise.**
+    - **Corrected:** "At Impossible, a relation at Hostile (< −50) makes the nation embargo us for good at its next decision, unless it already embargoes us (`NationExecution.ts:360-366`), and no branch ever lifts it at Impossible (`:367-380`). Our bomb on it (a structure in the blast or > 100 weighted tiles), our MIRV and our broken alliance each set −100 with no embargo before, so each ends in one. Our attack does not: it sets a temporary embargo first (`AttackExecution.ts:113-123`), which blocks the permanent one, and by the time it lifts (3,001 ticks) decay has taken −100 back above Hostile."
+    - **Evidence:** MirvEffect, SiloStrike, EconomyGold.
+49. **§5.10: "MIRV gates: a silo, the gold, hesitation 1 in 16, 300-tick per-target cooldown; allies are valid targets."**
+    - **Imprecise.** The corrected row is in §5.12 (MIRV threat).
+    - **Evidence:** NationMirvTargeting, SiloStrike, MirvEffect.
+
 ---
 
 ## 4. Chapter errors found in passing (docs/00-09)
@@ -1317,13 +1598,45 @@ Test names are files in `tests/agent/mechanics/`.
 | Loss landing on our own tile, or on `cancel_boat` | 25%                                                                                   | `TSE:32, :248-270`                                | BoatsAndWin |
 | Win                                               | `tiles x 100 > (numLandTiles - fallout) x 80`, checked every 10 ticks after the phase | `WinCheckExecution.ts:38-40, :118-142`; `Cfg:255` | BoatsAndWin |
 
+### 5.12 The leader phase (WP10)
+
+Cite shorthand as above, plus `ME` = `src/core/execution/MIRVExecution.ts`, `NuE` = `src/core/execution/NukeExecution.ts`, `CE` = `src/core/execution/ConstructionExecution.ts`, `PE` = `src/core/execution/PlayerExecution.ts`.
+
+| Name                   | Value or formula                                                                                                                                                                                                                                                                     | Source                                                                          | Pinned by                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | ------------------------------- |
+| Bomb spawn             | in tick t + 2 (t = the tick the `build_unit` execution is added), paid then; a failed check drops it silently, nothing paid, no retry                                                                                                                                                | `CE:37-65, :109-136`; `NuE:199-230`; `ME:94-107`                                | OwnNukes                        |
+| Bomb requirements      | gold ≥ price, alive, no spawn immunity, target not impassable (MIRV: an owned tile), a ready silo (the nearest by Manhattan)                                                                                                                                                         | `PlayerImpl.ts:1449-1464, :1573-1675`                                           | OwnNukes                        |
+| Silo slots             | level L = L slots; each free again 90 ticks after it fired, one per silo per tick; upgrade 1M, its slot free 90 ticks later; a new silo is finished at intent + 102                                                                                                                  | `UnitImpl.ts:558-582, :738-757`; `MissileSiloExecution.ts:24-46`; `Cfg:373-375` | OwnNukes                        |
+| Bomb prices            | Atom 750k and Hydrogen 5M flat; MIRV 25M + 15M × MIRVs launched by anyone, counted at spawn after the launcher paid                                                                                                                                                                  | `Cfg:608-630, :755-773`; `ME:103-107`                                           | OwnNukes                        |
+| Flight                 | `trajectory().length - 1` ticks after spawn: 8 / 10 / 14 / 18 / 24 / 35 / 47 / 70 / 93 / 116 / 139 at 20 / 50 / 100 / 150 / 200 / 300 / 400 / 600 / 800 / 1,000 / 1,200 tiles                                                                                                        | `NuE:282-309`; `PathFinder.Parabola.ts:15-103`                                  | OwnNukes                        |
+| MIRV timeline          | carrier 22-25 ticks (normalised toward 14); warheads land 46-67 ticks after the intent at 300 tiles                                                                                                                                                                                  | `ME:122-129, :226-249, :320-393`                                                | OwnNukes                        |
+| MIRV warheads          | ≤ 350, ≥ 55 apart (Manhattan), within 1,500; about 1 per 2,400 tiles of compact target                                                                                                                                                                                               | `ME:50-53, :175-224, :259-306`                                                  | MirvEffect                      |
+| Warhead blast          | every tile within 12, a coin-flip ring to 18, all to fallout; units strictly within 18 deleted                                                                                                                                                                                       | `NuE:70-142, :464-483`; `Cfg:1103-1106`                                         | MirvEffect                      |
+| Warhead deaths         | per tile 500 × (1 − e^(−2x/M)), x = troops above 3% of cap M: a big target ends at about 3% of its cap (attacks too), keeping 65-75% of its land                                                                                                                                     | `Cfg:1177-1193`; `NuE:416-462`                                                  | MirvEffect                      |
+| Atom / Hydrogen deaths | per tile 5 × troops / tiles left: taking k of n tiles leaves about ((n − k)/n)⁵                                                                                                                                                                                                      | `Cfg:1177-1185`                                                                 | SiloStrike                      |
+| Blast radius on units  | Atom 30, Hydrogen 100, strict (`<`), any level                                                                                                                                                                                                                                       | `NuE:464-483`                                                                   | SiloStrike                      |
+| MIRV threat            | a nation fires 15/16 at a decision if: any silo, gold ≥ the real price, then a ready silo at launch; target ≥ 40% of `numLandTiles()` (fallout counted) or > 8 city levels (under construction and captured included) and ≥ 1.15× the runner-up; allies included; counter-MIRV first | `NMB:133-313`                                                                   | NationMirvTargeting, NukeThreat |
+| An ally's MIRV         | breaks the alliance in the MIRV's spawn tick (decision + 1), not before; it turns traitor; −100 both ways                                                                                                                                                                            | `ME:110-121`                                                                    | NationMirvTargeting             |
+| 300-tick skip          | written only by a nation's MIRV that was created; ours writes none                                                                                                                                                                                                                   | `NMB:257-265, :303-305`                                                         | MirvEffect, SiloStrike          |
+| After our MIRV         | a permanent embargo from the target at its next decision; its bombs at our structures; no player attacks until it is back at its reserve (271 ticks at best, walled in)                                                                                                              | `NE:336-382`; `NNB:289-301`; `AAB:289-290`                                      | MirvEffect                      |
+| Betrayal line          | target + its attacks + bordering non-allies (tribes too) + other bordering allies (not if the target is a traitor), troops plus attacks, < 0.33 × the nation's troops, strict; juiciest ally only                                                                                    | `NAB:404-491`; `NationUtils.ts:52-104`                                          | Betrayal                        |
+| Juiciest ally          | normalised structure levels (no silos, no defense posts) + empty share of cap + tiles; the first highest                                                                                                                                                                             | `NationUtils.ts:52-104`                                                         | Betrayal                        |
+| Betrayal effects       | at a decision tick that reaches the list; traitor; no relation moves; its attack (troops − reserve × cap) in the same tick                                                                                                                                                           | `NAB:493-497`; `AAB:583-608`                                                    | Betrayal                        |
+| Annexation gold        | all of a nation's or tribe's gold, only on annexation (< 100 tiles after our attack, or an enclosure); lost if it dies otherwise                                                                                                                                                     | `GameImpl.ts:1549-1606`; `Cfg:735-744`; `PE:760-777`                            | ConquestSpoils                  |
+| Captured structures    | ours the tick after we take the tile, level and reload queue kept; defense posts destroyed; a captured City: cap yes, MIRV ranking yes, City price no                                                                                                                                | `PE:57-77`; `UnitImpl.ts:247-280`; `Cfg:755-773`                                | ConquestSpoils                  |
+
 ---
 
 ## 6. Still unpinned (derived or cited from code only)
 
 - **Opening combination.** A turn-1 spawn next to a fresh tribe, with a 1-troop attack on that tribe in the same turn, should annex it in tick 3 (the attack inits when the phase ends, `AE:71`, and tribes are not immune). Each half is pinned (SpawnPhaseSingleplayer 4 and 9; TribeStats), but the sequence has not been run as one.
 - **Boxing a nation.** Suppose a partially covered nation is left under 100 tiles with no free land; after the 50-tick immunity, a 1-troop attack would annex it. This follows from `AE:448-482` but is untested, and the nation would attack us first.
-- **Remnant split.** How `handleDeadDefender` splits a remnant between the attacker and third parties.
+- **Remnant split.** How `handleDeadDefender` splits a remnant between the attacker and third parties on irregular shapes. One straight-front case is pinned (ConquestSpoils: all to the attacker); the split follows the order of the target's tile set.
+- **Leader phase (WP10) gaps.**
+  - A MIRV's 350-warhead cap and its 1,500-tile range.
+  - Flights whose arc is clamped at the map's top edge.
+  - How soon a real nation rebuilds a destroyed silo.
+  - The MIRVed nation's paralysis beside free land (one scratch run only: below its reserve for over 2,300 ticks).
 - **Economy.** Port trade volume, how Port income scales with level, and train gold.
 - **Duplication via boats.** The 20-step duplication through `cancel_boat` followed by a land click.
 - **Rate limiter.** Whether `AgentHost`'s rate limiter can move an intent onto the 20-step case.

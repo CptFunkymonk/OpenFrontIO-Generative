@@ -61,12 +61,14 @@ import { Bomb, NukeModel } from "./NukeModel";
 //   at a site strictly inside the outer radius of an enemy bomb's aim
 //   (inboundNukeLevels' geometry; NukeExecution.ts:467-483).
 // - A hold, whatever the site: "bombed" while an enemy bomb in flight is
-//   aimed at our land (bombsInFlight), "attacked" while the attacks on us
-//   carry at least our home troops (heavilyAttacked: the nations' own
-//   isUnderHeavyAttack, NNB :533-544, applied to us). Attackers capture
-//   the cities on the land they take (PlayerExecution captureUnit), and
-//   the nation bombing us fires again at its next decision it can pay
-//   for. quick@20, round 1: Bering Strait g19 ("model"): 5 buys (2.4M)
+//   aimed at our land (bombsInFlight) or a nation that answers us reloads
+//   its silo after a launch (reloadingShooters), "attacked" while the
+//   attacks on us carry at least our home troops (heavilyAttacked: the
+//   nations' own isUnderHeavyAttack, NNB :533-544, applied to us).
+//   Attackers capture the cities on the land they take (PlayerExecution
+//   captureUnit), and the nation bombing us fires again at its next
+//   decision it can pay for. quick@20, round 1: Bering Strait g19
+//   ("model"): 5 buys (2.4M)
 //   between ticks 2765 and 3035 while Alaska fired 6 bombs (2449-2939),
 //   our City levels 0 by 2975; g3 ("allied"): an upgrade 10 ticks after
 //   Alaska's hydrogen launch, inside its blast; Onion g4 ("free"): 7
@@ -85,7 +87,8 @@ import { Bomb, NukeModel } from "./NukeModel";
 // the silo owners' gold as every call does); no ctx.random, no state of its
 // own, so a rollout copy decides as the live policy does. So there is no
 // memory of a bomb once it has landed: the hold lasts while one flies
-// (50-150 ticks in the arena), and "model" then reads the shooter's gold
+// (17-120 ticks in the arena) and while the shooter's silo reloads (90
+// ticks from the launch), and "model" then reads the shooter's gold
 // against its perceived price, which each launch raises (1.5x an atom,
 // 1.25x a hydrogen bomb, NNB :814-823).
 
@@ -131,6 +134,9 @@ export interface CityGate {
   maxLevels: number;
   /** No buy at all now, and why (null: none). */
   hold: GoldHold | null;
+  /** Names of the nations bombing us ("bombed": a bomb in flight at our
+   *  land, or reloadingShooters), for the log. */
+  holdBy: string[];
   /** Whether a City level may go at `tile` (a build's tile, an upgrade's
    *  city). */
   allows(tile: TileRef): boolean;
@@ -167,13 +173,17 @@ export function cityGate(
   const cityRoom = (tile: TileRef, self?: Unit) =>
     capped ? hydroRoom(game, me, tile, o.goldHydroCap, self) : Infinity;
   const flying = bombsInFlight(game, me);
-  const hold: GoldHold | null = flying.some((b) => b.atUs)
-    ? "bombed"
-    : heavilyAttacked(me)
-      ? "attacked"
-      : null;
+  const shooters = nukes === undefined ? [] : reloadingShooters(game, nukes);
+  const bombers = [
+    ...new Set([
+      ...flying.filter((b) => b.atUs).map((b) => b.owner.name()),
+      ...shooters.map((p) => p.name()),
+    ]),
+  ];
+  const hold: GoldHold | null =
+    bombers.length > 0 ? "bombed" : heavilyAttacked(me) ? "attacked" : null;
   const clear = (t: TileRef) => !inBlast(game, flying, t);
-  const base = { budget, maxLevels, cityRoom, hold };
+  const base = { budget, maxLevels, cityRoom, hold, holdBy: bombers };
   switch (o.goldPolicy) {
     case "free":
       return { ...base, arm: "free", allows: clear, blockers: [] };
@@ -260,6 +270,31 @@ export function inBlast(
   return bombs.some(
     (b) => b.r > 0 && game.euclideanDistSquared(b.tile, tile) < b.r * b.r,
   );
+}
+
+/**
+ * The nations bombing us between two launches: named on the rung that
+ * answers now (NukeModel.exposures, not latent), with a finished silo
+ * still reloading, i.e. a launch (or a new level) within
+ * config.SiloCooldown() ticks (90): UnitImpl.launch queues the tick and
+ * MissileSiloExecution drops it once reloaded. Their bombs go at us, and
+ * they fire again at the first decision reloaded and able to pay. quick@20
+ * Bering Strait g19 (round 2's first version held only while a bomb flew):
+ * Alaska launched every 98 ticks (2449-2939), its bombs flew 17-120 ticks,
+ * and "free" bought at 2675, 2885 and 2915, between flights; the next bomb
+ * took the new level each time.
+ */
+export function reloadingShooters(game: Game, nukes: NukeModel): Player[] {
+  const out: Player[] = [];
+  for (const e of nukes.exposures()) {
+    if (e.latent) continue;
+    const N = game.player(e.nation);
+    const reloading = N.units(UnitType.MissileSilo).some(
+      (s) => !s.isUnderConstruction() && s.missileTimerQueue().length > 0,
+    );
+    if (reloading) out.push(N);
+  }
+  return out;
 }
 
 /** The nations' isUnderHeavyAttack (NNB :533-544) applied to us: the

@@ -127,280 +127,288 @@ function launch(w: World, unit: Bomb, tile: TileRef, amount?: number) {
   };
 }
 
-describe("WP10 own launches: what build_unit needs (PlayerImpl.canBuild, nukeSpawn)", () => {
-  it.each(BOMBS)(
-    "%s: spawns, and is paid, in the second tick after the tick its build_unit is added, from the silo's slot",
-    (unit) => {
-      const w = ownWorld();
-      pastImmunity(w);
-      const [silo] = w.p.US.units(UnitType.MissileSilo);
-      const target = w.game.ref(200, 60); // N's land
-      const gold = w.p.US.gold();
-      const cost = price(w, unit, w.p.US);
-      const t = w.game.ticks();
-      send(w, "US", { type: "build_unit", unit, tile: target });
-      tick(w, 2); // ticks t and t + 1: nothing yet, nothing paid
-      expect(w.p.US.units(unit)).toHaveLength(0);
-      expect(w.p.US.gold()).toBe(gold);
-      tick(w); // tick t + 2
-      expect(w.p.US.units(unit)).toHaveLength(1);
-      expect(w.p.US.gold()).toBe(gold - cost);
-      expect(silo.missileTimerQueue()).toEqual([t + 2]);
-      expect(silo.isInCooldown()).toBe(true);
-    },
-  );
-
-  type Fail = (w: World) => { unit: Bomb; tile: TileRef };
-  const failures: [string, Fail][] = [
-    [
-      "no silo",
-      (w) => {
-        w.p.US.units(UnitType.MissileSilo)[0].delete(false);
-        return { unit: UnitType.AtomBomb, tile: w.game.ref(200, 60) };
+describe(
+  "WP10 own launches: what build_unit needs (PlayerImpl.canBuild, nukeSpawn)",
+  { timeout: 60_000 },
+  () => {
+    it.each(BOMBS)(
+      "%s: spawns, and is paid, in the second tick after the tick its build_unit is added, from the silo's slot",
+      (unit) => {
+        const w = ownWorld();
+        pastImmunity(w);
+        const [silo] = w.p.US.units(UnitType.MissileSilo);
+        const target = w.game.ref(200, 60); // N's land
+        const gold = w.p.US.gold();
+        const cost = price(w, unit, w.p.US);
+        const t = w.game.ticks();
+        send(w, "US", { type: "build_unit", unit, tile: target });
+        tick(w, 2); // ticks t and t + 1: nothing yet, nothing paid
+        expect(w.p.US.units(unit)).toHaveLength(0);
+        expect(w.p.US.gold()).toBe(gold);
+        tick(w); // tick t + 2
+        expect(w.p.US.units(unit)).toHaveLength(1);
+        expect(w.p.US.gold()).toBe(gold - cost);
+        expect(silo.missileTimerQueue()).toEqual([t + 2]);
+        expect(silo.isInCooldown()).toBe(true);
       },
-    ],
-    [
-      "gold one short of the price",
-      (w) => {
-        setGold(w.p.US, price(w, UnitType.HydrogenBomb, w.p.US) - 1n);
-        return { unit: UnitType.HydrogenBomb, tile: w.game.ref(200, 60) };
-      },
-    ],
-    [
-      "the silo's only slot in use",
-      (w) => {
-        w.p.US.units(UnitType.MissileSilo)[0].launch();
-        return { unit: UnitType.AtomBomb, tile: w.game.ref(200, 60) };
-      },
-    ],
-    [
-      "an impassable target tile",
-      (w) => ({ unit: UnitType.AtomBomb, tile: w.game.ref(131, 91) }),
-    ],
-    [
-      "a MIRV at an unowned tile",
-      (w) => ({ unit: UnitType.MIRV, tile: w.game.ref(140, 60) }),
-    ],
-    [
-      "a MIRV at a water tile",
-      (w) => ({ unit: UnitType.MIRV, tile: w.game.ref(122, 22) }),
-    ],
-  ];
-
-  it.each(failures)(
-    "dropped silently, nothing paid, never retried: %s",
-    (_name, fail) => {
-      const w = ownWorld();
-      pastImmunity(w);
-      const { unit, tile } = fail(w);
-      const gold = w.p.US.gold();
-      const r = launch(w, unit, tile);
-      tick(w, 20);
-      expect(r.spawned).toBe(0);
-      expect(w.p.US.units(unit)).toHaveLength(0);
-      expect(w.p.US.gold()).toBe(gold);
-    },
-  );
-
-  it("dropped during spawn immunity (the 50 ticks after the spawn phase), for every player", () => {
-    const w = ownWorld();
-    expect(w.game.isSpawnImmunityActive()).toBe(true);
-    const r = launch(w, UnitType.AtomBomb, w.game.ref(200, 60));
-    expect(r).toEqual({ spawned: 0, paid: 0n });
-    expect(w.config.spawnImmunityDuration()).toBe(50);
-    pastImmunity(w);
-    expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(1);
-  });
-
-  it("a silo under construction has no slot: 100 ticks after its build_unit it is finished and fires", () => {
-    const w = ownWorld({ silo: false });
-    pastImmunity(w);
-    const t = w.game.ticks();
-    send(w, "US", {
-      type: "build_unit",
-      unit: UnitType.MissileSilo,
-      tile: w.game.ref(20, 60),
-    });
-    tick(w, 2);
-    const [silo] = w.p.US.units(UnitType.MissileSilo);
-    expect(silo.isUnderConstruction()).toBe(true);
-    expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(0);
-    expect(w.config.unitInfo(UnitType.MissileSilo).constructionDuration).toBe(
-      100,
     );
-    // Finished at the intent tick + duration + 2 (EconomyGold pins the
-    // timing of every build).
-    while (silo.isUnderConstruction()) tick(w);
-    expect(w.game.ticks() - 1).toBe(t + 102);
-    expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(1);
-  });
 
-  it("targets: an atom or hydrogen bomb may be aimed at any passable tile (a nation's, a tribe's, our own, unowned land, water); a MIRV at any OWNED tile, a tribe's and our own included", () => {
-    const tiles: [string, (w: World) => TileRef][] = [
-      ["nation", (w) => w.game.ref(200, 60)],
-      ["tribe", (w) => w.game.ref(105, 55)],
-      ["own", (w) => w.game.ref(60, 100)],
-      ["unowned", (w) => w.game.ref(140, 60)],
-      ["water", (w) => w.game.ref(122, 22)],
+    type Fail = (w: World) => { unit: Bomb; tile: TileRef };
+    const failures: [string, Fail][] = [
+      [
+        "no silo",
+        (w) => {
+          w.p.US.units(UnitType.MissileSilo)[0].delete(false);
+          return { unit: UnitType.AtomBomb, tile: w.game.ref(200, 60) };
+        },
+      ],
+      [
+        "gold one short of the price",
+        (w) => {
+          setGold(w.p.US, price(w, UnitType.HydrogenBomb, w.p.US) - 1n);
+          return { unit: UnitType.HydrogenBomb, tile: w.game.ref(200, 60) };
+        },
+      ],
+      [
+        "the silo's only slot in use",
+        (w) => {
+          w.p.US.units(UnitType.MissileSilo)[0].launch();
+          return { unit: UnitType.AtomBomb, tile: w.game.ref(200, 60) };
+        },
+      ],
+      [
+        "an impassable target tile",
+        (w) => ({ unit: UnitType.AtomBomb, tile: w.game.ref(131, 91) }),
+      ],
+      [
+        "a MIRV at an unowned tile",
+        (w) => ({ unit: UnitType.MIRV, tile: w.game.ref(140, 60) }),
+      ],
+      [
+        "a MIRV at a water tile",
+        (w) => ({ unit: UnitType.MIRV, tile: w.game.ref(122, 22) }),
+      ],
     ];
-    const fired = (unit: Bomb) =>
-      tiles
-        .filter(([, at]) => {
-          const w = ownWorld();
-          pastImmunity(w);
-          return launch(w, unit, at(w)).spawned === 1;
-        })
-        .map(([name]) => name);
-    const all = tiles.map(([name]) => name);
-    expect(fired(UnitType.AtomBomb)).toEqual(all);
-    expect(fired(UnitType.HydrogenBomb)).toEqual(all);
-    expect(fired(UnitType.MIRV)).toEqual(["nation", "tribe", "own"]);
-  });
 
-  it("slots: the nearest ready silo (Manhattan) fires; a level-L silo has L slots; `amount` sends that many bombs, each needing a slot and the gold; a slot is free again 90 ticks after its launch", () => {
-    const w = ownWorld();
-    const [far] = w.p.US.units(UnitType.MissileSilo); // (20, 60)
-    const near = siloAt(w, w.p.US, 70, 60, 2);
-    pastImmunity(w);
-    const target = w.game.ref(200, 60);
-    // amount 3: the level-2 silo 50 tiles nearer fires twice, then the far
-    // one; 3 x 750k paid.
-    const t = w.game.ticks();
-    const r = launch(w, UnitType.AtomBomb, target, 3);
-    expect(r).toEqual({ spawned: 3, paid: 3n * 750_000n });
-    expect(near.missileTimerQueue()).toEqual([t + 2, t + 2]);
-    expect(far.missileTimerQueue()).toEqual([t + 2]);
-    // All slots in use: a 4th is dropped.
-    expect(launch(w, UnitType.AtomBomb, target).spawned).toBe(0);
-    // Gold for one bomb only: amount 2 sends one.
-    setGold(w.p.US, 750_000n);
-    expect(w.p.US.units(UnitType.MissileSilo).map((s) => s.level())).toEqual([
-      1, 2,
-    ]);
-    // A slot frees when 90 ticks have passed since its launch (tick t + 2),
-    // one per silo per tick: a bomb spawning in tick t + 91 is dropped, one
-    // spawning in tick t + 92 fires (from the nearer silo).
-    while (w.game.ticks() < t + 89) tick(w);
-    const send2 = () =>
+    it.each(failures)(
+      "dropped silently, nothing paid, never retried: %s",
+      (_name, fail) => {
+        const w = ownWorld();
+        pastImmunity(w);
+        const { unit, tile } = fail(w);
+        const gold = w.p.US.gold();
+        const r = launch(w, unit, tile);
+        tick(w, 20);
+        expect(r.spawned).toBe(0);
+        expect(w.p.US.units(unit)).toHaveLength(0);
+        expect(w.p.US.gold()).toBe(gold);
+      },
+    );
+
+    it("dropped during spawn immunity (the 50 ticks after the spawn phase), for every player", () => {
+      const w = ownWorld();
+      expect(w.game.isSpawnImmunityActive()).toBe(true);
+      const r = launch(w, UnitType.AtomBomb, w.game.ref(200, 60));
+      expect(r).toEqual({ spawned: 0, paid: 0n });
+      expect(w.config.spawnImmunityDuration()).toBe(50);
+      pastImmunity(w);
+      expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(1);
+    });
+
+    it("a silo under construction has no slot: 100 ticks after its build_unit it is finished and fires", () => {
+      const w = ownWorld({ silo: false });
+      pastImmunity(w);
+      const t = w.game.ticks();
       send(w, "US", {
         type: "build_unit",
-        unit: UnitType.AtomBomb,
-        tile: target,
-        amount: 2,
+        unit: UnitType.MissileSilo,
+        tile: w.game.ref(20, 60),
       });
-    send2(); // spawns in tick t + 91
-    tick(w);
-    send2(); // spawns in tick t + 92
-    tick(w, 3);
-    // (The first three detonated long ago.)
-    expect(w.p.US.units(UnitType.AtomBomb)).toHaveLength(1);
-    expect(near.missileTimerQueue()).toEqual([t + 2, t + 92]);
-    expect(far.missileTimerQueue()).toEqual([]);
-    expect(w.p.US.gold()).toBe(0n);
-  });
-
-  it("an upgrade adds a slot for 1M, usable 90 ticks after the upgrade", () => {
-    const w = ownWorld();
-    const [silo] = w.p.US.units(UnitType.MissileSilo);
-    pastImmunity(w);
-    expect(price(w, UnitType.MissileSilo, w.p.US)).toBe(1_000_000n);
-    const gold = w.p.US.gold();
-    const t = w.game.ticks();
-    send(w, "US", {
-      type: "upgrade_structure",
-      unit: UnitType.MissileSilo,
-      unitId: silo.id(),
+      tick(w, 2);
+      const [silo] = w.p.US.units(UnitType.MissileSilo);
+      expect(silo.isUnderConstruction()).toBe(true);
+      expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(0);
+      expect(w.config.unitInfo(UnitType.MissileSilo).constructionDuration).toBe(
+        100,
+      );
+      // Finished at the intent tick + duration + 2 (EconomyGold pins the
+      // timing of every build).
+      while (silo.isUnderConstruction()) tick(w);
+      expect(w.game.ticks() - 1).toBe(t + 102);
+      expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60)).spawned).toBe(1);
     });
-    tick(w); // UpgradeStructureExecution upgrades at init, in tick t
-    expect(silo.level()).toBe(2);
-    expect(w.p.US.gold()).toBe(gold - 1_000_000n);
-    expect(silo.missileTimerQueue()).toEqual([t]);
-    // One free slot now: amount 2 sends one.
-    expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60), 2).spawned).toBe(
-      1,
-    );
-    expect(price(w, UnitType.MissileSilo, w.p.US)).toBe(1_000_000n);
-  });
-});
 
-describe("WP10 own launches: the price (Config.ts:608-630)", () => {
-  it("an atom bomb costs 750k and a hydrogen bomb 5M however many we have bought", () => {
-    const w = ownWorld();
-    for (let i = 0; i < 3; i++) siloAt(w, w.p.US, 20, 10 + 20 * i, 3);
-    pastImmunity(w);
-    const target = w.game.ref(200, 60);
-    for (const [unit, cost] of [
-      [UnitType.AtomBomb, 750_000n],
-      [UnitType.HydrogenBomb, 5_000_000n],
-    ] as const) {
-      for (let i = 0; i < 4; i++) {
+    it("targets: an atom or hydrogen bomb may be aimed at any passable tile (a nation's, a tribe's, our own, unowned land, water); a MIRV at any OWNED tile, a tribe's and our own included", () => {
+      const tiles: [string, (w: World) => TileRef][] = [
+        ["nation", (w) => w.game.ref(200, 60)],
+        ["tribe", (w) => w.game.ref(105, 55)],
+        ["own", (w) => w.game.ref(60, 100)],
+        ["unowned", (w) => w.game.ref(140, 60)],
+        ["water", (w) => w.game.ref(122, 22)],
+      ];
+      const fired = (unit: Bomb) =>
+        tiles
+          .filter(([, at]) => {
+            const w = ownWorld();
+            pastImmunity(w);
+            return launch(w, unit, at(w)).spawned === 1;
+          })
+          .map(([name]) => name);
+      const all = tiles.map(([name]) => name);
+      expect(fired(UnitType.AtomBomb)).toEqual(all);
+      expect(fired(UnitType.HydrogenBomb)).toEqual(all);
+      expect(fired(UnitType.MIRV)).toEqual(["nation", "tribe", "own"]);
+    });
+
+    it("slots: the nearest ready silo (Manhattan) fires; a level-L silo has L slots; `amount` sends that many bombs, each needing a slot and the gold; a slot is free again 90 ticks after its launch", () => {
+      const w = ownWorld();
+      const [far] = w.p.US.units(UnitType.MissileSilo); // (20, 60)
+      const near = siloAt(w, w.p.US, 70, 60, 2);
+      pastImmunity(w);
+      const target = w.game.ref(200, 60);
+      // amount 3: the level-2 silo 50 tiles nearer fires twice, then the far
+      // one; 3 x 750k paid.
+      const t = w.game.ticks();
+      const r = launch(w, UnitType.AtomBomb, target, 3);
+      expect(r).toEqual({ spawned: 3, paid: 3n * 750_000n });
+      expect(near.missileTimerQueue()).toEqual([t + 2, t + 2]);
+      expect(far.missileTimerQueue()).toEqual([t + 2]);
+      // All slots in use: a 4th is dropped.
+      expect(launch(w, UnitType.AtomBomb, target).spawned).toBe(0);
+      // Gold for one bomb only: amount 2 sends one.
+      setGold(w.p.US, 750_000n);
+      expect(w.p.US.units(UnitType.MissileSilo).map((s) => s.level())).toEqual([
+        1, 2,
+      ]);
+      // A slot frees when 90 ticks have passed since its launch (tick t + 2),
+      // one per silo per tick: a bomb spawning in tick t + 91 is dropped, one
+      // spawning in tick t + 92 fires (from the nearer silo).
+      while (w.game.ticks() < t + 89) tick(w);
+      const send2 = () =>
+        send(w, "US", {
+          type: "build_unit",
+          unit: UnitType.AtomBomb,
+          tile: target,
+          amount: 2,
+        });
+      send2(); // spawns in tick t + 91
+      tick(w);
+      send2(); // spawns in tick t + 92
+      tick(w, 3);
+      // (The first three detonated long ago.)
+      expect(w.p.US.units(UnitType.AtomBomb)).toHaveLength(1);
+      expect(near.missileTimerQueue()).toEqual([t + 2, t + 92]);
+      expect(far.missileTimerQueue()).toEqual([]);
+      expect(w.p.US.gold()).toBe(0n);
+    });
+
+    it("an upgrade adds a slot for 1M, usable 90 ticks after the upgrade", () => {
+      const w = ownWorld();
+      const [silo] = w.p.US.units(UnitType.MissileSilo);
+      pastImmunity(w);
+      expect(price(w, UnitType.MissileSilo, w.p.US)).toBe(1_000_000n);
+      const gold = w.p.US.gold();
+      const t = w.game.ticks();
+      send(w, "US", {
+        type: "upgrade_structure",
+        unit: UnitType.MissileSilo,
+        unitId: silo.id(),
+      });
+      tick(w); // UpgradeStructureExecution upgrades at init, in tick t
+      expect(silo.level()).toBe(2);
+      expect(w.p.US.gold()).toBe(gold - 1_000_000n);
+      expect(silo.missileTimerQueue()).toEqual([t]);
+      // One free slot now: amount 2 sends one.
+      expect(launch(w, UnitType.AtomBomb, w.game.ref(200, 60), 2).spawned).toBe(
+        1,
+      );
+      expect(price(w, UnitType.MissileSilo, w.p.US)).toBe(1_000_000n);
+    });
+  },
+);
+
+describe(
+  "WP10 own launches: the price (Config.ts:608-630)",
+  { timeout: 60_000 },
+  () => {
+    it("an atom bomb costs 750k and a hydrogen bomb 5M however many we have bought", () => {
+      const w = ownWorld();
+      for (let i = 0; i < 3; i++) siloAt(w, w.p.US, 20, 10 + 20 * i, 3);
+      pastImmunity(w);
+      const target = w.game.ref(200, 60);
+      for (const [unit, cost] of [
+        [UnitType.AtomBomb, 750_000n],
+        [UnitType.HydrogenBomb, 5_000_000n],
+      ] as const) {
+        for (let i = 0; i < 4; i++) {
+          expect(price(w, unit, w.p.US)).toBe(cost);
+          expect(launch(w, unit, target)).toEqual({ spawned: 1, paid: cost });
+        }
+        expect(w.p.US.unitsConstructed(unit)).toBe(4);
         expect(price(w, unit, w.p.US)).toBe(cost);
-        expect(launch(w, unit, target)).toEqual({ spawned: 1, paid: cost });
       }
-      expect(w.p.US.unitsConstructed(unit)).toBe(4);
-      expect(price(w, unit, w.p.US)).toBe(cost);
-    }
-  });
-
-  it("a MIRV costs 25M + 15M per MIRV anyone has launched; the counter moves when a MIRV spawns, after it paid the old price, for every player", () => {
-    const w = ownWorld();
-    siloAt(w, w.p.N, 220, 60);
-    setGold(w.p.N, 100_000_000n);
-    pastImmunity(w);
-    const cost = () => [w.p.US, w.p.N].map((p) => price(w, UnitType.MIRV, p));
-    expect(cost()).toEqual([25_000_000n, 25_000_000n]);
-    expect(launch(w, UnitType.MIRV, w.game.ref(200, 60))).toEqual({
-      spawned: 1,
-      paid: 25_000_000n,
     });
-    expect(w.game.mirvsLaunched()).toBe(1);
-    expect(cost()).toEqual([40_000_000n, 40_000_000n]);
-    // The nation's MIRV at us moves it for us too.
-    w.game.addExecution(new MirvExecution(w.p.N, w.game.ref(40, 60)));
-    tick(w, 2);
-    expect(w.p.N.units(UnitType.MIRV)).toHaveLength(1);
-    expect(w.p.N.gold()).toBe(100_000_000n - 40_000_000n);
-    expect(cost()).toEqual([55_000_000n, 55_000_000n]);
-  });
 
-  it("MIRV denial by price: our MIRV at a tribe raises the nation's price by 15M, and a nation that could pay for its MIRV at us no longer can", () => {
-    // We hold 80 of 240 columns = 33%: give us more so the nation's 40%
-    // rule (NationMIRVBehavior.ts:181-225) names us.
-    const w = ownWorld();
-    for (let x = 80; x < 100; x++)
-      for (let y = 0; y < 120; y++) w.p.US.conquer(w.game.ref(x, y));
-    expect(w.p.US.numTilesOwned() * 100).toBeGreaterThanOrEqual(
-      w.game.numLandTiles() * 40,
-    );
-    siloAt(w, w.p.N, 220, 60);
-    setGold(w.p.N, 30_000_000n);
-    pastImmunity(w);
-    w.dryRun = true; // the nation's MIRVs are recorded, not run
-    const decide = (gameID: string) => {
-      w.game.nationMirvTargets().clear();
-      return brains(w, "N", gameID).mirv.considerMIRV();
-    };
-    // A seed whose first MIRV decision does not hesitate (1 in 16).
-    const seed = [...Array(20).keys()]
-      .map((i) => `denial-${i}`)
-      .find((id) => decide(id));
-    expect(seed).toBeDefined();
-    const planned = w.weapons[w.weapons.length - 1];
-    expect(planned.kind).toBe("mirv");
-    expect(planned.from).toBe(w.p.N);
-    expect(w.game.owner(planned.dst)).toBe(w.p.US);
-    // Our MIRV at the tribe spawns (for real) and moves the price to 40M.
-    w.dryRun = false;
-    expect(launch(w, UnitType.MIRV, w.game.ref(105, 55)).spawned).toBe(1);
-    w.dryRun = true;
-    expect(price(w, UnitType.MIRV, w.p.N)).toBe(40_000_000n);
-    const n = w.weapons.length;
-    expect(decide(seed!)).toBe(false); // the gold gate (NMB :141-143)
-    expect(w.weapons.length).toBe(n);
-  });
-});
+    it("a MIRV costs 25M + 15M per MIRV anyone has launched; the counter moves when a MIRV spawns, after it paid the old price, for every player", () => {
+      const w = ownWorld();
+      siloAt(w, w.p.N, 220, 60);
+      setGold(w.p.N, 100_000_000n);
+      pastImmunity(w);
+      const cost = () => [w.p.US, w.p.N].map((p) => price(w, UnitType.MIRV, p));
+      expect(cost()).toEqual([25_000_000n, 25_000_000n]);
+      expect(launch(w, UnitType.MIRV, w.game.ref(200, 60))).toEqual({
+        spawned: 1,
+        paid: 25_000_000n,
+      });
+      expect(w.game.mirvsLaunched()).toBe(1);
+      expect(cost()).toEqual([40_000_000n, 40_000_000n]);
+      // The nation's MIRV at us moves it for us too.
+      w.game.addExecution(new MirvExecution(w.p.N, w.game.ref(40, 60)));
+      tick(w, 2);
+      expect(w.p.N.units(UnitType.MIRV)).toHaveLength(1);
+      expect(w.p.N.gold()).toBe(100_000_000n - 40_000_000n);
+      expect(cost()).toEqual([55_000_000n, 55_000_000n]);
+    });
 
-describe("WP10 own launches: flight time", () => {
+    it("MIRV denial by price: our MIRV at a tribe raises the nation's price by 15M, and a nation that could pay for its MIRV at us no longer can", () => {
+      // We hold 80 of 240 columns = 33%: give us more so the nation's 40%
+      // rule (NationMIRVBehavior.ts:181-225) names us.
+      const w = ownWorld();
+      for (let x = 80; x < 100; x++)
+        for (let y = 0; y < 120; y++) w.p.US.conquer(w.game.ref(x, y));
+      expect(w.p.US.numTilesOwned() * 100).toBeGreaterThanOrEqual(
+        w.game.numLandTiles() * 40,
+      );
+      siloAt(w, w.p.N, 220, 60);
+      setGold(w.p.N, 30_000_000n);
+      pastImmunity(w);
+      w.dryRun = true; // the nation's MIRVs are recorded, not run
+      const decide = (gameID: string) => {
+        w.game.nationMirvTargets().clear();
+        return brains(w, "N", gameID).mirv.considerMIRV();
+      };
+      // A seed whose first MIRV decision does not hesitate (1 in 16).
+      const seed = [...Array(20).keys()]
+        .map((i) => `denial-${i}`)
+        .find((id) => decide(id));
+      expect(seed).toBeDefined();
+      const planned = w.weapons[w.weapons.length - 1];
+      expect(planned.kind).toBe("mirv");
+      expect(planned.from).toBe(w.p.N);
+      expect(w.game.owner(planned.dst)).toBe(w.p.US);
+      // Our MIRV at the tribe spawns (for real) and moves the price to 40M.
+      w.dryRun = false;
+      expect(launch(w, UnitType.MIRV, w.game.ref(105, 55)).spawned).toBe(1);
+      w.dryRun = true;
+      expect(price(w, UnitType.MIRV, w.p.N)).toBe(40_000_000n);
+      const n = w.weapons.length;
+      expect(decide(seed!)).toBe(false); // the gold gate (NMB :141-143)
+      expect(w.weapons.length).toBe(n);
+    });
+  },
+);
+
+describe("WP10 own launches: flight time", { timeout: 60_000 }, () => {
   it("an atom or hydrogen bomb detonates trajectory().length - 1 ticks after it spawns: 8, 10, 14, 18, 24, 35, 47, 70, 93, 116, 139 ticks at 20 ... 1,200 tiles; the trajectory is the Parabola path an agent can compute beforehand", () => {
     const D = [20, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1200];
     const FLIGHT = [8, 10, 14, 18, 24, 35, 47, 70, 93, 116, 139];
@@ -501,7 +509,7 @@ describe("WP10 own launches: flight time", () => {
   });
 });
 
-describe("WP10 own launches: the target's SAM", () => {
+describe("WP10 own launches: the target's SAM", { timeout: 60_000 }, () => {
   /**
    * 400 x 200: us x < 60 (silos at (30, 100) and (30, 140)); the nation N
    * holds x >= 200, y < 135 with a SAM at (300, 100); the human Z holds

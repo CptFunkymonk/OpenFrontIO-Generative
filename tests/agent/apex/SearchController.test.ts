@@ -13,8 +13,9 @@
  *   the cap stays near 3,000 live-tick equivalents): each is refused and
  *   logged as a `search` line without `chosen=`, which the arena's summary
  *   counts as skipped.
- * - On the plan's triggers (the defaults, S1): the first search is the
- *   floor clock's at searchFrom; every search and refusal names its rule
+ * - On the plan's triggers (the defaults, S1): the first search is at
+ *   searchFrom (the floor clock's, or the stall onset's before it); every
+ *   search and refusal names its rule
  *   (`why=`); the budget is never overrun (the tick-equivalents spent by
  *   each tick stay within R·(t − searchFrom) + searchSlack); the checks
  *   are the plan's (+50, +150, +300, +600 and the judged horizon) and all
@@ -127,7 +128,7 @@ describe("SearchController", () => {
     });
   }, 300_000);
 
-  test("the plan's triggers: the floor first, every rule named, the budget kept, the plan's checks matched", async () => {
+  test("the plan's triggers: the first at searchFrom, every rule named, the budget kept, the plan's checks matched", async () => {
     const o = { search: true, searchFrom: 2200 };
     const arena = await apexArena({
       gameID: gameIDFor("quick", 4),
@@ -140,7 +141,11 @@ describe("SearchController", () => {
     const tries = lines.filter(
       (m) => m.startsWith("search ") || m.startsWith("search-none "),
     );
-    expect(tries[0]).toMatch(/^search 2200 floor cands=\d+ chosen=\S+ .* why=floor$/);
+    // The first search is at searchFrom: the floor clock's, or a trigger
+    // before it in T1-T7 order (Onion g4 is in stall there).
+    expect(tries[0]).toMatch(
+      /^search 2200 (floor|stall) cands=\d+ chosen=\S+ .* why=(floor|onset)$/,
+    );
     for (const m of tries) expect(m, m).toMatch(/ why=\S+( reserve=\d+)?$/);
 
     // The budget, search by search.
@@ -152,7 +157,9 @@ describe("SearchController", () => {
       const te = /\bte=(\d+)/.exec(m);
       if (te !== null) spent += Number(te[1]);
       // Rounded per search: allow one tick-equivalent each.
-      expect(spent, m).toBeLessThanOrEqual(R * (t - 2200) + slack + tries.length);
+      expect(spent, m).toBeLessThanOrEqual(
+        R * (t - 2200) + slack + tries.length,
+      );
     }
     expect(spent).toBeGreaterThan(0);
 
@@ -166,9 +173,7 @@ describe("SearchController", () => {
       const head = lines.find((l) => l.startsWith(`search ${d.t} `))!;
       const name = /chosen=(\S+)/.exec(head)![1];
       const row =
-        name === "base"
-          ? d.rows[0]
-          : d.rows.find((r) => r.name === name)!;
+        name === "base" ? d.rows[0] : d.rows.find((r) => r.name === name)!;
       judged.set(d.t, row.j ?? row.h);
     }
     const checks = lines.filter((m) => m.startsWith("search-check "));
@@ -177,10 +182,9 @@ describe("SearchController", () => {
       const [, t0, h, verdict] = c.split(" ");
       expect(verdict, c).toBe("ok");
       const at = Number(h.slice(1));
-      expect(
-        [50, 150, 300, 600, judged.get(Number(t0))].includes(at),
-        c,
-      ).toBe(true);
+      expect([50, 150, 300, 600, judged.get(Number(t0))].includes(at), c).toBe(
+        true,
+      );
     }
     const stats = seatLogStats(arena.host.logs).search!;
     expect(stats.searches + stats.skipped).toBe(

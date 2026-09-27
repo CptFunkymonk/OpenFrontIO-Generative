@@ -1,91 +1,74 @@
 {
-  "_doc": "Package WP2 (docs/14-m4-plan.md \u00a72.6): a fork's cost in live-tick equivalents per map, phi = ms / live ms per tick (the runner's tick plus apex's think, mean of the 200 ticks before the probe), the median over probes at ticks 2400, 4800 and 7200 of quick-suite games 0-15 (apex defaults). fork: ctx.fork() (a structural clone of the live game, AgentHost's default forkMode); take: GameFork.source() on that fork; clone: ForkSource.fork(). A search pays fork + take + clone for its first rollout and a clone for each other. Maps not listed cost the fallback (above the 90th percentile of the measured maps).",
-  "measured": "PROVISIONAL (take, clone from ab3208e; fork = take + clone)",
+  "_doc": "Package WP2 (docs/14-m4-plan.md \u00a72.6): a fork's cost in live-tick equivalents per map. A search forks the live game once (ctx.fork(), a structural clone at AgentHost's default forkMode: a take of the live game's state and a clone), takes that fork's state (GameFork.source()) and clones it for each rollout (ForkSource.fork()). first: the first rollout's fork (ctx.fork(), the take and its clone); each: every other rollout's clone. Measured in situ: the median over a map's searches of the fork's wall ms over the base rollout's ms per tick (a rollout step is a live tick's work: the game's tick and the policy copy's think), from the searches' own search-rows (forkMs, simMs, h). Maps not listed cost the fallback (about the 90th percentile of the measured maps).",
+  "measured": "2026-09-27 at 84ae424 (clone ctx.fork): in situ, the S1 screen's searches (quick@20 games 0-13, /tmp/claude-0/m4-screen/s1-84ae424; /tmp/claude-0/pkg-WP2/r2/phi_insitu.py); Giant World Map and North America from the fork bench at 8de76f2 (/tmp/claude-0/pkg-WP2/r2/phi-head.jsonl: ctx.fork() + take + clone, and a clone), whose repeated forks under load run up to 2x the in-situ cost",
   "fallback": {
-    "fork": 30,
-    "take": 4,
-    "clone": 25
+    "first": 60,
+    "each": 25
   },
   "maps": {
     "Africa": {
-      "fork": 13,
-      "take": 1,
-      "clone": 12
+      "first": 40,
+      "each": 16
     },
     "Alps": {
-      "fork": 20,
-      "take": 1,
-      "clone": 19
+      "first": 43,
+      "each": 28
     },
     "ArchipelagoSea": {
-      "fork": 18,
-      "take": 1,
-      "clone": 17
+      "first": 26,
+      "each": 7
     },
     "Bering Strait": {
-      "fork": 15,
-      "take": 2,
-      "clone": 13
+      "first": 35,
+      "each": 12
     },
     "Europe": {
-      "fork": 13,
-      "take": 1,
-      "clone": 12
+      "first": 30,
+      "each": 14
     },
     "Four Islands": {
-      "fork": 44,
-      "take": 3,
-      "clone": 41
+      "first": 89,
+      "each": 23
     },
     "Giant World Map": {
-      "fork": 15,
-      "take": 1,
-      "clone": 14
+      "first": 44,
+      "each": 21
     },
     "Japan": {
-      "fork": 20,
-      "take": 2,
-      "clone": 18
+      "first": 52,
+      "each": 13
     },
     "Middle East": {
-      "fork": 18,
-      "take": 1,
-      "clone": 17
+      "first": 48,
+      "each": 20
     },
     "Mississippi River": {
-      "fork": 15,
-      "take": 1,
-      "clone": 14
+      "first": 31,
+      "each": 12
     },
     "North America": {
-      "fork": 9,
-      "take": 1,
-      "clone": 8
+      "first": 44,
+      "each": 21
     },
     "Onion": {
-      "fork": 25,
-      "take": 4,
-      "clone": 21
+      "first": 57,
+      "each": 17
     },
     "Passage": {
-      "fork": 11,
-      "take": 1,
-      "clone": 10
+      "first": 37,
+      "each": 16
     },
     "The Box": {
-      "fork": 13,
-      "take": 1,
-      "clone": 12
+      "first": 51,
+      "each": 24
     },
     "World": {
-      "fork": 10,
-      "take": 1,
-      "clone": 9
+      "first": 24,
+      "each": 10
     },
     "Yellow Sea": {
-      "fork": 13,
-      "take": 1,
-      "clone": 12
+      "first": 43,
+      "each": 12
     }
   }
 }

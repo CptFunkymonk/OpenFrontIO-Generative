@@ -472,6 +472,34 @@ describe("with the midgame web (webMidgame)", () => {
   });
 });
 
+describe("webKeepAsk off: the renew without the strong rule's asks", () => {
+  test("a strong ally outside the web is not asked to extend, and still gets the fresh request at its lapse", () => {
+    const w = synth(
+      { webKeepStrong: true, webKeepAsk: false, web: false },
+      { [A]: 1.05 },
+    );
+    w.game.addExecution(new PlayerExecution(w.us));
+    while (w.game.ticks() < 110) w.h.step();
+    ally(w, A);
+    const e = w.game.ticks() + 400;
+    expireAt(w, A, e);
+    let lapsedAt = -1;
+    const sent = run(w, e + 40, (tick) => {
+      if (lapsedAt < 0 && !w.us.isAlliedWith(w.nation(A))) lapsedAt = tick + 1;
+    });
+    expect(w.s.web.allySet).not.toContain(A);
+    expect(extensionsTo(sent, A)).toEqual([]);
+    expect(diplomacyMemory(w.s).strong!.map((r) => r.id)).toEqual([]);
+    expect(diplomacyMemory(w.s).stats.keepAsks).toBeUndefined();
+    const requests = sent.filter(
+      (x) => x.i.type === "allianceRequest" && x.i.recipient === A,
+    );
+    expect(requests).toHaveLength(1);
+    expect(requests[0].tick).toBe(lapsedAt);
+    expect(diplomacyMemory(w.s).stats.keepRenews).toBe(1);
+  });
+});
+
 describe("the renew of a strong ally (webKeepRenew)", () => {
   function lapse(
     options: Record<string, unknown>,

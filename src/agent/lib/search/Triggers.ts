@@ -9,7 +9,7 @@ import type { PlayerID } from "../../../core/game/Game";
 // |              | left); once per alliance term; not held back by minGap
 // |              | (its window is only lapseLead − extendLead ticks); a
 // |              | refused one waits for the tick the budget can pay (the
-// |              | controller's retry), inside the window                |
+// |              | controller's retry), or the window's last tick        |
 // | T2 chain     | `chain` ticks after an act                            |
 // | T3 stall     | stall onset; then every stallEvery ticks in stall (from
 // |              | the last look: a search, or no plan), or
@@ -31,8 +31,8 @@ import type { PlayerID } from "../../../core/game/Game";
 //
 // T2, T3, T6 and T7 also wait minGap ticks after the last try (a search, a
 // budget refusal or a trigger with no plan). The stall re-searches (every,
-// change), T6 and every T7 but the first are low priority: the budget
-// keeps searchReserve back from them for the rest. A try that did not run
+// and a change other than an ally lost), T6 and every T7 but the first are
+// low priority: the budget keeps searchReserve back from them for the rest. A try that did not run
 // uses up only its own trigger's condition (a refused low-priority one
 // holds the low-priority triggers until the budget can pay it).
 //
@@ -200,6 +200,11 @@ export class Triggers {
     const chainWait = this.chainAt !== null && t < this.chainAt;
     if (gap && obs.inStall && !chainWait) {
       if (this.stallOnset) return { name: "stall", why: "onset", low: false };
+      // An ally lost (its alliance ended, not by our act: the chain covers
+      // those) is high priority: former allies sent most of the troops sent
+      // at us (plan.md §2.7).
+      const lost = this.allyLost(obs);
+      if (lost !== null) return { name: "stall", why: lost, low: false };
       if (low && sinceLook >= p.stallEvery) {
         return { name: "stall", why: "every", low: true };
       }
@@ -280,20 +285,23 @@ export class Triggers {
   /**
    * The budget refused the search at this tick: it uses up its own
    * trigger's condition only. `retryAt`: the tick the budget can pay it; a
-   * refused T1 waits for it while its window is open, a refused
-   * low-priority trigger holds every low-priority one until then.
+   * refused T1 is tried again then, or at its window's last tick if that
+   * comes first (then given up); a refused low-priority trigger holds
+   * every low-priority one until then.
    */
   refused(obs: TriggerObs, fired: Fired, retryAt: number): void {
     const t = obs.t;
     this.lastTry = t;
     switch (fired.name) {
-      case "end":
-        if (fired.closes !== undefined && retryAt < fired.closes) {
-          this.endRetry.set(fired.term!, retryAt);
-        } else {
-          this.ends.add(fired.term!);
-        }
+      case "end": {
+        // Retried when the budget can pay it, or at the window's last tick
+        // at the latest (where the lapse's look is shortest); given up
+        // after that.
+        const at = Math.min(retryAt, (fired.closes ?? t) - 1);
+        if (at > t) this.endRetry.set(fired.term!, at);
+        else this.ends.add(fired.term!);
         break;
+      }
       case "chain":
         this.chainAt = null;
         break;
@@ -348,7 +356,20 @@ export class Triggers {
     }
   }
 
-  /** T3's sooner rule: what changed since the last search, or null. */
+  /** T3's sooner rule, high priority: a bordering nation allied at the
+   *  last search and unallied now ("lost:<id>"), or null. */
+  private allyLost(obs: TriggerObs): string | null {
+    for (const n of obs.nations) {
+      if (!n.allied && this.nbrs.get(n.id)?.allied === true) {
+        return `lost:${n.id}`;
+      }
+    }
+    return null;
+  }
+
+  /** T3's sooner rule, low priority: what else changed since the last
+   *  search (an ally made, an unallied neighbour new, troops fallen), or
+   *  null. */
   private stallChanged(obs: TriggerObs): string | null {
     for (const n of obs.nations) {
       const was = this.nbrs.get(n.id);

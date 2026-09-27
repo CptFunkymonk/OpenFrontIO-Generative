@@ -1299,6 +1299,14 @@ export class NationModel {
     return this.byId.get(n)?.st;
   }
 
+  /** Package WP10b (lib/LeaderGuard.ts): the smallIDs of N.nearby()'s
+   *  players at its last full refresh, in nearby() order; undefined before
+   *  one. Read only. */
+  nearbyOf(n: PlayerID): readonly number[] | undefined {
+    const tr = this.byId.get(n);
+    return tr !== undefined && tr.st.full ? tr.nearby : undefined;
+  }
+
   /** The tracked state after at least one full refresh (one lazily if none
    *  happened yet). */
   private full(n: PlayerID): { N: Player; tr: Tracked } | null {

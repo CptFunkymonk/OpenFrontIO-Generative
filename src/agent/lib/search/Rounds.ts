@@ -188,8 +188,7 @@ export function breakGate(
   minContact: number,
 ): { a: boolean; b: boolean } {
   const a = brk.ended.some(
-    (e) =>
-      e.id !== target && e.early && e.traitor && !brk.alliedWith(e.id),
+    (e) => e.id !== target && e.early && e.traitor && !brk.alliedWith(e.id),
   );
   let b = false;
   if (!brk.dead) {
@@ -297,7 +296,11 @@ export function runRounds(
     if (!j.cand.strongCheck || p.HStrong <= p.H) continue;
     j.roll.advance(j.cand.lastSend + 1, false);
     const s = j.roll.sent;
-    if (s === null || !s.targetAlive || s.targetTroops < p.strongShare * s.home) {
+    if (
+      s === null ||
+      !s.targetAlive ||
+      s.targetTroops < p.strongShare * s.home
+    ) {
       continue;
     }
     j.strong = true;

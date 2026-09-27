@@ -3,10 +3,10 @@
  * equivalents.
  *
  * Claims:
- * - φ comes from the committed per-map table: a search's first rollout
- *   pays ctx.fork() (a structural clone of the live game), the take of that
- *   fork and its clone, every other rollout a clone; a map the table lacks
- *   costs the fallback.
+ * - φ comes from the committed per-map table (measured in situ): a
+ *   search's first rollout pays ctx.fork() (a structural clone of the live
+ *   game), the take of that fork and its clone, every other rollout a
+ *   clone; a map the table lacks costs the fallback.
  * - restCost prices a search up front from the plan's horizons: each
  *   candidate's fork and round 1, the longest `keep` non-break horizons (a
  *   strike now on a target known to be strong at lastSend + HStrong), the
@@ -28,7 +28,6 @@ import {
   DEGRADE,
   horizonBound,
   phiFor,
-  phiRow,
   restCost,
   SearchBudget,
 } from "../../../src/agent/lib/search/Budget";
@@ -74,25 +73,19 @@ const SET = [
 ];
 
 describe("search budget", () => {
-  test("φ: fork + take + clone, then a clone; the table for every quick map, the fallback otherwise", () => {
+  test("φ: the table for every quick map, the fallback otherwise", () => {
     for (const map of SUITES.quick.maps!) {
-      const row = (
-        PHI.maps as Record<string, { fork: number; take: number; clone: number }>
-      )[map];
+      const row = (PHI.maps as Record<string, { first: number; each: number }>)[
+        map
+      ];
       expect(row, map).toBeDefined();
-      expect(phiRow(map)).toEqual(row);
-      expect(phiFor(map)).toEqual({
-        first: row.fork + row.take + row.clone,
-        each: row.clone,
-      });
-      // A clone costs tens of live ticks at most, not a restore's hundreds.
-      expect(row.clone, map).toBeLessThan(60);
+      expect(phiFor(map)).toEqual(row);
+      // ctx.fork() is a structural clone: tens of live ticks, not a
+      // restore's hundreds; the first rollout's costs more than a clone.
+      expect(row.first, map).toBeLessThan(100);
+      expect(row.each, map).toBeLessThanOrEqual(row.first);
     }
-    const f = PHI.fallback;
-    expect(phiFor("No Such Map")).toEqual({
-      first: f.fork + f.take + f.clone,
-      each: f.clone,
-    });
+    expect(phiFor("No Such Map")).toEqual(PHI.fallback);
   });
 
   test("horizon bounds: a break's whole look, a known strong target's long one", () => {

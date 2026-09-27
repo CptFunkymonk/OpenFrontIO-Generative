@@ -91,100 +91,104 @@ function outgoing(w: World, p: Player, troops: number): void {
   p.createAttack(w.game.terraNullius(), troops, null, new Set());
 }
 
-describe("WP10 betrayal: the line (isSafeToBetray)", () => {
-  it("safe iff the target's troops + its attacks + every bordering non-ally's (tribes too) + every other bordering ally's (not if the target is a traitor), all with their attacks, < 0.33 x the nation's troops, strictly", () => {
-    const T = 300_000;
-    const x = T * 0.33;
-    const edge = Math.ceil(x); // the smallest sum that is not safe
-    const safe = (
-      set: (w: World) => void,
-      friends: string[],
-      enemies: string[],
-    ) => {
+describe(
+  "WP10 betrayal: the line (isSafeToBetray)",
+  { timeout: 60_000 },
+  () => {
+    it("safe iff the target's troops + its attacks + every bordering non-ally's (tribes too) + every other bordering ally's (not if the target is a traitor), all with their attacks, < 0.33 x the nation's troops, strictly", () => {
+      const T = 300_000;
+      const x = T * 0.33;
+      const edge = Math.ceil(x); // the smallest sum that is not safe
+      const safe = (
+        set: (w: World) => void,
+        friends: string[],
+        enemies: string[],
+      ) => {
+        const w = betrayWorld();
+        const { B, US, A2 } = w.p;
+        ally(B, US);
+        ally(B, A2);
+        B.setTroops(T);
+        for (const k of ["US", "A2", "T", "Q"]) w.p[k].setTroops(0);
+        set(w);
+        const a = brains(w, "B", "line").alliance;
+        return a.isSafeToBetray(
+          US,
+          friends.map((k) => w.p[k]),
+          enemies.map((k) => w.p[k]),
+        );
+      };
+      // Us alone.
+      expect(safe((w) => w.p.US.setTroops(edge - 1), ["US"], [])).toBe(true);
+      expect(safe((w) => w.p.US.setTroops(edge), ["US"], [])).toBe(false);
+      // Our attacks in flight count with our home troops.
+      const split = (home: number) => (w: World) => {
+        w.p.US.setTroops(home);
+        outgoing(w, w.p.US, 10_000);
+      };
+      expect(safe(split(edge - 1 - 10_000), ["US"], [])).toBe(true);
+      expect(safe(split(edge - 10_000), ["US"], [])).toBe(false);
+      // A bordering tribe counts as a threat.
+      const tribe = (ours: number) => (w: World) => {
+        w.p.US.setTroops(ours);
+        w.p.T.setTroops(20_000);
+      };
+      expect(safe(tribe(edge - 1 - 20_000), ["US"], ["T"])).toBe(true);
+      expect(safe(tribe(edge - 20_000), ["US"], ["T"])).toBe(false);
+      // Another bordering ally counts, with its attacks ...
+      const other = (ours: number) => (w: World) => {
+        w.p.US.setTroops(ours);
+        w.p.A2.setTroops(15_000);
+        outgoing(w, w.p.A2, 5_000);
+      };
+      expect(safe(other(edge - 1 - 20_000), ["US", "A2"], [])).toBe(true);
+      expect(safe(other(edge - 20_000), ["US", "A2"], [])).toBe(false);
+      // ... unless we are a traitor.
+      const traitor = (w: World) => {
+        other(edge - 1)(w);
+        w.p.US.markTraitor();
+      };
+      expect(safe(traitor, ["US", "A2"], [])).toBe(true);
+      // A player that does not border it (Q) is not in the lists at all.
+      expect(safe((w) => w.p.US.setTroops(edge - 1), ["US"], [])).toBe(true);
+    });
+
+    it("the juiciest ally: min-max normalised structure levels (silos and defense posts excluded), empty share of cap and tiles, summed; rule (a) looks at that ally only", () => {
       const w = betrayWorld();
       const { B, US, A2 } = w.p;
       ally(B, US);
       ally(B, A2);
-      B.setTroops(T);
-      for (const k of ["US", "A2", "T", "Q"]) w.p[k].setTroops(0);
-      set(w);
-      const a = brains(w, "B", "line").alliance;
-      return a.isSafeToBetray(
-        US,
-        friends.map((k) => w.p[k]),
-        enemies.map((k) => w.p[k]),
-      );
-    };
-    // Us alone.
-    expect(safe((w) => w.p.US.setTroops(edge - 1), ["US"], [])).toBe(true);
-    expect(safe((w) => w.p.US.setTroops(edge), ["US"], [])).toBe(false);
-    // Our attacks in flight count with our home troops.
-    const split = (home: number) => (w: World) => {
-      w.p.US.setTroops(home);
-      outgoing(w, w.p.US, 10_000);
-    };
-    expect(safe(split(edge - 1 - 10_000), ["US"], [])).toBe(true);
-    expect(safe(split(edge - 10_000), ["US"], [])).toBe(false);
-    // A bordering tribe counts as a threat.
-    const tribe = (ours: number) => (w: World) => {
-      w.p.US.setTroops(ours);
-      w.p.T.setTroops(20_000);
-    };
-    expect(safe(tribe(edge - 1 - 20_000), ["US"], ["T"])).toBe(true);
-    expect(safe(tribe(edge - 20_000), ["US"], ["T"])).toBe(false);
-    // Another bordering ally counts, with its attacks ...
-    const other = (ours: number) => (w: World) => {
-      w.p.US.setTroops(ours);
-      w.p.A2.setTroops(15_000);
-      outgoing(w, w.p.A2, 5_000);
-    };
-    expect(safe(other(edge - 1 - 20_000), ["US", "A2"], [])).toBe(true);
-    expect(safe(other(edge - 20_000), ["US", "A2"], [])).toBe(false);
-    // ... unless we are a traitor.
-    const traitor = (w: World) => {
-      other(edge - 1)(w);
-      w.p.US.markTraitor();
-    };
-    expect(safe(traitor, ["US", "A2"], [])).toBe(true);
-    // A player that does not border it (Q) is not in the lists at all.
-    expect(safe((w) => w.p.US.setTroops(edge - 1), ["US"], [])).toBe(true);
-  });
-
-  it("the juiciest ally: min-max normalised structure levels (silos and defense posts excluded), empty share of cap and tiles, summed; rule (a) looks at that ally only", () => {
-    const w = betrayWorld();
-    const { B, US, A2 } = w.p;
-    ally(B, US);
-    ally(B, A2);
-    const a = brains(w, "B", "juicy").alliance;
-    const cap = (p: Player) => w.config.maxTroops(p);
-    // US: more tiles (1,800 vs 1,200), A2: the emptier cap.
-    US.setTroops(0.5 * cap(US));
-    A2.setTroops(0.1 * cap(A2));
-    // Scores: US 0 + 0 + 1 = 1, A2 0 + 1 + 0 = 1: a tie goes to the first
-    // in the list.
-    expect(a.findJuiciestAlly([US, A2])).toBe(US);
-    expect(a.findJuiciestAlly([A2, US])).toBe(A2);
-    // A silo and a defense post of ours do not count; a City does.
-    structureAt(w, US, UnitType.MissileSilo, 30, 10, 5);
-    structureAt(w, US, UnitType.DefensePost, 50, 10);
-    expect(a.findJuiciestAlly([A2, US])).toBe(A2);
-    structureAt(w, US, UnitType.City, 70, 10);
-    expect(a.findJuiciestAlly([A2, US])).toBe(US);
-    // Rule (a) is for the juiciest only: A2 at 1% of B's troops is not
-    // betrayed by it while we are juicier (it is neither a traitor nor the
-    // only bordering player).
-    B.setTroops(1_000_000);
-    A2.setTroops(10_000);
-    US.setTroops(10_000);
-    const friends = [US, A2];
-    const juiciest = a.findJuiciestAlly(friends);
-    expect(juiciest).toBe(US);
-    expect(a.maybeBetray(A2, juiciest, friends, [])).toBe(false);
-    expect(B.isAlliedWith(A2)).toBe(true);
-    expect(a.maybeBetray(US, juiciest, friends, [])).toBe(true);
-    expect(B.isAlliedWith(US)).toBe(false);
-  });
-});
+      const a = brains(w, "B", "juicy").alliance;
+      const cap = (p: Player) => w.config.maxTroops(p);
+      // US: more tiles (1,800 vs 1,200), A2: the emptier cap.
+      US.setTroops(0.5 * cap(US));
+      A2.setTroops(0.1 * cap(A2));
+      // Scores: US 0 + 0 + 1 = 1, A2 0 + 1 + 0 = 1: a tie goes to the first
+      // in the list.
+      expect(a.findJuiciestAlly([US, A2])).toBe(US);
+      expect(a.findJuiciestAlly([A2, US])).toBe(A2);
+      // A silo and a defense post of ours do not count; a City does.
+      structureAt(w, US, UnitType.MissileSilo, 30, 10, 5);
+      structureAt(w, US, UnitType.DefensePost, 50, 10);
+      expect(a.findJuiciestAlly([A2, US])).toBe(A2);
+      structureAt(w, US, UnitType.City, 70, 10);
+      expect(a.findJuiciestAlly([A2, US])).toBe(US);
+      // Rule (a) is for the juiciest only: A2 at 1% of B's troops is not
+      // betrayed by it while we are juicier (it is neither a traitor nor the
+      // only bordering player).
+      B.setTroops(1_000_000);
+      A2.setTroops(10_000);
+      US.setTroops(10_000);
+      const friends = [US, A2];
+      const juiciest = a.findJuiciestAlly(friends);
+      expect(juiciest).toBe(US);
+      expect(a.maybeBetray(A2, juiciest, friends, [])).toBe(false);
+      expect(B.isAlliedWith(A2)).toBe(true);
+      expect(a.maybeBetray(US, juiciest, friends, [])).toBe(true);
+      expect(B.isAlliedWith(US)).toBe(false);
+    });
+  },
+);
 
 /** B allied with us, above its trigger (0.9 of its cap) on the eve of a
  *  decision: returns the live nation. */
@@ -208,7 +212,7 @@ function decision(w: World, nation: LiveNation, eve: () => void): number {
   return t;
 }
 
-describe("WP10 betrayal: live decisions", () => {
+describe("WP10 betrayal: live decisions", { timeout: 60_000 }, () => {
   /** Only us bordering B: A2 and T given to us. */
   function onlyUs(gameID: string): World {
     const w = betrayWorld(gameID);

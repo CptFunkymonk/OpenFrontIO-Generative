@@ -11,6 +11,7 @@ import { TileRef } from "../../../../core/game/GameMap";
 import { CityGate, cityGate } from "../../../lib/GoldPolicy";
 import { Bomb, NukeModel, NukeReason } from "../../../lib/NukeModel";
 import { Prio } from "../../../lib/Scheduler";
+import { leaderCityGate } from "../LeaderHook";
 import type { ApexOptions } from "../options";
 import type { Controller, View } from "../policy";
 import type { ApexState } from "../state";
@@ -1227,7 +1228,10 @@ export class EconomyController implements Controller {
     const today = planCity(v.game, v.me, o, nukes);
     const gate =
       today === "exposed"
-        ? (cityGate(v.game, v.me, o, v.tick, v.nukes) ?? undefined)
+        ? (cityGate(v.game, v.me, o, v.tick, v.nukes) ??
+          // Package WP10b (o.leaderGuard): cap for a betrayal line.
+          leaderCityGate(v, s) ??
+          undefined)
         : undefined;
     const plan =
       gate === undefined ? today : planCity(v.game, v.me, o, nukes, gate);
@@ -1371,8 +1375,9 @@ export class EconomyController implements Controller {
  *  budget, and our City levels against its line. */
 function gateText(v: View, gate: CityGate, why: string): string {
   const line = Number.isFinite(gate.maxLevels) ? `${gate.maxLevels}` : "-";
+  const by = gate.holdBy.length > 0 ? ` by [${gate.holdBy.join(",")}]` : "";
   return (
-    `${v.tick} gold ${gate.arm} ${why}: [${gate.blockers.join(",")}] ` +
+    `${v.tick} gold ${gate.arm} ${why}${by}: [${gate.blockers.join(",")}] ` +
     `gold=${v.me.gold()} budget=${gate.budget} ` +
     `levels=${v.me.unitCount(UnitType.City)}/${line}`
   );

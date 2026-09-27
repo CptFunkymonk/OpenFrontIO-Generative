@@ -12,8 +12,8 @@ import { roundUp } from "./Rounds";
 // phi.json (measured once; the fallback for a map it lacks). A search forks
 // the live game once (ctx.fork(), a structural clone of it: a take of its
 // state and a clone) and clones that fork for each rollout (one take of it,
-// then a clone each): its first rollout costs fork + take + clone, every
-// other one a clone.
+// then a clone each): its first rollout costs φ.first (ctx.fork(), the
+// take and a clone), every other one φ.each (a clone).
 //
 // Before its rollouts a search is priced to every look it plans (restCost):
 // each candidate's fork and round 1, round 2's `keep` longest horizons (a
@@ -39,28 +39,14 @@ export interface Phi {
   each: number;
 }
 
-/** A map's row: ctx.fork() (a structural clone of the live game), a take
- *  of a fork's state (GameFork.source()) and one clone of it
- *  (ForkSource.fork()), in live ticks. */
-export interface PhiRow {
-  fork: number;
-  take: number;
-  clone: number;
-}
-
-/** The table's row for `map`, or the fallback. */
-export function phiRow(map: string): PhiRow {
-  const maps = PHI.maps as Record<string, PhiRow>;
-  return Object.prototype.hasOwnProperty.call(maps, map)
+/** φ for `map`: the table's row (measured in situ, phi.json), or the
+ *  fallback for a map it lacks. */
+export function phiFor(map: string): Phi {
+  const maps = PHI.maps as Record<string, Phi>;
+  const r = Object.prototype.hasOwnProperty.call(maps, map)
     ? maps[map]
     : PHI.fallback;
-}
-
-/** φ for `map`: the first rollout pays ctx.fork(), the take of that fork
- *  and its clone; every other rollout a clone. */
-export function phiFor(map: string): Phi {
-  const r = phiRow(map);
-  return { first: r.fork + r.take + r.clone, each: r.clone };
+  return { first: r.first, each: r.each };
 }
 
 /** What a search's rounds may spend (RoundsParams' horizons). */

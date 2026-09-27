@@ -23,6 +23,7 @@ import {
   hydroThreat,
   inBlast,
   modelThreats,
+  reloadingShooters,
   steamrollLine,
   unalliedArmed,
 } from "../../../src/agent/lib/GoldPolicy";
@@ -354,7 +355,7 @@ describe('apex gold policy (WP8): "model"', () => {
     expect(nukes.bombFor(N.id())).toBeNull();
     const gate = cityGate(game, H, o, game.ticks(), nukes)!;
     // The bomb flies at our land: every arm holds.
-    expect(gate.hold).toBe("bombed");
+    expect([gate.hold, gate.holdBy]).toEqual(["bombed", ["N"]]);
     expect(gate.blockers).toEqual(["N:soon:A"]);
     expect(gate.allows(c.tile())).toBe(false);
     expect(planCity(game, H, o, undefined, gate)).toBe("hold");
@@ -371,12 +372,24 @@ describe('apex gold policy (WP8): "model"', () => {
       ]),
     ).toEqual([[N, [UnitType.AtomBomb], "flying"]]);
     hit.delete();
-    // Landed: the city is gone, no hold; N, at 1M against 1.125M, still
-    // refuses the sites it can aim at.
+    // Landed: the city is gone; N, which names us again, reloads its silo
+    // (90 ticks from the launch): still held.
     for (let i = 0; i < 400 && game.units(UnitType.AtomBomb).length > 0; i++) {
       tick(w);
     }
     expect(c.isActive()).toBe(false);
+    expect(bombsInFlight(game, H)).toEqual([]);
+    expect(nukes.aimOf(N.id()).target).toBe(H.id());
+    expect(reloadingShooters(game, nukes)).toEqual([N]);
+    const reloading = cityGate(game, H, o, game.ticks(), nukes)!;
+    expect([reloading.hold, reloading.holdBy]).toEqual(["bombed", ["N"]]);
+    // Reloaded: no hold; N, at 1M against 1.125M, still refuses the sites
+    // it can aim at.
+    const silo = N.units(UnitType.MissileSilo)[0];
+    for (let i = 0; i < 200 && silo.missileTimerQueue().length > 0; i++) {
+      tick(w);
+    }
+    expect(reloadingShooters(game, nukes)).toEqual([]);
     const after = H.buildUnit(UnitType.City, game.ref(240, 100), {});
     tick(w);
     const later = cityGate(game, H, o, game.ticks(), nukes)!;
@@ -400,8 +413,15 @@ describe('apex gold policy (WP8): "model" in a rollout', () => {
     tick(w, 2);
     live.observe();
     expect(live.launched(N.id())).toEqual({ atoms: 1, hydros: 0 });
-    // The bomb lands on bare land.
-    for (let i = 0; i < 400 && game.units(UnitType.AtomBomb).length > 0; i++) {
+    // The bomb lands on bare land, and N's silo reloads (no hold).
+    const silo = N.units(UnitType.MissileSilo)[0];
+    for (
+      let i = 0;
+      i < 400 &&
+      (game.units(UnitType.AtomBomb).length > 0 ||
+        silo.missileTimerQueue().length > 0);
+      i++
+    ) {
       tick(w);
     }
     // Gold above half the real atom price (375k), below half the
@@ -640,10 +660,15 @@ describe("apex gold policy (WP8 round 2): bombs in flight and heavy attacks, eve
     const c = H.buildUnit(UnitType.City, game.ref(140, 100), {});
     setGold(H, 20_000_000n);
     setGold(N, 5_000_000n);
+    // Z attacks N: N's retaliation rung answers first, so the nation now
+    // bombing Z names us only latently (no reload hold, reloadingShooters).
+    Z.createAttack(N, 1000, null, new Set<TileRef>());
     // N aims at Z's land 5 tiles past the border: 25 tiles from c, inside
     // an atom's outer radius (30).
     brain(w, "N", false).sendNuke(game.ref(115, 100), UnitType.AtomBomb, Z);
     tick(w, 3);
+    expect(nukes.aimOf(N.id()).target).toBe(Z.id());
+    expect(reloadingShooters(game, nukes)).toEqual([]);
     const flying = bombsInFlight(game, H);
     expect(flying.map((b) => [b.owner, b.type, b.r, b.atUs])).toEqual([
       [N, UnitType.AtomBomb, 30, false],

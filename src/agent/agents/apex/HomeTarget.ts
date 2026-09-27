@@ -7,6 +7,7 @@ import {
   NO_DETERRENCE,
 } from "../../lib/Deterrence";
 import { HomeFloors } from "../../lib/Scheduler";
+import { leaderFloor } from "./LeaderHook";
 import type { View } from "./policy";
 import { ApexState } from "./state";
 
@@ -49,6 +50,11 @@ export type HomeTargetInputs = Pick<
    *  one decision old); passing `wm: v.wm` from policy.ts would use the
    *  decision's own scan. */
   wm?: View["wm"];
+  /** o.leaderGuard (package WP10b, LeaderHook.leaderFloor): the game, and
+   *  the live log (null in rollouts); without the game the guard adds
+   *  nothing. */
+  game?: View["game"];
+  log?: ((line: string) => void) | null;
 };
 
 /** o.deterrence: notes the nations of the decision's scan for the next
@@ -129,15 +135,18 @@ export function homeFloors(v: HomeTargetInputs, s: ApexState): HomeFloors {
   const low = Math.max(econ, vw, food);
   const det = deterrenceFloor(v, s, low);
   const H = Math.max(low, det.floor);
+  // Package WP10b (o.leaderGuard): H, the TN floor and the strike floor
+  // hold the bordering allies' betrayal line (0 when off).
+  const lead = leaderFloor(v, s, cap);
   // TODO(spec §5.2, M4): floor(strike) = max(H, H_det_all).
   return {
     cap,
     econ,
     vw,
     food,
-    H,
-    tn: Math.max(vw, o.tnKeep * H),
-    strike: H,
+    H: Math.max(H, lead),
+    tn: Math.max(vw, o.tnKeep * H, lead),
+    strike: Math.max(H, lead),
     det: det.floor,
     detBy: det.by,
     detTerms: det.terms,
