@@ -1,3 +1,4 @@
+import { findJuiciestTarget } from "../../core/execution/nation/NationUtils";
 import {
   Difficulty,
   Game,
@@ -7,7 +8,6 @@ import {
   PlayerType,
   UnitType,
 } from "../../core/game/Game";
-import { findJuiciestTarget } from "../../core/execution/nation/NationUtils";
 import { steamrollLine } from "./GoldPolicy";
 import { Models } from "./Models";
 import { Gate, NationModel } from "./NationModel";

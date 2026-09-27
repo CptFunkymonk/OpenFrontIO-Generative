@@ -11,6 +11,7 @@ import {
   phiFor,
   SearchBudget,
 } from "../../../lib/search/Budget";
+import { mirvThreatState, NUKE_KINDS } from "../../../lib/search/cands/nuke";
 import { Checkpoints } from "../../../lib/search/Checkpoints";
 import {
   BaseView,
@@ -194,7 +195,11 @@ export class SearchController implements LiveSearch {
       dangerCap: o.searchDangerCap,
       share: o.searchShare,
     };
-    this.kinds = new Set(o.searchKinds.split(",").map((k) => k.trim()));
+    const kinds = new Set(o.searchKinds.split(",").map((k) => k.trim()));
+    // Package WP10n: our MIRV/bomb candidates ride on their own kinds, added
+    // to the effective set only when o.searchNukes is on (off: no change).
+    if (o.searchNukes) for (const k of NUKE_KINDS) kinds.add(k);
+    this.kinds = kinds;
     this.naval = GENERATORS.filter(
       (g) =>
         g.wantsNaval !== undefined && g.kinds.some((k) => this.kinds.has(k)),
@@ -326,6 +331,13 @@ export class SearchController implements LiveSearch {
       nations.length === 0 &&
       home >= NAVAL_HOME * cap &&
       this.naval.some((g) => g.wantsNaval!(ctx, host));
+    // Package WP10n T8 (MIRV threat): only when the nuke candidates are on
+    // and the triggers (not the clock) drive the search (off: both false, so
+    // T8 never fires).
+    const mirv =
+      this.o.searchNukes && this.o.searchClock <= 0
+        ? mirvThreatState(ctx.game, me, this.o)
+        : { threat: false, chance: false };
     return {
       t,
       inStall: host.inStall(t),
@@ -334,6 +346,8 @@ export class SearchController implements LiveSearch {
       nations,
       attacks,
       naval,
+      mirvThreat: mirv.threat,
+      mirvChance: mirv.chance,
     };
   }
 

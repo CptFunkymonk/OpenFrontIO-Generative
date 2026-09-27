@@ -6,6 +6,7 @@ import type { DirectiveStep } from "../../agents/apex/state";
 import type { HomeFloors } from "../Scheduler";
 import type { WorldModel } from "../WorldModel";
 import { CORE } from "./cands/core";
+import { NUKE } from "./cands/nuke";
 import type { AttackSeen } from "./Runner";
 import type { DangerModel, Snap } from "./Value";
 
@@ -99,7 +100,7 @@ export interface CandidateGenerator {
 }
 
 /** Every generator, in candidate order. */
-export const GENERATORS: readonly CandidateGenerator[] = [CORE];
+export const GENERATORS: readonly CandidateGenerator[] = [CORE, NUKE];
 
 /** Package WP4's danger terms (Danger.ts), once built: V subtracts
  *  λ·D when searchDangerNow or searchDangerCap is set. Null: the terms are

@@ -1289,6 +1289,51 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  horizon (§2.2): about twice the search-check lines. */
   searchCheckAll: boolean;
 
+  // Package WP10n NUKES: our own MIRV and bomb candidates for the search,
+  // and the MIRV-threat trigger T8 (lib/search/cands/nuke.ts,
+  // lib/search/Triggers.ts; docs/14-m4-plan.md §2.4, §2.8 item 3;
+  // docs/13-mechanics.md §2.13-2.16, §5.12). WP9 found every lost lead fell
+  // to an ally or rival that out-capped us, through the nation MIRV rule, a
+  // two-players-left bomb, or a betrayal. Off by default; when on it adds
+  // the kinds mirv, hydro, atom and silo to the search and fires T8 when a
+  // silo owner is about to be able to MIRV us. The rollout judges whether a
+  // plan denies the MIRV and whether the base policy then takes the land.
+  /** The master switch: our MIRV/bomb candidates and T8. Off: byte-identical
+   *  to search without them. */
+  searchNukes: boolean;
+  /** mirv:N — our MIRV at the most dangerous nation (breaks the alliance,
+   *  cripples it, raises everyone's next MIRV by 15M). */
+  searchNukeMirv: boolean;
+  /** hydro:N / atom:N — a salvo at a nation's finished silos to remove its
+   *  MIRV (MIRV denial). */
+  searchNukeDeny: boolean;
+  /** silo — build a missile silo at an interior tile when we own none and
+   *  gold ≥ searchNukeSiloGold, so a later search can strike or MIRV. */
+  searchNukeSilo: boolean;
+  /** Most nations given a denial salvo (mirv:N is always just the single
+   *  most dangerous one). */
+  searchNukeK: number;
+  /** A nation is a MIRV threat when its gold ≥ the MIRV price − this many
+   *  ticks of its income (T8 and the denial targets: "the gold approaches
+   *  the price soon"); one minute at 10 ticks/second. */
+  searchNukeLead: number;
+  /** T8's magnet gate: we are a MIRV target when we hold at least this
+   *  share of all land tiles (fallout counted, the 40% nation rule's
+   *  denominator). */
+  searchNukeLandShare: number;
+  /** T8's magnet gate: or we are within this many City levels of the
+   *  city-leader MIRV rung (> 8 levels and 1.15× the runner-up). */
+  searchNukeCityLead: number;
+  /** A rival counts as a mirv:N target (out-caps us) when its cap is at
+   *  least this many times ours. */
+  searchNukeCapRatio: number;
+  /** Least gold before the silo candidate builds one (≈ a hydrogen bomb, so
+   *  a denial is possible once it is ready). */
+  searchNukeSiloGold: number;
+  /** Cap on bombs in one denial candidate (its steps' amounts summed),
+   *  besides our ready-slot and gold limits. */
+  searchNukeMaxBombs: number;
+
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
   // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
   // buys City levels. Pinned by tests/agent/mechanics/NukeStructures: an
@@ -1724,6 +1769,19 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchMinGap: 300,
   searchBreakFoe: false,
   searchCheckAll: false,
+
+  // Package WP10n NUKES (off).
+  searchNukes: false,
+  searchNukeMirv: true,
+  searchNukeDeny: true,
+  searchNukeSilo: true,
+  searchNukeK: 2,
+  searchNukeLead: 600,
+  searchNukeLandShare: 0.35,
+  searchNukeCityLead: 1,
+  searchNukeCapRatio: 1.1,
+  searchNukeSiloGold: 5_000_000,
+  searchNukeMaxBombs: 8,
 
   // Package WP8 GOLD.
   goldPolicy: "exposure",

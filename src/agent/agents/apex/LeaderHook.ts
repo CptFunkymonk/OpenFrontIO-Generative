@@ -1,8 +1,8 @@
 import { PlayerID, UnitType } from "../../../core/game/Game";
 import { CityGate, cityGate } from "../../lib/GoldPolicy";
 import {
-  BetrayalLine,
   betrayalFloor,
+  BetrayalLine,
   betrayalLines,
   BetrayalParams,
   emptyGoldHistory,
@@ -245,10 +245,7 @@ export function leaderCityGate(v: View, s: ApexState): CityGate | null {
   if (gate === null) return null;
   return {
     ...gate,
-    maxLevels: Math.min(
-      gate.maxLevels,
-      v.me.unitCount(UnitType.City) + need,
-    ),
+    maxLevels: Math.min(gate.maxLevels, v.me.unitCount(UnitType.City) + need),
     blockers: ["leader", ...gate.blockers],
   };
 }

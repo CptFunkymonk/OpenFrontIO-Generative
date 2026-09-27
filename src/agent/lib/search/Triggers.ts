@@ -47,7 +47,8 @@ export type TriggerName =
   | "attack"
   | "foresight"
   | "naval"
-  | "floor";
+  | "floor"
+  | "nuke";
 
 /** A trigger that fired. */
 export interface Fired {
@@ -102,6 +103,13 @@ export interface TriggerObs {
   attacks: readonly { id: string; attacker: PlayerID; troops: number }[];
   /** A registered boat generator would search now (T6's own test). */
   naval: boolean;
+  /** Package WP10n T8 (MIRV threat): a silo owner is about to be able to
+   *  MIRV us while we are a MIRV magnet (high priority). Absent/false unless
+   *  o.searchNukes. */
+  mirvThreat?: boolean;
+  /** Package WP10n T8: we could MIRV offensively (we can pay and are rank
+   *  ≤ 2); low priority. Absent/false unless o.searchNukes. */
+  mirvChance?: boolean;
 }
 
 const NEVER = -1_000_000_000;
@@ -135,6 +143,8 @@ export class Triggers {
   /** Since when home ≥ navalHome·cap with no bordering nation (T6). */
   private idleSince: number | null = null;
   private lastNaval = NEVER;
+  /** Package WP10n T8: the last MIRV-threat try (its own minGap clock). */
+  private lastMirv = NEVER;
 
   constructor(private readonly p: TriggerParams) {
     this.lastRun = p.from - p.floorTicks;
@@ -196,6 +206,13 @@ export class Triggers {
     if (gap && this.chainAt !== null && t >= this.chainAt) {
       return { name: "chain", why: "chain", low: false };
     }
+    // T8 (MIRV threat, package WP10n): a silo owner about to be able to MIRV
+    // us while we are a MIRV magnet. Urgent (the nation fires at its next
+    // decision, ~30-50 ticks), so high priority, on its own minGap clock so
+    // a recent stall search does not block it (absent unless o.searchNukes).
+    if (obs.mirvThreat === true && t - this.lastMirv >= p.minGap) {
+      return { name: "nuke", why: "threat", low: false };
+    }
     // T3, not while a chain is pending.
     const chainWait = this.chainAt !== null && t < this.chainAt;
     if (gap && obs.inStall && !chainWait) {
@@ -246,6 +263,16 @@ export class Triggers {
       t - this.lastNaval >= p.navalEvery
     ) {
       return { name: "naval", why: "naval", low: true };
+    }
+    // T8 low (package WP10n): we could MIRV offensively (we can pay and are
+    // rank ≤ 2), so a search may consider it even with no imminent enemy MIRV.
+    if (
+      gap &&
+      low &&
+      obs.mirvChance === true &&
+      t - this.lastMirv >= p.minGap
+    ) {
+      return { name: "nuke", why: "chance", low: true };
     }
     // T7.
     if (gap && sinceLook >= p.floorTicks && (low || this.runs === 0)) {
@@ -311,6 +338,9 @@ export class Triggers {
       case "naval":
         this.lastNaval = t;
         break;
+      case "nuke":
+        this.lastMirv = t;
+        break;
       case "stall":
         if (fired.why === "onset") this.stallOnset = false;
         break;
@@ -348,6 +378,7 @@ export class Triggers {
     );
     this.foreseenDone(t);
     if (fired.name === "naval") this.lastNaval = t;
+    if (fired.name === "nuke") this.lastMirv = t;
   }
 
   private foreseenDone(t: number): void {
