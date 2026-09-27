@@ -7,7 +7,7 @@ import type {
   CandidateGenerator,
   SearchView,
 } from "../Registry";
-import { foeClear, keepCandidates } from "./keep";
+import { extensionOut, foeClear, keepCandidates } from "./keep";
 
 // Package WP3 (docs/14-m4-plan.md §2.4, §2.5 round 2b, §3 WP3): the
 // defensive plans of round 2b, for the nations the base rollout shows
@@ -22,9 +22,10 @@ import { foeClear, keepCandidates } from "./keep";
 //
 // For each nation attacking us in the base, largest first attack first:
 // - an ally at the search (it attacks once its alliance ends: Tunica on
-//   Mississippi g10, every base rollout from tick 7,200 on): keep:N and
-//   keep:N+gift (keep.ts), whatever the web's keep list, unless its attack
-//   comes before the expiry (a betrayal no extension stops);
+//   Mississippi g10, every base rollout from tick 7,200 on): keep:N+gift
+//   and keep:N (keep.ts), whatever the web's keep list, unless its attack
+//   comes before the expiry (a betrayal no extension stops); with its
+//   extension out already (keep.ts extensionOut) the gift variant alone;
 // - any other nation: an alliance request now, as the Defense recall
 //   sends it: its foe mark (a plan of ours) cleared, our embargo on it
 //   stopped (an embargo costs −20 relation at each decision that sees it;
@@ -130,7 +131,7 @@ export const DEFEND: CandidateGenerator = {
         const e = al.expiresAt();
         // Its attack before the expiry is a betrayal: no keep stops it.
         if (t + a.h < e) continue;
-        out.push(...keepCandidates(sv, { N, e }, true));
+        out.push(...keepCandidates(sv, { N, e }, !extensionOut(sv, a.id, al)));
         continue;
       }
       if (!kinds.has("ally")) continue;

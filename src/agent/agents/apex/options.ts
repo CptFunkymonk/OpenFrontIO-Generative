@@ -37,6 +37,14 @@ export const STRUCTURE_POLICIES: readonly StructurePolicy[] = [
   "never",
 ];
 export const WEB_RANKS: readonly WebRank[] = ["danger", "nearest"];
+/** Package WP3: the priors of searchRank (lib/search/cands/rank.ts). */
+export type SearchRank = "contact" | "prey" | "yield" | "killsim";
+export const SEARCH_RANKS: readonly SearchRank[] = [
+  "contact",
+  "prey",
+  "yield",
+  "killsim",
+];
 export const STRIKE_WINDOWS: readonly StrikeWindow[] = [
   "W1",
   "W2",
@@ -1379,8 +1387,9 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  within searchLapseLead ticks), ask its extension at the expiry −
    *  extendLead and, if the alliance lapses anyway, a fresh alliance
    *  request the tick after the expiry. For strong allies (see
-   *  searchKeepMinShare) whose extension the web has not asked yet
-   *  (s.web.extensionAsked); the search decides which of them to keep. */
+   *  searchKeepMinShare) whose extension is not out yet (the web's ask,
+   *  s.web.extensionAsked, or ours by any sender, Alliance.agreedToExtend);
+   *  the search decides which of them to keep. */
   searchKeep: boolean;
   /** An ally is strong for keep plans when its troops are at least this
    *  share of our home troops, or its cap at least 1.1 × ours (no home
@@ -1414,8 +1423,9 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  break plans: "contact" (as WP2's core: by contact), "prey" (the
    *  predator's kill cost per tile, lowest first), "yield" (A1's
    *  strikeYield per troop of the strike purse, highest first), "killsim"
-   *  (a 600-tick conquest simulation's tiles per troop, highest first). */
-  searchRank: string;
+   *  (a 600-tick conquest simulation's tiles per troop, highest first).
+   *  One of SEARCH_RANKS (checked at construction). */
+  searchRank: SearchRank;
 
   // Package WP10n NUKES: our own MIRV and bomb candidates for the search,
   // and the MIRV-threat trigger T8 (lib/search/cands/nuke.ts,
@@ -2059,6 +2069,8 @@ function checked(key: keyof ApexOptions, v: unknown): unknown {
       return oneOf(key, v, GOLD_POLICIES);
     case "webRank":
       return oneOf(key, v, WEB_RANKS);
+    case "searchRank":
+      return oneOf(key, v, SEARCH_RANKS);
     case "spawnGrowth": {
       const want = APEX_DEFAULTS.spawnGrowth.length;
       if (!Array.isArray(v) || v.length !== want) {

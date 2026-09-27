@@ -9,7 +9,8 @@
  *   their formulas; a big stack kills a small nation, an empty one takes
  *   nothing.
  * - terrainFactor weighs the contact mix as attackLogic does.
- * - rankMode accepts the four modes and refuses others.
+ * - rankMode accepts the four modes and refuses others; parseApexOptions
+ *   refuses a searchRank outside SEARCH_RANKS at construction (review F4).
  * - rankedNations in "prey" mode orders the scan's nations by the score
  *   and rewrites their contacts so the core's contact filter and sort
  *   follow the rank; nations below searchMinContact that do not attack us
@@ -19,6 +20,8 @@ import { KILL_FREE } from "../../../src/agent/agents/apex/controllers/ExpansionC
 import {
   APEX_DEFAULTS,
   ApexOptions,
+  parseApexOptions,
+  SEARCH_RANKS,
 } from "../../../src/agent/agents/apex/options";
 import { CORE } from "../../../src/agent/lib/search/cands/core";
 import {
@@ -137,6 +140,13 @@ describe("the priors", () => {
     ).toBe(1);
     for (const m of RANK_MODES) expect(rankMode(m)).toBe(m);
     expect(() => rankMode("best")).toThrow(/searchRank/);
+    // Checked at construction too: a typo never runs, nor kills a game.
+    expect(RANK_MODES).toEqual(SEARCH_RANKS);
+    expect(parseApexOptions({ searchRank: "prey" }).searchRank).toBe("prey");
+    expect(() => parseApexOptions({ searchRank: "best" })).toThrow(
+      /searchRank.*must be one of contact, prey, yield, killsim/,
+    );
+    expect(() => parseApexOptions({ searchRank: 1 })).toThrow(/searchRank/);
   });
 });
 
@@ -248,7 +258,7 @@ describe("the ranked core", () => {
       "strike:B:1",
     ]);
     expect(() =>
-      RANKED_CORE.generate(view(NATS, { searchRank: "x" }), NO_BASE),
+      RANKED_CORE.generate(view(NATS, { searchRank: "x" as never }), NO_BASE),
     ).toThrow(/searchRank/);
   });
 });

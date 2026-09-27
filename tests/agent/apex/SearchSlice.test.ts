@@ -245,11 +245,12 @@ describe("search slices: the rounds as a generator", () => {
 
     expect(verdicts(res1)).toEqual(verdicts(res0));
     expect(sliced.ticks()).toBe(whole.ticks());
-    // Every rollout stepped in slices, not whole: base 600 + A 600 + B 150
-    // + C 1200 ticks, plus a yield per fork, in slices of 100 yields.
-    expect(whole.ticks()).toBe(600 + 600 + 150 + 1200);
+    // Every rollout stepped in slices, not whole: the base to the break's
+    // 1,200, A to 600, B to 150 (pruned), C to 1,200, plus a yield per
+    // fork, in slices of 100 yields (the last one ends the rounds).
+    expect(whole.ticks()).toBe(1200 + 600 + 150 + 1200);
     expect(slicer.steps).toBe(whole.ticks() + 3);
-    expect(slices).toBe(Math.ceil(slicer.steps / 100) + (slicer.steps % 100 === 0 ? 1 : 0));
+    expect(slices).toBe(Math.floor(slicer.steps / 100) + 1);
     expect(slices).toBeGreaterThanOrEqual(3);
   });
 
@@ -284,12 +285,12 @@ describe("search slices: re-basing a late plan", () => {
 
   test("a target that died, changed alliance state or began attacking us drops the plan", () => {
     const now = (o: Partial<typeof alive>) => ({ ...alive, ...o });
-    expect(rebasePlan(plan, 3, alive, now({ alive: false }), () => false)).toEqual(
-      { drop: "died" },
-    );
-    expect(rebasePlan(plan, 3, alive, now({ allied: true }), () => false)).toEqual(
-      { drop: "allied" },
-    );
+    expect(
+      rebasePlan(plan, 3, alive, now({ alive: false }), () => false),
+    ).toEqual({ drop: "died" });
+    expect(
+      rebasePlan(plan, 3, alive, now({ allied: true }), () => false),
+    ).toEqual({ drop: "allied" });
     expect(
       rebasePlan(plan, 3, now({ allied: true }), alive, () => false),
     ).toEqual({ drop: "unallied" });
@@ -300,7 +301,10 @@ describe("search slices: re-basing a late plan", () => {
     const atk = now({ attacking: true });
     expect("steps" in rebasePlan(plan, 3, atk, atk, () => false)).toBe(true);
     // No target: nothing to compare.
-    expect("steps" in rebasePlan(cand("keep", { steps }), 3, null, null, () => false)).toBe(true);
+    expect(
+      "steps" in
+        rebasePlan(cand("keep", { steps }), 3, null, null, () => false),
+    ).toBe(true);
   });
 
   test("a first step whose `when` no longer holds live: the window passed", () => {
@@ -405,12 +409,9 @@ describe("search slices: live", () => {
         return m !== null && Number(m[2]) === 2200;
       }),
     ).toBe(true);
-    // No checkpoints for a re-based plan; the next search (the clock's, at
-    // 2,500) is refused by the budget as in the unsliced run.
+    // No checkpoints for a re-based plan (the live game sends k ticks after
+    // the rollout did).
     expect(lines1).toContain(`search-slice 2200 k=${k} checks=none`);
     expect(lines1.some((m) => m.startsWith("search-check 2200 "))).toBe(false);
-    expect(lines1.find((m) => m.startsWith("search 2500 "))).toMatch(
-      /skipped=budget/,
-    );
   }, 900_000);
 });

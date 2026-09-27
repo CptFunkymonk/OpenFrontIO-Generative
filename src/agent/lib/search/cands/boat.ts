@@ -54,9 +54,12 @@ import type {
 //   with share f of purse.available("strike") at the send (spend kind
 //   strike, plan "boat" on N: the Ledger keeps a boat plan while its ship
 //   heads for N's tile, then while the landing's attack on N runs);
-// - judged from the landing (lastSend = the voyage + LANDING_SLACK ticks;
-//   a boat sails a tile a tick, ETA ≈ route + 1 [PIN BoatsAndWin]), and
-//   from HStrong after it when N then holds ≥ searchStrongShare of our home.
+// - judged from about the landing (lastSend = the voyage + LANDING_SLACK
+//   ticks; a boat sails a tile a tick, ETA ≈ route + 1 [PIN BoatsAndWin].
+//   The voyage is the field's cell distance, a lower bound on the boat's
+//   4-direction route, so the strong read and the horizon may start some
+//   ticks before the true landing; review F6), and from HStrong after it
+//   when N then holds ≥ searchStrongShare of our home.
 // The stack gate orders the boats as the core orders strikes: S ≥ N's
 // troops plus its attacks on us, else last.
 //
@@ -66,8 +69,8 @@ import type {
 // memoised per OwnerGrid (the policy builds one every 100 ticks), since the
 // controller asks it every such tick.
 
-/** Ticks added to the voyage estimate for the landing: the judged horizon
- *  counts from it. */
+/** Ticks added to the voyage estimate (a lower bound on the route) for the
+ *  landing: the judged horizon counts from it. */
 export const LANDING_SLACK = 20;
 /** The foe mark holds this many ticks past the landing (a lapse's). */
 export const BOAT_FOE_TICKS = 900;

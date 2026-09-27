@@ -5,6 +5,7 @@ import {
   reachableTiles,
   strikeLoss,
 } from "../../../agents/apex/controllers/StrikeController";
+import { SEARCH_RANKS, SearchRank } from "../../../agents/apex/options";
 import type { TerrainMix } from "../../Models";
 import { nationParams } from "../../NationModel";
 import { retaliationBound, strikeYield } from "../../StrikeWindows";
@@ -46,8 +47,10 @@ import { CORE } from "./core";
 // (contact below the minimum and no attack on us in the base) are left out.
 // Ties: contact, then ascending smallID. "contact" is the core itself.
 
-export const RANK_MODES = ["contact", "prey", "yield", "killsim"] as const;
-export type RankMode = (typeof RANK_MODES)[number];
+/** The modes of searchRank (options.ts SEARCH_RANKS: parseApexOptions
+ *  refuses any other at construction; rankMode below is the backstop). */
+export const RANK_MODES: readonly SearchRank[] = SEARCH_RANKS;
+export type RankMode = SearchRank;
 
 /** The prey score's terms: the cheapest loss per tile at defender density
  *  d is PREY_BASE + PREY_DENSITY·d, times PREY_TERRAIN. */

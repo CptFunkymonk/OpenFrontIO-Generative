@@ -1,4 +1,5 @@
 import {
+  MutableAlliance,
   Player,
   PlayerID,
   PlayerType,
@@ -66,8 +67,21 @@ import type {
 // NationModel) is below searchKeepGiftP and not "traitor", while its
 // relation band is Neutral (Friendly needs no gift; below Neutral +100 may
 // not reach it), it is not embargoed, and the gold is at most
-// searchKeepGiftShare of ours. An ally the web has asked already gets the
-// gift plan alone (its renewal is what differs from the base).
+// searchKeepGiftShare of ours. An ally whose extension is out already
+// (extensionOut: the web asked it this term, or we agreed to extend by any
+// sender, a plan's own `ext:<id>` step included: the Scheduler key it takes
+// refuses the web's offer, which then never sets s.web.extensionAsked;
+// review F2) gets the gift plan alone (its renewal is what differs from the
+// base); so a search after our own extension does not roll keep:Z again.
+//
+// Order (review F1): the gift variant comes before the plain keep. Neither
+// sends anything before the expiry − extendLead, so at searchH1 both tie
+// with the base and the core's lapse:Z, and Rounds' finalist cut
+// (searchKeepFinalists, a stable sort by V at H1) keeps the first of them
+// in generator order: the gift variant is the one that differs from the
+// base when the forecast is low, the only case it is made. With
+// searchKeepFinalists 2 a search with lapse:Z judges one keep variant;
+// a keep screen sets it to 3 to judge lapse, keep and keep+gift together.
 //
 // Every step is read at its tick through the same Scheduler as the web's
 // sends, so a keep and the web's own extension of the same ally dedupe by
@@ -152,6 +166,25 @@ export function giftStep(
   };
 }
 
+/**
+ * Whether an extension of alliance `al` (ours with `id`) is out already this
+ * term: the web's own offer went through (s.web.extensionAsked holds this
+ * expiry), or we agreed to extend by any sender (Alliance.agreedToExtend:
+ * the web's, or a plan's `ext:<id>` step, which the web's flag misses). A
+ * keep plan then adds only its renewal (and a gift): its plain variant is
+ * not made.
+ */
+export function extensionOut(
+  sv: SearchView,
+  id: PlayerID,
+  al: MutableAlliance,
+): boolean {
+  return (
+    sv.host.state.web.extensionAsked[id] === al.expiresAt() ||
+    al.agreedToExtend(sv.me)
+  );
+}
+
 /** Whether `N` is strong for a keep plan (see the header). */
 export function strongAlly(sv: SearchView, N: Player): boolean {
   const share = sv.o.searchKeepMinShare;
@@ -195,9 +228,9 @@ export interface KeepTarget {
 }
 
 /**
- * keep:<id> (unless `plain` is false) and keep:<id>+gift (under the gift's
- * conditions) for ally `k` at the search: the steps and what the rounds
- * read. Empty when the alliance is gone or ends this tick.
+ * keep:<id>+gift (under the gift's conditions) and then keep:<id> (unless
+ * `plain` is false) for ally `k` at the search: the steps and what the
+ * rounds read. Empty when the alliance is gone or ends this tick.
  */
 export function keepCandidates(
   sv: SearchView,
@@ -222,15 +255,6 @@ export function keepCandidates(
   });
   const out: Candidate[] = [];
   const unfoe = foeClear(sv, id);
-  if (plain) {
-    out.push(
-      base(`keep:${id}`, [
-        ...unfoe,
-        extensionStep(id, askAt),
-        renewStep(id, renewAt),
-      ]),
-    );
-  }
   if (o.searchKeepGift) {
     const nm = sv.host.nationModel();
     const giftAt = Math.max(t, askAt - GIFT_LEAD);
@@ -268,6 +292,15 @@ export function keepCandidates(
       }
     }
   }
+  if (plain) {
+    out.push(
+      base(`keep:${id}`, [
+        ...unfoe,
+        extensionStep(id, askAt),
+        renewStep(id, renewAt),
+      ]),
+    );
+  }
   return out;
 }
 
@@ -278,7 +311,6 @@ export const KEEP: CandidateGenerator = {
   generate(sv: SearchView, _base: BaseView): Candidate[] {
     const { o, game, me, t, kinds } = sv;
     if (!o.searchKeep || !kinds.has("keep")) return [];
-    const asked = sv.host.state.web.extensionAsked;
     const out: Candidate[] = [];
     // The bordering allies by contact, as the core's nations (ties: the
     // scan's ascending smallID).
@@ -294,7 +326,7 @@ export const KEEP: CandidateGenerator = {
       const e = al.expiresAt();
       if (e - t > o.searchLapseLead || e <= t) continue;
       if (!strongAlly(sv, N)) continue;
-      out.push(...keepCandidates(sv, { N, e }, asked[n.id] !== e));
+      out.push(...keepCandidates(sv, { N, e }, !extensionOut(sv, n.id, al)));
     }
     return out;
   },

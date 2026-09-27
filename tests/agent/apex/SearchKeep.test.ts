@@ -7,11 +7,13 @@
  *   builds it): keep:Z for each bordering ally expiring within
  *   searchLapseLead that is strong (troops ≥ searchKeepMinShare of our
  *   home, or a cap ≥ 1.1 × ours) whose extension the web has not asked
- *   (s.web.extensionAsked), in the web's keep list or not;
- *   keep:Z+gift for a strong expiring ally, kept or not, whose extension
- *   forecast is below searchKeepGiftP (not "traitor"), Neutral, not
- *   embargoed, the gold at most searchKeepGiftShare of ours; a foe mark on
- *   Z ended first; nothing with searchKeep off (the core alone).
+ *   (s.web.extensionAsked) and whose extension is not out already
+ *   (Alliance.agreedToExtend: a plan's own ask, which the web's flag
+ *   misses), in the web's keep list or not; keep:Z+gift, before it, for a
+ *   strong expiring ally, kept or not, whose extension forecast is below
+ *   searchKeepGiftP (not "traitor"), Neutral, not embargoed, the gold at
+ *   most searchKeepGiftShare of ours; a foe mark on Z ended first; nothing
+ *   with searchKeep off (the core alone).
  * - The gift is B2's pricing: friendPoints of the relation at its payment
  *   to FRIENDLY_PAST past the expiry, in goldChunk's chunks priced
  *   GIFT_PAY_WITHIN ticks late (FriendDonation.test.ts pins both).
@@ -20,7 +22,8 @@
  *   extension at the expiry − extendLead and, the alliance lapsed, the
  *   renewal at the expiry + 1; an extension agreed in time skips the
  *   renewal; the gift pays the tick after it is sent and holds A Friendly
- *   through FRIENDLY_PAST ticks past the expiry.
+ *   through FRIENDLY_PAST ticks past the expiry; once the plan's own
+ *   extension is out, KEEP makes no keep:A again that term.
  */
 import {
   friendPoints,
@@ -31,6 +34,7 @@ import {
   ApexOptions,
 } from "../../../src/agent/agents/apex/options";
 import {
+  extensionOut,
   FRIENDLY_PAST,
   GIFT_LEAD,
   GIFT_PAY_WITHIN,
@@ -62,6 +66,8 @@ interface Nat {
   expiresAt?: number;
   relation?: Relation;
   embargo?: boolean;
+  /** We agreed to extend already (Alliance.agreedToExtend). */
+  agreed?: boolean;
 }
 
 interface Env {
@@ -108,7 +114,10 @@ function view(nats: Nat[], env: Env = {}): SearchView {
       const n = byId.get(p.id())!;
       return n.expiresAt === undefined
         ? null
-        : { expiresAt: () => n.expiresAt! };
+        : {
+            expiresAt: () => n.expiresAt!,
+            agreedToExtend: () => n.agreed === true,
+          };
     },
     isAlliedWith: (p: { id(): string }) =>
       byId.get(p.id())?.expiresAt !== undefined,
@@ -232,7 +241,7 @@ describe("keep candidates", () => {
     ]);
   });
 
-  test("off, asked already, or past the lead: no keep:Z; the keep list does not matter; a foe mark is ended first", () => {
+  test("off, asked already or agreed to extend, or past the lead: no keep:Z; the keep list does not matter; a foe mark is ended first", () => {
     const Z: Nat = {
       id: "Z",
       smallID: 1,
@@ -247,6 +256,9 @@ describe("keep candidates", () => {
     expect(
       KEEP.generate(view([Z], { asked: { Z: Z.expiresAt! } }), NO_BASE),
     ).toEqual([]);
+    // Our extension is out by another sender (a plan's own ext step, which
+    // the web's flag misses; review F2): nothing to add either.
+    expect(KEEP.generate(view([{ ...Z, agreed: true }]), NO_BASE)).toEqual([]);
     // An earlier term's ask, or the web's keep list, do not matter.
     expect(
       KEEP.generate(
@@ -282,7 +294,7 @@ describe("keep candidates", () => {
     ).toHaveLength(2);
   });
 
-  test("keep:Z+gift when the extension forecast is low, asked by the web or not, priced as B2's gifts", () => {
+  test("keep:Z+gift, first, when the extension forecast is low, the extension asked or not, priced as B2's gifts", () => {
     const e = T + 400;
     const Z: Nat = {
       id: "Z",
@@ -293,8 +305,10 @@ describe("keep candidates", () => {
     };
     const low = { forecast: { p: 0.2, branch: "enough" }, relation: 12.5 };
     const cands = KEEP.generate(view([Z], low), NO_BASE);
-    expect(cands.map((c) => c.name)).toEqual(["keep:Z", "keep:Z+gift"]);
-    const gift = cands[1];
+    // The gift variant first: round 1's finalist cut keeps the first of
+    // the plans tied with the base at H1 (review F1).
+    expect(cands.map((c) => c.name)).toEqual(["keep:Z+gift", "keep:Z"]);
+    const gift = cands[0];
     const askAt = e - 300;
     const giftAt = askAt - GIFT_LEAD;
     const gold = price(12.5, giftAt, e + FRIENDLY_PAST);
@@ -303,11 +317,16 @@ describe("keep candidates", () => {
       [askAt, { type: "allianceExtension", recipient: "Z" }],
       [e + 1, { type: "allianceRequest", recipient: "Z" }],
     ]);
-    expect(gift.lastSend).toBe(cands[0].lastSend);
-    // Asked by the web already: only the gift plan (with its renewal)
-    // differs from the base.
+    expect(gift.lastSend).toBe(cands[1].lastSend);
+    // Asked by the web already, or agreed to extend by a plan of ours:
+    // only the gift plan (with its renewal) differs from the base.
     expect(
       KEEP.generate(view([Z], { ...low, asked: { Z: e } }), NO_BASE).map(
+        (c) => c.name,
+      ),
+    ).toEqual(["keep:Z+gift"]);
+    expect(
+      KEEP.generate(view([{ ...Z, agreed: true }], low), NO_BASE).map(
         (c) => c.name,
       ),
     ).toEqual(["keep:Z+gift"]);
@@ -316,8 +335,8 @@ describe("keep candidates", () => {
     const names = (env: object) =>
       KEEP.generate(view([Z], { ...low, ...env }), NO_BASE).map((c) => c.name);
     expect(names({ forecast: { p: 0, branch: "tooMany" } })).toEqual([
-      "keep:Z",
       "keep:Z+gift",
+      "keep:Z",
     ]);
     expect(names({ forecast: { p: 0.1, branch: "traitor" } })).toEqual([
       "keep:Z",
@@ -498,6 +517,26 @@ describe("keep:A played live", () => {
     expect(friendly[0]).toBe(at + 2);
     expect(friendly[friendly.length - 1]).toBe(e + FRIENDLY_PAST + 1);
     expect(friendly).toHaveLength(e + FRIENDLY_PAST + 1 - (at + 2) + 1);
+  });
+
+  test("our extension out, KEEP makes no keep:A again that term (the web's flag misses a plan's ask)", () => {
+    const { w, e } = allied();
+    adoptKeep(w, e - 400);
+    while (w.game.ticks() < e - 250) w.h.step();
+    expect(toA(w, "allianceExtension")).toEqual([e - APEX_DEFAULTS.extendLead]);
+    const al = w.us.allianceWith(w.nation(A))!;
+    expect(al.agreedToExtend(w.us)).toBe(true);
+    // Only the web's own offer sets its flag; the plan's step did not.
+    expect(w.s.web.extensionAsked[A]).toBeUndefined();
+    const sv = liveView(w, {
+      searchKeep: true,
+      searchKeepMinShare: 0,
+      searchKeepGift: false,
+    });
+    expect(extensionOut(sv, A, al)).toBe(true);
+    expect(KEEP.generate(sv, NO_BASE)).toEqual([]);
+    // keepCandidates still makes the plan when asked to (round 2b's gift).
+    expect(keepCandidates(sv, { N: w.nation(A), e }, true)).toHaveLength(1);
   });
 
   test("keepCandidates is empty once the alliance is gone", () => {

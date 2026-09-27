@@ -9,7 +9,7 @@
  *     needed; ally:N:stop when its foe mark is ended first or our embargo
  *     on it stopped (embargoStop), the request one tick later when the
  *     nation's next decision would come before the stop is seen;
- *   - allied at the search: keep:N (and keep:N+gift under the gift's
+ *   - allied at the search: keep:N (and keep:N+gift first under the gift's
  *     conditions), in the web's keep list or not, unless its attack comes
  *     before its expiry (a betrayal);
  *   - none when the request cannot be sent (canSendAllianceRequest), when
@@ -47,6 +47,8 @@ interface Nat {
   canRequest?: boolean;
   embargo?: boolean;
   relation?: Relation;
+  /** We agreed to extend already (Alliance.agreedToExtend). */
+  agreed?: boolean;
 }
 
 interface Env {
@@ -84,7 +86,10 @@ function view(nats: Nat[], env: Env = {}): SearchView {
       const n = byId.get(p.id())!;
       return n.expiresAt === undefined
         ? null
-        : { expiresAt: () => n.expiresAt! };
+        : {
+            expiresAt: () => n.expiresAt!,
+            agreedToExtend: () => n.agreed === true,
+          };
     },
     isAlliedWith: (p: { id(): string }) =>
       byId.get(p.id())?.expiresAt !== undefined,
@@ -262,19 +267,34 @@ describe("round 2b's defensive plans", () => {
       [T + 400 - APEX_DEFAULTS.extendLead, "allianceExtension"],
       [T + 401, "allianceRequest"],
     ]);
-    // With a low extension forecast the gift variant comes too.
+    // With a low extension forecast the gift variant comes too, first (the
+    // order keep.ts gives round 1's finalist cut).
+    const low = { p: 0.1, branch: "enough", deterministic: false };
     const withGift = DEFEND.generate(
-      view(nats, {
-        forecast: { p: 0.1, branch: "enough", deterministic: false },
-      }),
+      view(nats, { forecast: low }),
       base([["Z", 500_000, 450]]),
     );
-    expect(withGift.map((c) => c.name)).toEqual(["keep:Z", "keep:Z+gift"]);
-    expect(withGift[1].steps.map((s) => s.p?.intent.type)).toEqual([
+    expect(withGift.map((c) => c.name)).toEqual(["keep:Z+gift", "keep:Z"]);
+    expect(withGift[0].steps.map((s) => s.p?.intent.type)).toEqual([
       "donate_gold",
       "allianceExtension",
       "allianceRequest",
     ]);
+    // Its extension out already (we agreed to extend): the gift variant
+    // alone, and nothing without it.
+    const agreed: Nat[] = [{ ...nats[0], agreed: true }];
+    expect(
+      DEFEND.generate(
+        view(agreed, { forecast: low }),
+        base([["Z", 500_000, 450]]),
+      ).map((c) => c.name),
+    ).toEqual(["keep:Z+gift"]);
+    expect(
+      DEFEND.generate(
+        view(agreed, { o: { searchKeepGift: false } }),
+        base([["Z", 500_000, 450]]),
+      ),
+    ).toEqual([]);
     // The keep kind degraded away: nothing for an ally.
     expect(
       DEFEND.generate(

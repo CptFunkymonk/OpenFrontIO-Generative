@@ -685,6 +685,7 @@ export class SearchController implements LiveSearch {
     const svAll: SearchView =
       world0 === null ? sv : { ...sv, game: world0.game, me: me0 };
 
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- a generator function has no lexical this
     const self = this;
     /** The rounds: the base's first round, the candidates, the budget's
      *  degrade, round 2b's generator and Rounds' generator. */
