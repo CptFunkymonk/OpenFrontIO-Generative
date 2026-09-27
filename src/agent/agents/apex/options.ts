@@ -619,23 +619,25 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   //    docs/14-m4-plan.md §2.7 item 7a). A base rule: the search's
   //    rollouts copy it. Off by default. ──────────────────────────────────
   /** Ask the extension of every bordering ally (land contact) that is
-   *  strong, in allySet (or the midgame keep set) or not: troops(Z) at
-   *  least webKeepHomeRatio times our home troops, or maxTroops(Z) at
-   *  least webKeepCapRatio times ours. Asked at the web's lead (extendLead;
+   *  strong, in allySet (or the midgame keep set) or not: maxTroops(Z) at
+   *  least webKeepCapRatio times ours, or troops(Z) at least
+   *  webKeepTroopRatio times our cap. Asked at the web's lead (extendLead;
    *  webExtendLead with webMidgame), sooner for webKeepGap. Arena quick@20,
    *  UE's 32 games: former allies sent 214M of the 435M nation troops sent
    *  at apex (51M after a lapse never asked, 162M after a refused
-   *  extension); 11 strong allies lapsed unasked and then attacked. */
+   *  extension); 11 of the 13 unasked allies that attacked after their
+   *  lapse held 1.1x our cap or more. */
   webKeepStrong: boolean;
   /** Strong by cap: maxTroops(Z) at least this multiple of ours. */
   webKeepCapRatio: number;
-  /** Strong by troops: troops(Z) at least this multiple of our home. */
-  webKeepHomeRatio: number;
-  /** No two strong allies' alliances expire within this many ticks: the
+  /** Strong by troops: troops(Z) at least this multiple of our cap (not
+   *  our home, which swings with expansion and strikes: against the home,
+   *  nearly every ally was strong in the opening, arena Alps g2). */
+  webKeepTroopRatio: number;
+  /** No two strong allies' next terms end within this many ticks: the
    *  earlier one is asked sooner, gap before the later one's ask (a passed
    *  extension restarts the term at the nation's yes), but never more than
-   *  allianceDuration() − gap before its expiry. 0: asks at the lead
-   *  only. */
+   *  gap before its own lead. 0: asks at the lead only. */
   webKeepGap: number;
   /** A strong bordering ally whose alliance lapsed gets a fresh request
    *  the first tick we see it gone: decided with our alliances one fewer
@@ -1028,6 +1030,14 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  River g10 at 4538, Europe g22 at 3596, North America g31 at 4254).
    *  Off: only the replica lines are bounded by it. */
   strikeFlowFloorMin: boolean;
+  /** With strikeFloorReplica, keep the land line of a nation whose "another
+   *  player first" may rest on a state that ends before its decision
+   *  (StrikeController.transientExit): the largest attack on it but ours is
+   *  a remnant under 5% of its troops (the replica's retaliate step), or it
+   *  has 1 affordable tribe left (its bots step). quick@20 Bering Strait g3
+   *  at 5471: a 1k remnant of Russia's attack on Alaska ended at 5488, and
+   *  Alaska land-attacked us at its decision at 5504. Off. */
+  strikeFloorReplicaSteady: boolean;
 
   // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
   //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
@@ -1145,10 +1155,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   // triggers (or on a clock), fork the live game, roll the base and each
   // candidate plan forward with an exact copy of the live policy, and play
   // the plan whose value beats the base's by the margin. Off until an A/B
-  // adopts it. The act3 prototype is these defaults with
+  // adopts it; a search blocks its live tick for seconds to minutes, so it
+  // stays arena-only until it is time-sliced (M7). The defaults are the
+  // plan's S1 (§2.9, §3 WP2); the act3 prototype (S0) is them with
   // {"searchClock":600,"searchR":0,"searchHBreak":[1200],
-  // "searchHBreakGated":0}; the plan's strong-target horizon and stack gate
-  // are {"searchHStrong":1200,"searchStackGate":true}.
+  // "searchHBreakGated":0,"searchHStrong":600,"searchStackGate":false,
+  // "searchOnTop":false,"searchLapseLead":498,"searchLapseFoeAt":1,
+  // "searchShare":false,"searchOutBoats":false,"searchCheckAll":true}.
   /** "act": play the chosen plan. "plans": roll out and log, never act
    *  (package WP4's log-only study). */
   searchMode: string;
@@ -1161,9 +1174,14 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Candidate kinds, a comma list of strike, lapse, keep, break, ally,
    *  boat (keep and boat: package WP3's generators). */
   searchKinds: string;
-  /** Nations given strike, lapse or break candidates (act3 counts an
-   *  expiring ally with both a lapse and a break twice). */
+  /** Nations given strike, lapse or break candidates, by contact. */
   searchK: number;
+  /** The plan's "on top" (§2.4): every expiring ally's lapse and every
+   *  attacker's strikes come on top of the searchK nations (the lapses and
+   *  the alliance requests first). Off (act3): a lapse counts 1 of searchK
+   *  (an expiring ally with a lapse and breaks counts 2), and the nations
+   *  past the first searchK get nothing. */
+  searchOnTop: boolean;
   /** Contact pairs for a nation to count as bordering. */
   searchMinContact: number;
   /** Purse shares of the strikes and breaks (purse.available("strike") at
@@ -1220,23 +1238,30 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** κ: a plan loses κ·(the top nation's tiles − the base's) at its
    *  horizon. */
   searchRival: number;
-  /** The share factor L0/Lh (land net of fallout) on V's tiles, for our
-   *  own bombs (M5). */
+  /** The share factor L0/Lh (land net of fallout) on V's tiles (§2.5; 1
+   *  unless fallout changes the win bar's land). */
   searchShare: boolean;
+  /** V's out counts our transport ships' troops at sea too (act3: attacks
+   *  only); so do the checkpoints. */
+  searchOutBoats: boolean;
   /** The budget: Σ search cost ≤ searchR·(t − searchFrom) + searchSlack
    *  live-tick equivalents (φ per fork from lib/search/phi.json, plus the
    *  ticks advanced); 0 = no cap. */
   searchR: number;
-  /** The budget's grant at searchFrom (the first searches). */
+  /** The budget's grant at searchFrom: the first search's whole break look
+   *  and its gated extension. */
   searchSlack: number;
-  /** "restore": ctx.fork() for every rollout. "clone": one ctx.fork() per
-   *  search, and its structural clones (GameFork.source) for the rollouts;
-   *  the same games, several times cheaper forks. */
-  searchFork: string;
+  /** Live-tick equivalents a low-priority search (the stall re-searches,
+   *  T6, every T7 but the first) may not spend: kept for the alliance
+   *  ends, chains, attacks, foresight and stall onsets. */
+  searchReserve: number;
   /** T1: a bordering ally expiring within this many ticks (and before the
    *  web asks its extension); a lapse candidate needs as few left (498:
    *  act3's, whose lapse struck within its first 600 ticks less 100). */
   searchLapseLead: number;
+  /** A lapse's foe mark starts this many ticks after the search (act3's
+   *  port: 1, the plan's "now": 0). */
+  searchLapseFoeAt: number;
   /** T2: a search this many ticks after an act. */
   searchChain: number;
   /** T3: every this many ticks in stall. */
@@ -1245,11 +1270,16 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   searchFloorTicks: number;
   /** T4: a nation attack on us of at least this share of our home troops. */
   searchAttackMin: number;
-  /** Least ticks between two searches at the triggers. */
+  /** Least ticks between two tries at the triggers (T1 is exempt; T4 and
+   *  T5 count from the last search that ran). */
   searchMinGap: number;
   /** A break's foe-mark variant: no re-alliance with the broken ally for
    *  900 ticks (the web re-allies broken nations). */
   searchBreakFoe: boolean;
+  /** Check the live game against every snap of the rollout it follows (as
+   *  act3 did), not only the plan's +50, +150, +300, +600 and the judged
+   *  horizon (§2.2): about twice the search-check lines. */
+  searchCheckAll: boolean;
 
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
   // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
@@ -1259,12 +1289,17 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** The gold arm: from goldFrom on, when the structure policy (or
    *  nukeModel) above refuses every site, the arm may still buy, under its
    *  gate; it only adds buys. "exposure": today's rule alone. "model": no
-   *  level at a site that a firing nation (NukeModel: its ladder names us
-   *  on the rung that answers now, a finished silo, the gold for its bomb)
-   *  can aim at. "allied": no level while a silo owner holding the atom's
-   *  price is not our ally (allies never aim at us; our finished SAMs
-   *  exempt the sites they cover). "free": no nuke gate. The SAM hub
-   *  (nukeModel) still runs first. */
+   *  level at a site that a nation answering us can aim at (NukeModel: its
+   *  ladder names us on the rung that answers now, a silo, the gold for its
+   *  bomb now or soon by nukePayShare/nukeHorizon; or a bomb of its in
+   *  flight at us). "allied": no level while a silo owner holding the
+   *  atom's price is not our ally (allies never aim at us; our finished
+   *  SAMs exempt the sites they cover; an alliance ending within extendLead
+   *  ticks no longer counts). "free": no nuke gate. Every arm: no level an
+   *  enemy bomb in flight will hit, no buy at all while one flies at our
+   *  land or while the attacks on us carry our home troops, no new city
+   *  within a salvo's reach of our SAMs. The SAM hub (nukeModel) still runs
+   *  first. */
   goldPolicy: GoldPolicyArm;
   /** First tick of the gold arm: minute 4 (the opening's cities stay
    *  today's). */
@@ -1461,13 +1496,13 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   // Package WP7a WEB KEEP.
   webKeepStrong: false,
   webKeepCapRatio: 1.1,
-  webKeepHomeRatio: 1,
+  webKeepTroopRatio: 1,
   webKeepGap: 600,
   webKeepRenew: true,
   webKeepRenewMinP: 0.25,
   webKeepGift: false,
   webKeepGiftLead: 120,
-  webKeepGiftShare: 0.5,
+  webKeepGiftShare: 0.9,
   webKeepGiftMinP: 0.5,
 
   recall: true,
@@ -1559,6 +1594,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeFlowFloor: 0.35,
   strikeFloorReplicaUnseen: false,
   strikeFlowFloorMin: false,
+  strikeFloorReplicaSteady: false,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
@@ -1596,22 +1632,23 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   // Search: package WP1 (the hook).
   search: false,
 
-  // Search: package WP2, the SearchController (the WP2 screen's S1: the
-  // triggers, the budget, the stepwise break round and its gate; the
-  // strong-target horizon and the stack gate unscreened, off).
+  // Search: package WP2, the SearchController (the plan's S1: the
+  // triggers, the budget, the stepwise break round and its gate, the
+  // strong-target horizon, the stack gate, plans on top of searchK).
   searchMode: "act",
   searchFrom: 2400,
   searchClock: 0,
   searchKinds: "strike,lapse,keep,break,ally,boat",
   searchK: 2,
+  searchOnTop: true,
   searchMinContact: 8,
   searchFracs: [0.5, 1],
-  searchStackGate: false,
+  searchStackGate: true,
   searchMaxCands: 8,
   searchH1: 150,
   searchPrune: 0.03,
   searchH: 600,
-  searchHStrong: 600,
+  searchHStrong: 1200,
   searchStrongShare: 0.9,
   searchHBreak: [600, 1200],
   searchHBreakGated: 1800,
@@ -1625,17 +1662,20 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchDangerNow: 0,
   searchDangerCap: 0,
   searchRival: 0,
-  searchShare: false,
+  searchShare: true,
+  searchOutBoats: true,
   searchR: 2.5,
-  searchSlack: 3000,
-  searchFork: "clone",
-  searchLapseLead: 498,
+  searchSlack: 4500,
+  searchReserve: 2500,
+  searchLapseLead: 500,
+  searchLapseFoeAt: 0,
   searchChain: 600,
   searchStallEvery: 1200,
   searchFloorTicks: 1800,
   searchAttackMin: 0.1,
   searchMinGap: 300,
   searchBreakFoe: false,
+  searchCheckAll: false,
 
   // Package WP8 GOLD.
   goldPolicy: "exposure",

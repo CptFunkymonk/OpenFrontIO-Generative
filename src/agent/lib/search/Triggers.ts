@@ -6,26 +6,38 @@ import type { PlayerID } from "../../../core/game/Game";
 //
 // | T1 end       | a bordering ally expires within lapseLead ticks, before
 // |              | the web would ask its extension (more than extendLead
-// |              | left); once per alliance term                         |
+// |              | left); once per alliance term; not held back by minGap
+// |              | (its window is only lapseLead − extendLead ticks); a
+// |              | refused one waits for the tick the budget can pay (the
+// |              | controller's retry), inside the window                |
 // | T2 chain     | `chain` ticks after an act                            |
-// | T3 stall     | stall onset; then every stallEvery ticks in stall, or
-// |              | sooner when a bordering nation's alliance flips, one
-// |              | appears, or its troops fall by more than stallChange
-// |              | (a window opens; a rise opens none, and a growing
-// |              | neighbour's +25% came every 300 ticks on Japan g8)    |
+// | T3 stall     | stall onset; then every stallEvery ticks in stall (from
+// |              | the last look: a search, or no plan), or
+// |              | sooner when a bordering nation's alliance flips, an
+// |              | unallied one appears, or its troops fall by more than
+// |              | stallChange (a window opens); never while a chain is
+// |              | pending (our own act's effects are the chain's)       |
 // | T4 attack    | a nation attack on us starts with ≥ attackMin of our
-// |              | home troops, no search in the last minGap ticks       |
+// |              | home troops, and no search ran in the last minGap
+// |              | ticks (then never for that attack)                    |
 // | T5 foresight | the followed rollout shows a nation's first attack on
-// |              | us within the next foresight ticks                    |
+// |              | us within the next foresight ticks, and no search ran
+// |              | in the last minGap ticks                              |
 // | T6 naval     | no bordering nation, home ≥ navalHome of the cap for
 // |              | navalFor ticks, a boat generator wants a search; every
 // |              | navalEvery ticks                                      |
-// | T7 floor     | floorTicks since the last search (so the first search
+// | T7 floor     | floorTicks since the last look (so the first search
 // |              | is at `from`)                                         |
 //
+// T2, T3, T6 and T7 also wait minGap ticks after the last try (a search, a
+// budget refusal or a trigger with no plan). The stall re-searches (every,
+// change), T6 and every T7 but the first are low priority: the budget
+// keeps searchReserve back from them for the rest. A try that did not run
+// uses up only its own trigger's condition (a refused low-priority one
+// holds the low-priority triggers until the budget can pay it).
+//
 // With `clock` > 0 the triggers are off and the search runs every `clock`
-// ticks from `from` (the act3 prototype's clock). Every trigger but T4 waits
-// for minGap ticks after the last search (T4 is dropped instead).
+// ticks from `from` (the act3 prototype's clock).
 
 export type TriggerName =
   | "clock"
@@ -36,6 +48,22 @@ export type TriggerName =
   | "foresight"
   | "naval"
   | "floor";
+
+/** A trigger that fired. */
+export interface Fired {
+  name: TriggerName;
+  /** Which rule, for the logs: "onset", "every", "ally:<id>", ... */
+  why: string;
+  /** Low priority: the budget keeps searchReserve back from it. */
+  low: boolean;
+  /** T1: the alliance term ("<id>:<expiresAt>") and the tick its window
+   *  closes (the web asks its extension from then on). */
+  term?: string;
+  closes?: number;
+  /** T4, T5: the attack's nation, and T5's ticks to its attack. */
+  nation?: PlayerID;
+  in?: number;
+}
 
 export interface TriggerParams {
   from: number;
@@ -79,11 +107,22 @@ export interface TriggerObs {
 const NEVER = -1_000_000_000;
 
 export class Triggers {
-  /** The last search's tick (a refused one counts). */
-  lastSearch: number;
+  /** The last search that ran (forked and rolled out). */
+  lastRun: number;
+  /** The last look at the live state: a search, or a trigger with no
+   *  plan (T3's stallEvery and T7 count from it). */
+  lastLook: number;
+  /** The last try: a search, a refusal or a trigger with no plan. */
+  lastTry = NEVER;
   lastAct = NEVER;
+  /** Searches run. */
+  runs = 0;
   /** Alliance terms searched for (T1): "id:expiresAt". */
   private readonly ends = new Set<string>();
+  /** Refused T1 terms: the tick the budget can pay the search. */
+  private readonly endRetry = new Map<string, number>();
+  /** Low-priority triggers wait until this tick (a refused one's). */
+  private lowHold = NEVER;
   private chainAt: number | null = null;
   private wasInStall = false;
   private stallOnset = false;
@@ -98,7 +137,8 @@ export class Triggers {
   private lastNaval = NEVER;
 
   constructor(private readonly p: TriggerParams) {
-    this.lastSearch = p.from - p.floorTicks;
+    this.lastRun = p.from - p.floorTicks;
+    this.lastLook = this.lastRun;
   }
 
   /**
@@ -106,7 +146,7 @@ export class Triggers {
    * (it notes the attacks and the stall onset as it goes), before `from`
    * too.
    */
-  check(obs: TriggerObs): TriggerName | null {
+  check(obs: TriggerObs): Fired | null {
     const p = this.p;
     const t = obs.t;
     // Bookkeeping first, whatever fires.
@@ -114,86 +154,162 @@ export class Triggers {
     this.wasInStall = obs.inStall;
     if (onset) this.stallOnset = true;
     if (!obs.inStall) this.stallOnset = false;
-    let attack = false;
+    let attack: PlayerID | null = null;
     for (const a of obs.attacks) {
       if (this.seenAttacks.has(a.id)) continue;
       this.seenAttacks.add(a.id);
-      if (a.troops >= p.attackMin * obs.home) attack = true;
+      if (attack === null && a.troops >= p.attackMin * obs.home) {
+        attack = a.attacker;
+      }
     }
     const idle = obs.nations.length === 0 && obs.home >= p.navalHome * obs.cap;
     if (!idle) this.idleSince = null;
     else this.idleSince ??= t;
 
     if (t < p.from) return null;
-    if (p.clock > 0) return (t - p.from) % p.clock === 0 ? "clock" : null;
-    const since = t - this.lastSearch;
-    // T4's rule is at the attack's start: no search in the last minGap.
-    const gap = since >= p.minGap;
-    if (!gap) return null;
-    // T1.
+    if (p.clock > 0) {
+      return (t - p.from) % p.clock === 0
+        ? { name: "clock", why: "clock", low: false }
+        : null;
+    }
+    const sinceRun = t - this.lastRun;
+    const sinceLook = t - this.lastLook;
+    // T1, whatever the gap.
     for (const n of obs.nations) {
       if (!n.allied || n.expiresAt === null) continue;
       const left = n.expiresAt - t;
       if (left > p.lapseLead || left <= p.extendLead) continue;
-      if (!this.ends.has(`${n.id}:${n.expiresAt}`)) return "end";
+      const term = `${n.id}:${n.expiresAt}`;
+      if (this.ends.has(term)) continue;
+      if (t < (this.endRetry.get(term) ?? NEVER)) continue;
+      return {
+        name: "end",
+        why: `end:${n.id}`,
+        low: false,
+        term,
+        closes: n.expiresAt - p.extendLead,
+      };
     }
+    const gap = t - this.lastTry >= p.minGap;
+    const low = t >= this.lowHold;
     // T2.
-    if (this.chainAt !== null && t >= this.chainAt) return "chain";
-    // T3.
-    if (obs.inStall) {
-      if (this.stallOnset || since >= p.stallEvery) return "stall";
-      if (this.stallChanged(obs)) return "stall";
+    if (gap && this.chainAt !== null && t >= this.chainAt) {
+      return { name: "chain", why: "chain", low: false };
     }
-    // T4.
-    if (attack) return "attack";
-    // T5.
-    for (const f of this.foreseen) {
-      if (t < f.at && f.at - t <= p.foresight) {
-        if (!this.foreDone.has(`${f.id}:${f.at}`)) return "foresight";
+    // T3, not while a chain is pending.
+    const chainWait = this.chainAt !== null && t < this.chainAt;
+    if (gap && obs.inStall && !chainWait) {
+      if (this.stallOnset) return { name: "stall", why: "onset", low: false };
+      if (low && sinceLook >= p.stallEvery) {
+        return { name: "stall", why: "every", low: true };
+      }
+      const why = low ? this.stallChanged(obs) : null;
+      if (why !== null) return { name: "stall", why, low: true };
+    }
+    // T4, T5: timed by the last search that ran.
+    const ran = sinceRun >= p.minGap;
+    if (attack !== null && ran) {
+      return {
+        name: "attack",
+        why: `attack:${attack}`,
+        low: false,
+        nation: attack,
+      };
+    }
+    if (ran) {
+      for (const f of this.foreseen) {
+        if (t < f.at && f.at - t <= p.foresight) {
+          if (!this.foreDone.has(`${f.id}:${f.at}`)) {
+            return {
+              name: "foresight",
+              why: `foresight:${f.id}`,
+              low: false,
+              nation: f.id,
+              in: f.at - t,
+            };
+          }
+        }
       }
     }
     // T6.
     if (
+      gap &&
+      low &&
       obs.naval &&
       this.idleSince !== null &&
       t - this.idleSince >= p.navalFor &&
       t - this.lastNaval >= p.navalEvery
     ) {
-      return "naval";
+      return { name: "naval", why: "naval", low: true };
     }
     // T7.
-    if (since >= p.floorTicks) return "floor";
+    if (gap && sinceLook >= p.floorTicks && (low || this.runs === 0)) {
+      return { name: "floor", why: "floor", low: this.runs > 0 };
+    }
     return null;
   }
 
   /**
-   * A search ran (or was refused) at this tick: its trigger conditions are
-   * used up. `foreseen` are the followed rollout's first attacks on us
-   * (absolute ticks), or null to keep the last ones (no rollout ran).
+   * A search ran at this tick: every trigger's condition it covers is used
+   * up (a chain due within minGap too). `foreseen` are the followed
+   * rollout's first attacks on us (absolute ticks).
    */
   searched(
     obs: TriggerObs,
-    trigger: TriggerName,
-    foreseen: { id: PlayerID; at: number }[] | null,
+    fired: Fired,
+    foreseen: { id: PlayerID; at: number }[],
   ): void {
     const t = obs.t;
-    this.lastSearch = t;
-    for (const n of obs.nations) {
-      if (n.allied && n.expiresAt !== null) {
-        const left = n.expiresAt - t;
-        if (left <= this.p.lapseLead) this.ends.add(`${n.id}:${n.expiresAt}`);
-      }
+    this.lastRun = t;
+    this.runs++;
+    this.looked(obs, fired);
+    if (this.chainAt !== null && t >= this.chainAt - this.p.minGap) {
+      this.chainAt = null;
     }
-    if (this.chainAt !== null && t >= this.chainAt) this.chainAt = null;
-    this.stallOnset = false;
-    this.nbrs = new Map(
-      obs.nations.map((n) => [n.id, { allied: n.allied, troops: n.troops }]),
-    );
-    for (const f of this.foreseen) {
-      if (f.at - t <= this.p.foresight) this.foreDone.add(`${f.id}:${f.at}`);
+    this.foreseen = foreseen;
+  }
+
+  /** A trigger found no plan at this tick (nothing to search now): the
+   *  conditions a search would have used up are, but T4 and T5 still count
+   *  from the last search that ran. */
+  none(obs: TriggerObs, fired: Fired): void {
+    this.looked(obs, fired);
+    if (fired.name === "chain") this.chainAt = null;
+  }
+
+  /**
+   * The budget refused the search at this tick: it uses up its own
+   * trigger's condition only. `retryAt`: the tick the budget can pay it; a
+   * refused T1 waits for it while its window is open, a refused
+   * low-priority trigger holds every low-priority one until then.
+   */
+  refused(obs: TriggerObs, fired: Fired, retryAt: number): void {
+    const t = obs.t;
+    this.lastTry = t;
+    switch (fired.name) {
+      case "end":
+        if (fired.closes !== undefined && retryAt < fired.closes) {
+          this.endRetry.set(fired.term!, retryAt);
+        } else {
+          this.ends.add(fired.term!);
+        }
+        break;
+      case "chain":
+        this.chainAt = null;
+        break;
+      case "foresight":
+        this.foreseenDone(t);
+        break;
+      case "naval":
+        this.lastNaval = t;
+        break;
+      case "stall":
+        if (fired.why === "onset") this.stallOnset = false;
+        break;
+      default:
+        break;
     }
-    if (foreseen !== null) this.foreseen = foreseen;
-    if (trigger === "naval") this.lastNaval = t;
+    if (fired.low) this.lowHold = retryAt;
   }
 
   /** The search at `t` played a plan: the chain restarts from it. */
@@ -202,15 +318,49 @@ export class Triggers {
     this.chainAt = t + this.p.chain;
   }
 
-  private stallChanged(obs: TriggerObs): boolean {
+  /** The live state was looked at (a search or no plan): the terms in
+   *  their window, the stall onset, T3's neighbours, the foreseen attacks
+   *  due and T6's clock are used up. */
+  private looked(obs: TriggerObs, fired: Fired): void {
+    const t = obs.t;
+    this.lastLook = t;
+    this.lastTry = t;
     for (const n of obs.nations) {
-      const was = this.nbrs.get(n.id);
-      if (was === undefined) return true;
-      if (was.allied !== n.allied) return true;
-      if (was.troops - n.troops > this.p.stallChange * was.troops) {
-        return true;
+      if (n.allied && n.expiresAt !== null) {
+        if (n.expiresAt - t <= this.p.lapseLead) {
+          const term = `${n.id}:${n.expiresAt}`;
+          this.ends.add(term);
+          this.endRetry.delete(term);
+        }
       }
     }
-    return false;
+    this.stallOnset = false;
+    this.nbrs = new Map(
+      obs.nations.map((n) => [n.id, { allied: n.allied, troops: n.troops }]),
+    );
+    this.foreseenDone(t);
+    if (fired.name === "naval") this.lastNaval = t;
+  }
+
+  private foreseenDone(t: number): void {
+    for (const f of this.foreseen) {
+      if (f.at - t <= this.p.foresight) this.foreDone.add(`${f.id}:${f.at}`);
+    }
+  }
+
+  /** T3's sooner rule: what changed since the last search, or null. */
+  private stallChanged(obs: TriggerObs): string | null {
+    for (const n of obs.nations) {
+      const was = this.nbrs.get(n.id);
+      if (was === undefined) {
+        if (!n.allied) return `new:${n.id}`;
+        continue;
+      }
+      if (was.allied !== n.allied) return `ally:${n.id}`;
+      if (was.troops - n.troops > this.p.stallChange * was.troops) {
+        return `troops:${n.id}`;
+      }
+    }
+    return null;
   }
 }

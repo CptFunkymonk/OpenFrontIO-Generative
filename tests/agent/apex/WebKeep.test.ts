@@ -26,6 +26,8 @@
 import { AgentIntent } from "../../../src/agent/Agent";
 import {
   diplomacyMemory,
+  friendPoints,
+  goldChunk,
   keepAskTicks,
   StrongAlly,
 } from "../../../src/agent/agents/apex/controllers/DiplomacyController";
@@ -222,42 +224,42 @@ describe("keepAskTicks", () => {
     askAt: 0,
     before: null,
     cap: 1,
-    home: 1,
+    troops: 1,
   });
 
   test("asks at e − lead, and the earlier of two expiries less than gap apart gap before the later one's ask", () => {
     const rows = [row("a", 5000), row("b", 5100), row("c", 7000)];
-    keepAskTicks(rows, LEAD, 600, 3000);
+    keepAskTicks(rows, LEAD, 600);
     expect(rows.map((r) => r.askAt)).toEqual([5100 - LEAD - 600, 4800, 6700]);
     expect(rows.map((r) => r.before)).toEqual(["b", null, null]);
   });
 
-  test("a chain moves each earlier one again, never more than duration − gap before its expiry", () => {
+  test("a chain moves each earlier one again, but never more than gap before its own lead", () => {
     const rows = [row("a", 5000), row("b", 5050), row("c", 5100)];
-    keepAskTicks(rows, LEAD, 600, 3000);
-    // c 4800, b 4200, a 3600 (its floor, 5000 − 2400, is lower).
-    expect(rows.map((r) => r.askAt)).toEqual([3600, 4200, 4800]);
+    keepAskTicks(rows, LEAD, 600);
+    // c 4800, b 4200; a would be 3600 but stops at 5000 − 300 − 600.
+    expect(rows.map((r) => r.askAt)).toEqual([4100, 4200, 4800]);
     const tight = [row("a", 5000), row("b", 5010), row("c", 5020)];
-    keepAskTicks(tight, LEAD, 1200, 3000);
-    // c 4720, b 3520 (floor 5010 − 1800 = 3210), a max(2320, 3200) = 3200.
-    expect(tight.map((r) => r.askAt)).toEqual([3200, 3520, 4720]);
+    keepAskTicks(tight, LEAD, 1200);
+    // c 4720, b 3520 (its bound 3510), a max(2320, 3500) = 3500.
+    expect(tight.map((r) => r.askAt)).toEqual([3500, 3520, 4720]);
   });
 
   test("the spacing is between the asks: a later ask that moved moves an earlier one whose expiry is gap or more away", () => {
     // b and c expire 50 apart, so b's ask moves to 850, 150 after a's
     // natural ask (700) though a expires 700 before b.
     const rows = [row("a", 1000), row("b", 1700), row("c", 1750)];
-    keepAskTicks(rows, LEAD, 600, 3000);
+    keepAskTicks(rows, LEAD, 600);
     expect(rows.map((r) => r.askAt)).toEqual([250, 850, 1450]);
     expect(rows.map((r) => r.before)).toEqual(["b", "c", null]);
   });
 
   test("expiries gap or more apart, or gap 0, ask at the lead", () => {
     const apart = [row("a", 5000), row("b", 5600)];
-    keepAskTicks(apart, LEAD, 600, 3000);
+    keepAskTicks(apart, LEAD, 600);
     expect(apart.map((r) => r.askAt)).toEqual([4700, 5300]);
     const off = [row("a", 5000), row("b", 5001)];
-    keepAskTicks(off, LEAD, 0, 3000);
+    keepAskTicks(off, LEAD, 0);
     expect(off.map((r) => [r.askAt, r.before])).toEqual([
       [4700, null],
       [4701, null],
@@ -268,7 +270,8 @@ describe("keepAskTicks", () => {
 describe("the strong rule's extensions", () => {
   for (const on of [true, false]) {
     test(`a strong bordering ally the web lets lapse is ${on ? "" : "not "}asked at the lead (webKeepStrong ${on})`, () => {
-      // A holds 1.05x our home: strong by troops, not by cap (0.90x).
+      // A holds 1.05x our cap (our home is at the cap): strong by troops,
+      // not by cap (0.90x).
       const w = synth({ webKeepStrong: on }, { [A]: 1.05, [B]: 0.3 });
       while (w.game.ticks() < 110) w.h.step();
       ally(w, A);
@@ -287,7 +290,7 @@ describe("the strong rule's extensions", () => {
       expect(asks[0]).toBeGreaterThanOrEqual(e - LEAD);
       expect(asks[0]).toBeLessThan(e - LEAD + thinkEvery(w));
       const st = diplomacyMemory(w.s).strong!.find((r) => r.id === A)!;
-      expect(st.home).toBeGreaterThanOrEqual(1);
+      expect(st.troops).toBeGreaterThanOrEqual(1);
       expect(st.cap).toBeLessThan(1.1);
       expect(diplomacyMemory(w.s).stats.keepAsks).toBe(1);
       expect(
@@ -312,7 +315,33 @@ describe("the strong rule's extensions", () => {
     expect(asks[0]).toBeGreaterThanOrEqual(e - LEAD);
     const st = diplomacyMemory(w.s).strong!.find((r) => r.id === A)!;
     expect(st.cap).toBeGreaterThanOrEqual(1.1);
-    expect(st.home).toBeLessThan(1);
+    expect(st.troops).toBeLessThan(1);
+  });
+
+  test("troops are held against our cap, not our home: with our home at 30% of the cap an ally holding 0.5x our cap is not strong", () => {
+    // Arena quick@20 Alps g2 (v3, troops against our home): in the opening
+    // four allies holding 1.05-1.63x our home were asked 2,000 ticks early.
+    const asks = (on: boolean) => {
+      const w = synth({ webKeepStrong: on }, { [A]: 0.5, [B]: 0.3 });
+      w.us.setTroops(Math.round(0.3 * w.cap));
+      while (w.game.ticks() < 110) w.h.step();
+      ally(w, A);
+      const e = w.game.ticks() + 500;
+      expireAt(w, A, e);
+      const sent = run(w, e - 1, () => {
+        // Held there, as while expanding (no regrowth to the cap).
+        w.us.setTroops(Math.round(0.3 * w.cap));
+      });
+      expect(w.nation(A).troops()).toBeGreaterThan(1.5 * w.us.troops());
+      if (on) {
+        expect(diplomacyMemory(w.s).strong).toEqual([]);
+        expect(diplomacyMemory(w.s).stats.keepAsks).toBeUndefined();
+      }
+      return extensionsTo(sent, A);
+    };
+    // Whatever the spec web asks (here A's §3.4.2 danger keeps it), the
+    // strong rule adds nothing.
+    expect(asks(true)).toEqual(asks(false));
   });
 
   test("a weak ally, and a strong one that does not border us, are not asked by this rule", () => {
@@ -510,5 +539,61 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
       sent.filter((x) => x.i.type === "allianceRequest" && x.i.recipient === A),
     ).toEqual([]);
     expect(diplomacyMemory(w.s).strongRenew![A]).toBeUndefined();
+  });
+});
+
+describe("gold for a strong ally's friendship (webKeepGift)", () => {
+  /** A strong ally, 7,000 tiles against our 5,000 (its cap 1.46x ours),
+   *  holding 1.39x our cap (95% of its own), so a similarly strong test
+   *  fails both ways (troops 0.72x, tiles 0.71x) and we are no threat: its
+   *  extension, asked at the lead, is refused (or accepted 30% of the time
+   *  before tick 700); its expiry `e`; our gold `gold`. */
+  function asked(options: Record<string, unknown>, gold: bigint) {
+    const w = synth(
+      { webKeepStrong: true, webKeepGift: true, ...options },
+      { [A]: 1.39 },
+      70,
+    );
+    while (w.game.ticks() < 110) w.h.step();
+    ally(w, A);
+    w.us.addGold(gold - w.us.gold());
+    const e = w.game.ticks() + 400;
+    expireAt(w, A, e);
+    const sent = run(w, e - 1);
+    const gifts = sent.filter(
+      (x) => x.i.type === "donate_gold" && x.i.recipient === A,
+    );
+    return { w, e, sent, gifts };
+  }
+
+  test("a strong ally still refusing its asked extension gets gold that keeps it Friendly past the expiry, once, webKeepGiftLead before it", () => {
+    const { w, e, sent, gifts } = asked({}, 50_000_000n);
+    expect(extensionsTo(sent, A)).toHaveLength(1);
+    expect(gifts).toHaveLength(1);
+    const t = gifts[0].tick;
+    expect(t).toBeGreaterThanOrEqual(e - 120);
+    expect(t).toBeLessThan(e - 120 + thinkEvery(w));
+    // friendPoints from relation 0, paid at t + 1, Friendly until e + 60;
+    // priced for a payment up to 20 ticks late.
+    const points = friendPoints(0, t + 1, e + 60)!;
+    const gift = gifts[0].i as { gold: number };
+    expect(gift.gold).toBe(
+      Number(BigInt(points / 5) * goldChunk(w.game, t + 20)),
+    );
+    expect(diplomacyMemory(w.s).stats.goldGifts).toBe(1);
+    expect(w.h.logs.some((l) => l.includes("dip keep-gift nationaa"))).toBe(
+      true,
+    );
+  });
+
+  test("no gift with webKeepGift off, nor when it would take more than webKeepGiftShare of our gold (logged once)", () => {
+    expect(asked({ webKeepGift: false }, 50_000_000n).gifts).toEqual([]);
+    const poor = asked({}, 100_000n);
+    expect(poor.gifts).toEqual([]);
+    expect(
+      poor.w.h.logs.filter((l) =>
+        l.includes("dip keep-gift nationaa unaffordable"),
+      ),
+    ).toHaveLength(1);
   });
 });

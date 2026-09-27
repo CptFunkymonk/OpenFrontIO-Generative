@@ -1,4 +1,4 @@
-import { Game, Player, PlayerType } from "../../../core/game/Game";
+import { Game, Player, PlayerType, UnitType } from "../../../core/game/Game";
 
 // Package WP2 (docs/14-m4-plan.md §2.5): what a search reads from a rollout
 // at a checkpoint, and the value it judges a plan by.
@@ -16,7 +16,8 @@ export interface Snap {
   tiles: number;
   /** me.troops(), rounded. */
   home: number;
-  /** Troops of our attacks (not boats) in flight, rounded. */
+  /** Troops of our attacks in flight, and of our transport ships at sea
+   *  when counted (searchOutBoats; act3 counted attacks only), rounded. */
   out: number;
   /** Troops of the non-tribe attacks on us, rounded. */
   inc: number;
@@ -55,16 +56,21 @@ export function rankOf(game: Game, me: Player): { rank: number; top: number } {
   return { rank, top };
 }
 
-/** Our snap in `game` at `h` (the counts are the rollout's). */
+/** Our snap in `game` at `h` (the counts are the rollout's); `boats`: our
+ *  transport ships' troops count as out. */
 export function snapOf(
   game: Game,
   me: Player,
   h: number,
   natAtks: number,
   natTroops: number,
+  boats = false,
 ): Snap {
   let out = 0;
   for (const a of me.outgoingAttacks()) out += a.troops();
+  if (boats) {
+    for (const u of me.units(UnitType.TransportShip)) out += u.troops();
+  }
   let inc = 0;
   for (const a of me.incomingAttacks()) {
     if (a.attacker().type() !== PlayerType.Bot) inc += a.troops();

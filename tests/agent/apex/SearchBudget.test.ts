@@ -3,17 +3,22 @@
  * equivalents.
  *
  * Claims:
- * - φ comes from the committed per-map table (a restore per rollout, or one
- *   restore, a take and a clone per search), with the fallback for a map
- *   the table lacks.
- * - restCost is an upper bound built from the plan's horizons: each
- *   candidate's fork and round 1, the longest `keep` non-break horizons,
- *   the break's longest look, the base to the longest.
+ * - φ comes from the committed per-map table: a search's first rollout
+ *   pays ctx.fork() (a structural clone of the live game), the take of that
+ *   fork and its clone, every other rollout a clone; a map the table lacks
+ *   costs the fallback.
+ * - restCost prices a search up front from the plan's horizons: each
+ *   candidate's fork and round 1, the longest `keep` non-break horizons (a
+ *   strike now on a target known to be strong at lastSend + HStrong), the
+ *   best break's whole stepwise look (its last step), the base to the
+ *   longest. The looks only a rollout reveals (a strong target at a later
+ *   send, the gated look) are not in it: Rounds buys them.
  * - The degrade order is fixed and deterministic: all plans; drop the
  *   shares below 1; drop breaks; keep only lapse, keep and defensive plans;
  *   skip. The same input always gives the same level and the same plans in
  *   the same order.
- * - The cap is R·(t − searchFrom) + 3,000; R ≤ 0 has none.
+ * - The cap is R·(t − searchFrom) + slack (4,500 by default); R ≤ 0 has
+ *   none; affordableAt is the first tick the room reaches a need.
  */
 import { SUITES } from "../../../src/agent/arena/Suites";
 import {
@@ -23,6 +28,7 @@ import {
   DEGRADE,
   horizonBound,
   phiFor,
+  phiRow,
   restCost,
   SearchBudget,
 } from "../../../src/agent/lib/search/Budget";
@@ -50,17 +56,17 @@ const MODEL: CostModel = {
   phi: { first: 100, each: 100 },
   H1: 150,
   H: 600,
-  HStrong: 600,
-  breakFirst: 1200,
+  HStrong: 1200,
+  breakLast: 1200,
   keep: 2,
   grid: 50,
 };
 
-/** act3's usual candidate set: strikes on N, a lapse and breaks on Z, an
- *  alliance request to an attacker. */
+/** The usual candidate set: strikes on N (not strong), a lapse and breaks
+ *  on Z, an alliance request to an attacker. */
 const SET = [
-  cand("strike:N:0.5"),
-  cand("strike:N:1"),
+  cand("strike:N:0.5", { strong: false }),
+  cand("strike:N:1", { strong: false }),
   cand("lapse:Z:1", { lastSend: 352 }),
   cand("break:Z:0.5"),
   cand("break:Z:1"),
@@ -68,38 +74,64 @@ const SET = [
 ];
 
 describe("search budget", () => {
-  test("φ: the table for every quick map, the fallback otherwise", () => {
+  test("φ: fork + take + clone, then a clone; the table for every quick map, the fallback otherwise", () => {
     for (const map of SUITES.quick.maps!) {
-      const row = (PHI.maps as Record<string, { restore: number }>)[map];
+      const row = (
+        PHI.maps as Record<string, { fork: number; take: number; clone: number }>
+      )[map];
       expect(row, map).toBeDefined();
-      expect(phiFor(map, "restore")).toEqual({
-        first: row.restore,
-        each: row.restore,
+      expect(phiRow(map)).toEqual(row);
+      expect(phiFor(map)).toEqual({
+        first: row.fork + row.take + row.clone,
+        each: row.clone,
       });
+      // A clone costs tens of live ticks at most, not a restore's hundreds.
+      expect(row.clone, map).toBeLessThan(60);
     }
-    const alps = PHI.maps["Alps"];
-    expect(phiFor("Alps", "clone")).toEqual({
-      first: alps.restore + alps.take + alps.clone,
-      each: alps.clone,
+    const f = PHI.fallback;
+    expect(phiFor("No Such Map")).toEqual({
+      first: f.fork + f.take + f.clone,
+      each: f.clone,
     });
-    expect(phiFor("No Such Map", "restore")).toEqual({ first: 300, each: 300 });
-    expect(PHI.fallback.restore).toBe(300);
   });
 
-  test("horizon bounds and the rest cost of a search", () => {
+  test("horizon bounds: a break's whole look, a known strong target's long one", () => {
     expect(horizonBound(cand("strike:N:1"), MODEL)).toBe(600);
+    expect(horizonBound(cand("strike:N:1", { strong: false }), MODEL)).toBe(
+      600,
+    );
+    expect(horizonBound(cand("strike:N:1", { strong: true }), MODEL)).toBe(
+      1200,
+    );
+    // A lapse's strength is read at its send: priced short, bought later.
     expect(horizonBound(cand("lapse:Z:1", { lastSend: 352 }), MODEL)).toBe(
       1000,
     );
+    expect(
+      horizonBound(cand("lapse:Z:1", { lastSend: 352 }), {
+        ...MODEL,
+        HStrong: 600,
+      }),
+    ).toBe(1000);
     expect(horizonBound(cand("break:Z:1"), MODEL)).toBe(1200);
-    expect(horizonBound(cand("strike:N:1"), { ...MODEL, HStrong: 1200 })).toBe(
-      1200,
+    expect(horizonBound(cand("break:Z:1"), { ...MODEL, breakLast: 1800 })).toBe(
+      1800,
     );
+  });
+
+  test("the rest cost of a search: forks and round 1, the finalists, the break's whole look, the base", () => {
     // 6 × (φ + H1) + the two longest non-breaks (lapse 1000, a strike 600)
-    // + the break to 1,200 + the base to 1,200, each past H1.
+    // + the break to its last step, 1,200 + the base to 1,200, past H1.
     expect(restCost(SET, MODEL)).toBe(
       6 * 250 + (1000 - 150) + (600 - 150) + (1200 - 150) + (1200 - 150),
     );
+    // Breaks always to 1,800 (S2): the break and the base go 600 further.
+    expect(restCost(SET, { ...MODEL, breakLast: 1800 })).toBe(
+      restCost(SET, MODEL) + 600 + 600,
+    );
+    // A strike known strong goes to 1,200 (and the base with it).
+    const strong = [cand("strike:N:1", { strong: true })];
+    expect(restCost(strong, MODEL)).toBe(250 + 1050 + 1050);
     // No candidate: the base to H.
     expect(restCost([], MODEL)).toBe(450);
   });
@@ -151,15 +183,23 @@ describe("search budget", () => {
     expect(d.kept).toEqual([]);
   });
 
-  test("the cap: R·(t − from) + 3,000, and none at R = 0", () => {
+  test("the cap: R·(t − from) + slack, none at R = 0; when a need is payable", () => {
     const b = new SearchBudget(2.5, 2400);
+    expect(BUDGET_SLACK).toBe(4500);
     expect(b.cap(2400)).toBe(BUDGET_SLACK);
     expect(b.cap(2000)).toBe(BUDGET_SLACK);
-    expect(b.cap(3400)).toBe(2.5 * 1000 + 3000);
-    b.charge(4000);
-    expect(b.room(3400)).toBe(1500);
+    expect(b.cap(3400)).toBe(2.5 * 1000 + 4500);
+    b.charge(6000);
+    expect(b.room(3400)).toBe(1000);
+    // 1,000 left at 3,400: 2,000 needs 400 ticks more.
+    expect(b.affordableAt(3400, 1000)).toBe(3400);
+    expect(b.affordableAt(3400, 2000)).toBe(3800);
+    expect(b.room(3800)).toBe(2000);
+    expect(b.affordableAt(3400, 2001)).toBe(3801);
     const free = new SearchBudget(0, 2400);
     expect(free.capped).toBe(false);
     expect(free.room(2400)).toBe(Infinity);
+    expect(free.affordableAt(2400, 1e9)).toBe(2400);
+    expect(new SearchBudget(2.5, 2400, 3000).cap(2400)).toBe(3000);
   });
 });

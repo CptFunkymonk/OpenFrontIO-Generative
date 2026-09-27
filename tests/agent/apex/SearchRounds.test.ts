@@ -11,9 +11,14 @@
  * - The stepwise break round drops a break that trails at a step, judges
  *   one that leads at its last step, and extends it to the gated horizon
  *   only when the gate fires: (a) an alliance other than the target's
- *   ended early while we were a traitor, (b) an unallied bordering nation
- *   at ≥ 1.1× our cap in the break world is allied or not bordering in the
- *   base world.
+ *   ended early while we were a traitor and is still gone, (b) an unallied
+ *   bordering nation at ≥ 1.1× our cap in the break world is allied or not
+ *   bordering in the base world.
+ * - The budget: the break's whole stepwise look and the strong look of a
+ *   strike known strong at the search were priced up front; a look nobody
+ *   priced (the gated one, a lapse strong only at its send) is bought with
+ *   everything still to spend, or the plan is dropped ("budget"), never
+ *   judged short; the rounds never spend past what `afford` allowed.
  * - The margin is strict (a gain equal to it keeps the base), ties between
  *   plans keep the first, and the dip guard drops a plan more than `dip`
  *   below the base at a common checkpoint.
@@ -194,17 +199,34 @@ function cand(name: string, over: Partial<Candidate> = {}): Candidate {
   };
 }
 
-/** Runs the rounds over fakes: `rolls` by candidate name. */
+/** Runs the rounds over fakes: `rolls` by candidate name. With `cap`, a
+ *  budget of that many ticks advanced in all (base included, no φ): afford
+ *  asks whether the ticks spent so far plus its argument fit, and every
+ *  answer is recorded in `asked`. */
 function run(
   p: RoundsParams,
   base: FakeRoll,
   cands: Candidate[],
   rolls: Record<string, FakeInit>,
   defend?: Parameters<typeof runRounds>[4],
+  cap?: number,
 ) {
   const opened = new Map<string, FakeRoll>();
+  const spent = () =>
+    base.h + [...opened.values()].reduce((a, r) => a + r.h, 0);
+  const asked: number[] = [];
+  const q: RoundsParams =
+    cap === undefined
+      ? p
+      : {
+          ...p,
+          afford: (te) => {
+            asked.push(te);
+            return spent() + te <= cap;
+          },
+        };
   const res = runRounds(
-    p,
+    q,
     base,
     cands,
     (c) => {
@@ -216,7 +238,7 @@ function run(
   );
   const judged = (name: string) =>
     res.judged.find((j) => j.cand.name === name)!;
-  return { res, opened, judged };
+  return { res, opened, judged, asked, spent: spent() };
 }
 
 const flat = (tiles: number, home = 0): FakeInit => ({
@@ -342,7 +364,7 @@ describe("search rounds", () => {
     expect(base.h).toBe(1200);
   });
 
-  test("each further look of the break round is bought from the budget", () => {
+  test("the break's whole look is priced up front; the gated look is bought, or the break dropped", () => {
     const p = params({ HBreak: [600, 1200], HBreakGated: 1800 });
     const leading: FakeInit = {
       points: [
@@ -351,32 +373,101 @@ describe("search rounds", () => {
       ],
       ended: [{ id: "OTHER", h: 27, early: true, traitor: true }],
     };
-    const asked: number[] = [];
-    // 1,200 left: pays for the step to 1,200 (the break and the base, 600
-    // each), not for the gated look past it.
-    let left = 1200;
-    const afford = (te: number) => {
-      asked.push(te);
-      if (te > left) return false;
-      left -= te;
-      return true;
-    };
+    // Round 1 (150 + 150), the break's and the base's whole look (1,050
+    // more each): 2,400. The gate fires at 1,200 and wants 600 + 600 more.
     let base = new FakeRoll("base", flat(10_000));
-    let r = run({ ...p, afford }, base, [cand("break:Z:1")], {
-      "break:Z:1": leading,
-    });
-    expect(asked).toEqual([1200, 1200]);
+    let r = run(
+      p,
+      base,
+      [cand("break:Z:1")],
+      { "break:Z:1": leading },
+      undefined,
+      2400 + 1199,
+    );
+    // Asked at 600 for the rest of the priced look (600 + 600), and at
+    // 1,200 for the gated one (600 + 600): the second does not fit.
+    expect(r.asked).toEqual([1200, 1200]);
     expect(r.judged("break:Z:1").drop).toBe("budget");
+    expect(r.res.gate?.a).toBe(true);
     expect(r.res.chosen).toBeNull();
     expect(base.h).toBe(1200);
-    // No budget for the second step: dropped at 600, never judged short.
+    expect(r.spent).toBeLessThanOrEqual(2400 + 1199);
+    // With 1,200 more it is bought and judged at 1,800.
     base = new FakeRoll("base", flat(10_000));
-    r = run({ ...p, afford: () => false }, base, [cand("break:Z:1")], {
-      "break:Z:1": leading,
-    });
+    r = run(
+      p,
+      base,
+      [cand("break:Z:1")],
+      { "break:Z:1": leading },
+      undefined,
+      2400 + 1200,
+    );
+    expect(r.judged("break:Z:1").gated).toBe(true);
+    expect(r.judged("break:Z:1").h).toBe(1800);
+    expect(r.spent).toBe(3600);
+    // A budget that did not hold the priced look (spent elsewhere): the
+    // break stops at 600, never judged short.
+    base = new FakeRoll("base", flat(10_000));
+    r = run(
+      p,
+      base,
+      [cand("break:Z:1")],
+      { "break:Z:1": leading },
+      undefined,
+      1500,
+    );
     expect(r.judged("break:Z:1").drop).toBe("budget");
     expect(r.judged("break:Z:1").h).toBe(600);
     expect(base.h).toBe(600);
+    expect(r.spent).toBeLessThanOrEqual(1500);
+  });
+
+  test("a strong look the budget did not price is bought, or the plan is dropped", () => {
+    const p = params({ HStrong: 1200 });
+    const home = 1_000_000;
+    // A lapse striking at 352 into a strong ally (0.95 of our home): judged
+    // at ⌈352 + 1,200⌉ = 1,600, priced short (1,000).
+    const lapse = cand("lapse:L:1", { lastSend: 352 });
+    const init: FakeInit = {
+      points: [
+        [0, 10_000],
+        [500, 12_000],
+      ],
+      sent: { h: 352, targetTroops: 0.95 * home, home, targetAlive: true },
+    };
+    let base = new FakeRoll("base", flat(10_000));
+    // Round 1 300; the lapse and the base to 1,600: 1,450 more each.
+    let r = run(p, base, [lapse], { "lapse:L:1": init }, undefined, 3200);
+    expect(r.asked).toEqual([1450 + 1450 - (353 - 150)]);
+    expect(r.judged("lapse:L:1").strong).toBe(true);
+    expect(r.judged("lapse:L:1").h).toBe(1600);
+    expect(r.res.chosen?.cand.name).toBe("lapse:L:1");
+    expect(base.h).toBe(1600);
+    // 3,000: dropped, not judged at 1,000; the base stops at 600.
+    base = new FakeRoll("base", flat(10_000));
+    r = run(p, base, [lapse], { "lapse:L:1": init }, undefined, 3000);
+    expect(r.judged("lapse:L:1").drop).toBe("budget");
+    expect(r.res.chosen).toBeNull();
+    expect(base.h).toBe(600);
+    expect(r.spent).toBeLessThanOrEqual(3000);
+    // A strike known strong up front (Candidate.strong) is not asked for.
+    base = new FakeRoll("base", flat(10_000));
+    r = run(
+      p,
+      base,
+      [cand("strike:S:1", { strong: true })],
+      {
+        "strike:S:1": {
+          points: [[0, 10_450]],
+          sent: { h: 0, targetTroops: 0.95 * home, home, targetAlive: true },
+        },
+      },
+      undefined,
+      2400,
+    );
+    expect(r.asked).toEqual([]);
+    expect(r.judged("strike:S:1").h).toBe(1200);
+    expect(base.h).toBe(1200);
   });
 
   test("the gate extends a leading break to 1,800 on an early alliance end in our traitor window (a)", () => {
@@ -393,11 +484,13 @@ describe("search rounds", () => {
       // A lapse (not early), or an early end once the traitor mark is gone.
       [[{ id: "OTHER", h: 700, early: false, traitor: false }], false],
       [[{ id: "OTHER", h: 700, early: true, traitor: false }], false],
+      // Allied again by the gate: gone at 1,200 it is not.
+      [[{ id: "BACK", h: 27, early: true, traitor: true }], false],
     ];
     for (const [ended, gated] of cases) {
       const base = new FakeRoll("base", flat(10_000));
       const r = run(p, base, [cand("break:Z:1")], {
-        "break:Z:1": { points: leading, ended },
+        "break:Z:1": { points: leading, ended, allied: ["BACK"] },
       });
       const j = r.judged("break:Z:1");
       expect(r.res.gate?.a, JSON.stringify(ended)).toBe(gated);

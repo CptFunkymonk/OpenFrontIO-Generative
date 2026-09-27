@@ -1,8 +1,10 @@
 import {
   deterrenceFloor,
+  REMNANT_SHARE,
   REPLICA_STEPS,
   replicaLine,
   strikeBudget,
+  transientExit,
 } from "../../../src/agent/agents/apex/controllers/StrikeController";
 import {
   APEX_DEFAULTS,
@@ -14,8 +16,9 @@ import { createModels } from "../../../src/agent/lib/Models";
 import { NationModel } from "../../../src/agent/lib/NationModel";
 import { createPurse, HomeFloors } from "../../../src/agent/lib/Scheduler";
 import { scanWorld } from "../../../src/agent/lib/WorldModel";
+import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Player, PlayerInfo, PlayerType } from "../../../src/core/game/Game";
-import { field, Field, GAME_ID, own, rect } from "./Field";
+import { addTribe, field, Field, GAME_ID, own, rect } from "./Field";
 
 // Package WP7b R1 FLOOR (docs/14-m4-plan.md §2.7 item 7b, §3 WP7): the
 // strike floor's replica line (StrikeController.replicaLine), ported from
@@ -96,6 +99,7 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(APEX_DEFAULTS.strikeFlowFloor).toBe(0.35);
     expect(APEX_DEFAULTS.strikeFloorReplicaUnseen).toBe(false);
     expect(APEX_DEFAULTS.strikeFlowFloorMin).toBe(false);
+    expect(APEX_DEFAULTS.strikeFloorReplicaSteady).toBe(false);
     expect(REPLICA_STEPS).toBe(8);
   });
 
@@ -376,6 +380,72 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     );
     expect(deterrenceFloor(v(R1), A.id(), [])).toBe(line);
     expect(deterrenceFloor(v(unseen), A.id(), [])).toBe(line);
+  });
+
+  test("strikeFloorReplicaSteady: a remnant attack on B, or B's last tribe, keeps B's land line", async () => {
+    const steadyO = parseApexOptions({
+      strikeFloorReplica: true,
+      strikeFloorReplicaSteady: true,
+    });
+    // A fresh model and scan at the current tick.
+    const at = (w: World) => {
+      const { game, me } = w.f;
+      const models = createModels(game);
+      const nm = new NationModel(game, me, GAME_ID, models);
+      const tick = game.ticks();
+      nm.observe(tick);
+      const wm = scanWorld(game, me, null);
+      return {
+        nm,
+        v: (o: ApexOptions) => ({ o, wm, nm, game, me, tick, models }),
+      };
+    };
+    for (const troops of [1000, 0.2]) {
+      // A attacks B (the replica's retaliate step: B answers A first). 1k
+      // is a remnant; a fifth of B's troops is not.
+      const w = await world(0.8, 0.9);
+      const { A, B, f } = w;
+      A.setTroops(Math.round(0.8 * B.troops()));
+      const sent = troops < 1 ? Math.round(troops * B.troops()) : troops;
+      A.setTroops(A.troops() + sent);
+      f.game.addExecution(new AttackExecution(sent, A, B.id()));
+      f.game.executeNextTick();
+      const inc = B.incomingAttacks().filter((a) => a.attacker() === A);
+      expect(inc.length).toBe(1);
+      const { nm, v } = at(w);
+      const cap = f.config.maxTroops(f.me);
+      const dB = nm.nextDecision(B.id(), f.game.ticks());
+      const land = (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe();
+      // The replica: B retaliates against A at any home of ours.
+      expect(nm.wouldTargetUs(B.id(), 0.35 * cap)).toBeNull();
+      expect(deterrenceFloor(v(R1), A.id(), [])).toBe(0.35 * cap);
+      const remnant = inc[0].troops() < REMNANT_SHARE * B.troops();
+      expect(remnant).toBe(troops === 1000);
+      expect(transientExit(v(steadyO), B, nm.get(B.id())!)).toBe(
+        remnant ? "remnant" : null,
+      );
+      if (remnant) {
+        expect(deterrenceFloor(v(steadyO), A.id(), [])).toBeCloseTo(land, 6);
+      } else {
+        expect(deterrenceFloor(v(steadyO), A.id(), [])).toBe(0.35 * cap);
+      }
+    }
+    // B's last tribe (its bots step): a small tribe carved out of B.
+    const w = await world(0.8, 0.9);
+    const { A, B, f } = w;
+    A.setTroops(Math.round(0.8 * B.troops()));
+    addTribe(f, "TRIBE001", rect(f.game, 76, 36, 80, 40), 500, false);
+    const { nm, v } = at(w);
+    nm.refresh(B.id(), "full");
+    expect(nm.get(B.id())?.affordableTribes).toBe(1);
+    const cap = f.config.maxTroops(f.me);
+    const dB = nm.nextDecision(B.id(), f.game.ticks());
+    const land = (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe();
+    expect(nm.gates(B.id(), dB)).toBe("open");
+    expect(nm.wouldTargetUs(B.id(), 0.35 * cap)).toBeNull();
+    expect(deterrenceFloor(v(R1), A.id(), [])).toBe(0.35 * cap);
+    expect(transientExit(v(steadyO), B, nm.get(B.id())!)).toBe("lastTribe");
+    expect(deterrenceFloor(v(steadyO), A.id(), [])).toBeCloseTo(land, 6);
   });
 
   test("without a full refresh of the nation the replica keeps its land line", async () => {

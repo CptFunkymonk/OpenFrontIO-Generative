@@ -51,7 +51,7 @@ import { inStall } from "./ExpansionController";
 //   WP7a web keep          (o.webKeepStrong; docs/14-m4-plan.md §2.7 item 7a)
 //                          every strong bordering ally (maxTroops ≥
 //                          webKeepCapRatio × ours, or troops ≥
-//                          webKeepHomeRatio × our home) is asked to extend,
+//                          webKeepTroopRatio × our cap) is asked to extend,
 //                          kept or not, at the lead; the earlier of two
 //                          strong expiries within webKeepGap is asked
 //                          sooner (planStrong, keepAskTicks); one that
@@ -240,25 +240,27 @@ export interface StrongAlly {
   /** The strong ally expiring next within webKeepGap, which moved askAt
    *  earlier (null: askAt is e − lead). */
   before: PlayerID | null;
-  /** maxTroops(Z) / maxTroops(us), and troops(Z) / our home troops. */
+  /** maxTroops(Z) / maxTroops(us), and troops(Z) / maxTroops(us). */
   cap: number;
-  home: number;
+  troops: number;
 }
 
 /**
  * Package WP7a (o.webKeepStrong): the ask tick of each strong ally, `rows`
- * sorted by expiry (e, then id): e − lead, but at least `gap` before the
- * ask tick of the next strong ally (a passed extension restarts the term
- * at the nation's yes, so terms asked `gap` apart end `gap` apart; the
- * later ask may itself have moved); never earlier than e − (duration −
- * gap), so a term just begun is not asked again at once. Fills `askAt`
- * and `before` in place.
+ * sorted by expiry (e, then id): e − lead, but `gap` before the ask tick
+ * of the next strong ally when that is sooner (a passed extension
+ * restarts the term at the nation's yes, so terms asked `gap` apart end
+ * `gap` apart; the later ask may itself have moved), and never more than
+ * `gap` before e − lead: an early yes gives a term we may not want (arena
+ * quick@20 Alps g2 with no such bound: four opening allies were asked
+ * about 2,000 ticks early and kept allied into the midgame, where the
+ * spec web would have let them lapse and eaten them). Fills `askAt` and
+ * `before` in place.
  */
 export function keepAskTicks(
   rows: StrongAlly[],
   lead: number,
   gap: number,
-  duration: number,
 ): void {
   let next: StrongAlly | null = null;
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -266,10 +268,7 @@ export function keepAskTicks(
     r.askAt = r.e - lead;
     r.before = null;
     if (gap > 0 && next !== null && next.askAt - r.askAt < gap) {
-      const by = Math.max(
-        next.askAt - gap,
-        r.e - Math.max(lead, duration - gap),
-      );
+      const by = Math.max(next.askAt - gap, r.e - lead - gap);
       if (by < r.askAt) {
         r.askAt = by;
         r.before = next.id;
@@ -651,7 +650,7 @@ export class DiplomacyController implements Controller {
       v.log?.(
         `${t} dip keep-gift ${N.name()} ${gold} gold for +${points} (relation ~${r.toFixed(1)}, ` +
           `ext p=${f.p.toFixed(2)} ${f.branch}, expires ${e}, ` +
-          `cap=${st.cap.toFixed(2)}x home=${st.home.toFixed(2)}H)`,
+          `cap=${st.cap.toFixed(2)}x troops=${st.troops.toFixed(2)}C)`,
       );
     }
   }
@@ -1063,10 +1062,14 @@ export class DiplomacyController implements Controller {
   /**
    * Package WP7a (o.webKeepStrong, every decision): our allies that border
    * us (land contact at this decision's scan, WorldModel.nations) and are
-   * strong, by troops (troops(Z) ≥ webKeepHomeRatio × our home troops: a
-   * nation can land-attack us once unallied while our home is below its
-   * troops over 1.1, AiAttackBehavior's send cap, plan §1.4) or by cap
-   * (Config.maxTroops(Z) ≥ webKeepCapRatio × ours: it soon holds them).
+   * strong, by cap (Config.maxTroops(Z) ≥ webKeepCapRatio × ours) or by
+   * troops (troops(Z) ≥ webKeepTroopRatio × our cap): a nation can
+   * land-attack us once unallied while our home is below its troops over
+   * 1.1 (AiAttackBehavior's send cap, plan §1.4), and our home idles at
+   * the cap through most of the midgame. The troops are held against our
+   * cap, not our home: the home swings with expansion and strikes, and in
+   * the opening (home at 30% of the cap) nearly every ally held more (arena
+   * quick@20 Alps g2).
    * Soonest expiry first, with their ask ticks (keepAskTicks, `lead` the
    * web's extension lead). Records each one's expiry for the renew
    * (o.webKeepRenew) and forgets allies no longer strong or bordering;
@@ -1080,7 +1083,6 @@ export class DiplomacyController implements Controller {
     const { o, me, game } = v;
     const cfg = game.config();
     const ourCap = Math.max(1, cfg.maxTroops(me));
-    const home = Math.max(1, me.troops());
     const border = new Set<number>();
     for (const n of v.wm.nations) border.add(n.smallID);
     const found: { row: StrongAlly; sid: number }[] = [];
@@ -1089,11 +1091,11 @@ export class DiplomacyController implements Controller {
       const N = a.other(me);
       if (N.type() !== PlayerType.Nation) continue;
       const id = N.id();
-      const troops = N.troops() / home;
+      const troops = N.troops() / ourCap;
       const cap = border.has(N.smallID()) ? cfg.maxTroops(N) / ourCap : 0;
       if (
         cap === 0 ||
-        (cap < o.webKeepCapRatio && troops < o.webKeepHomeRatio)
+        (cap < o.webKeepCapRatio && troops < o.webKeepTroopRatio)
       ) {
         if (renew !== null) delete renew[id];
         continue;
@@ -1101,13 +1103,13 @@ export class DiplomacyController implements Controller {
       const e = a.expiresAt();
       if (renew !== null) renew[id] = e;
       found.push({
-        row: { id, e, askAt: e - lead, before: null, cap, home: troops },
+        row: { id, e, askAt: e - lead, before: null, cap, troops },
         sid: N.smallID(),
       });
     }
     found.sort((a, b) => a.row.e - b.row.e || a.sid - b.sid);
     const rows = found.map((x) => x.row);
-    keepAskTicks(rows, lead, o.webKeepGap, cfg.allianceDuration());
+    keepAskTicks(rows, lead, o.webKeepGap);
     mem.strong = rows;
     return new Map(rows.map((r) => [r.id, r]));
   }
@@ -1890,7 +1892,7 @@ export class DiplomacyController implements Controller {
           mem.stats.keepEarly = (mem.stats.keepEarly ?? 0) + 1;
         }
         why +=
-          ` strong cap=${st.cap.toFixed(2)}x home=${st.home.toFixed(2)}H` +
+          ` strong cap=${st.cap.toFixed(2)}x troops=${st.troops.toFixed(2)}C` +
           `${kept ? "" : " (outside the web)"}` +
           `${st.before !== null ? ` early ${early} for ${v.game.player(st.before).name()}` : ""}`;
       }

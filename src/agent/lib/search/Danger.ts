@@ -54,6 +54,13 @@ import type { Danger, DangerModel } from "./Value";
 //
 // Read-only: the game is only read (scanWorld's contract). No Math.random,
 // no clocks: the same state gives the same terms.
+//
+// WP4's fit (30 log-only games of the act3 prototype, 85 searches, every
+// plan rolled 2,400 ticks; /tmp/claude-0/pkg-WP4): D_cap predicts the
+// tiles lost after the horizon (R² 0.16-0.18 at 600 ticks; D_now 0.04-0.08),
+// but no λ cut the plan rounds' regret at 2,400 by 25% out of sample
+// (leave-one-game-out −11% to +5%), so searchDangerNow and searchDangerCap
+// stay 0. The in-sample optima were λ_cap ≈ 0.1-0.2 with clampTiles.
 
 /** NationModel's worst-case reserve when a nation's parameters are
  *  unknown (defaultParams: the lowest reserve sends the most). */

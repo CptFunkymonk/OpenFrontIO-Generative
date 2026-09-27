@@ -11,22 +11,27 @@ import type {
 
 // Package WP2 (docs/14-m4-plan.md §2.4): the core candidates, ported from
 // the act3 prototype (/tmp/claude-0/search-wt3, SearchProbe.ts,
-// candidates2) so that the search replays it:
+// candidates2):
 // - the bordering nations with at least searchMinContact contact pairs,
 //   plus every nation whose attacks reach us in the base rollout's first
-//   searchH1 ticks, by contact (ties: ascending smallID), until searchK are
-//   counted:
+//   searchH1 ticks (or, at an attack trigger, the attack's nation), by
+//   contact (ties: ascending smallID); the first searchK of them count:
 //   - unallied and attackable: strike:N:f, attack N now with share f of
 //     purse.available("strike") at the send, f in searchFracs (counts 1);
 //   - allied, expiring within searchLapseLead ticks: lapse:N:1, a foe mark
-//     from the next tick to the expiry + 900 (no extension, request or
-//     counter-accept), then attack N with the whole purse at the expiry + 2
-//     (counts 1);
+//     from searchLapseFoeAt ticks on to the expiry + 900 (no extension,
+//     request or counter-accept), then attack N with the whole purse at the
+//     expiry + 2;
 //   - allied: break:N:f, break the alliance now and attack N the next tick
-//     with share f (counts 1 for all shares; so an expiring ally with both
-//     counts 2, as in act3);
+//     with share f (counts 1 for all shares);
 // - ally:N, an alliance request now, to each nation in the base's first
 //   ticks' attackers we are not allied with, in the order they attacked.
+// With searchOnTop (the plan's §2.4) the lapses of every expiring ally and
+// the strikes on every attacker come on top of the searchK nations, first
+// the lapses and the alliance requests (the plans an alliance end or an
+// attack is searched for); without it (act3) a lapse counts 1 of searchK,
+// so an expiring ally with a lapse and breaks counts 2, and nations past
+// the first searchK get nothing.
 // Humans are never candidates (act3's filter is PlayerType.Nation).
 
 /** The foe mark of a lapse holds this many ticks past the expiry. */
@@ -101,6 +106,8 @@ export const CORE: CandidateGenerator = {
   kinds: ["strike", "lapse", "break", "ally"],
   generate(sv: SearchView, base: BaseView): Candidate[] {
     const { o, game, me, t, kinds } = sv;
+    const onTop = o.searchOnTop;
+    const first: Candidate[] = [];
     const out: Candidate[] = [];
     const attackers = base.attackers;
     const nations = sv.wm.nations
@@ -108,46 +115,53 @@ export const CORE: CandidateGenerator = {
       .filter((n) => n.contact >= o.searchMinContact || attackers.has(n.id))
       .sort((a, b) => b.contact - a.contact);
     const avail = sv.host.available("strike");
+    const home = me.troops();
+    const strikes = (n: NeighborInfo, troops: number, need: number) => {
+      for (const f of o.searchFracs) {
+        out.push({
+          name: `strike:${n.id}:${f}`,
+          kind: "strike",
+          target: n.id,
+          steps: [attackStep(n.id, n.smallID, t, f)],
+          lastSend: 0,
+          isBreak: false,
+          strongCheck: true,
+          // The send is now: the rollout reads the live state there.
+          strong: troops >= o.searchStrongShare * home,
+          frac: f,
+          defensive: false,
+          gate: { S: Math.floor(f * avail), need },
+        });
+      }
+    };
     let k = 0;
     for (const n of nations) {
-      if (k >= o.searchK) break;
+      if (!onTop && k >= o.searchK) break;
+      const inK = k < o.searchK;
       const N = game.player(n.id);
       if (!N.isAlive()) continue;
       const al = me.allianceWith(N);
       if (al === null) {
         if (!n.attackable) continue;
-        k++;
+        if (inK) k++;
+        else if (!attackers.has(n.id)) continue;
         if (!kinds.has("strike")) continue;
-        const need = N.troops() + incomingFrom(sv, n);
-        for (const f of o.searchFracs) {
-          out.push({
-            name: `strike:${n.id}:${f}`,
-            kind: "strike",
-            target: n.id,
-            steps: [attackStep(n.id, n.smallID, t, f)],
-            lastSend: 0,
-            isBreak: false,
-            strongCheck: true,
-            frac: f,
-            defensive: false,
-            gate: { S: Math.floor(f * avail), need },
-          });
-        }
+        strikes(n, N.troops(), N.troops() + incomingFrom(sv, n));
         continue;
       }
       const left = al.expiresAt() - t;
       if (kinds.has("lapse") && left <= o.searchLapseLead) {
-        k++;
+        if (!onTop) k++;
         const strikeAt = left + LAPSE_STRIKE_DELAY;
-        out.push({
+        (onTop ? first : out).push({
           name: `lapse:${n.id}:1`,
           kind: "lapse",
           target: n.id,
           // act3 recorded the foe mark in its search tick's run after that
-          // run's veto, so it held from the next tick (WP1's port).
+          // run's veto, so it held from the next tick (searchLapseFoeAt 1).
           steps: [
             {
-              at: t + 1,
+              at: t + o.searchLapseFoeAt,
               foe: { id: n.id, until: al.expiresAt() + LAPSE_FOE_TICKS },
             },
             attackStep(n.id, n.smallID, t + strikeAt, 1),
@@ -159,7 +173,7 @@ export const CORE: CandidateGenerator = {
           defensive: true,
         });
       }
-      if (kinds.has("break")) {
+      if (kinds.has("break") && (onTop ? inK : true)) {
         k++;
         for (const f of o.searchFracs) {
           const steps: DirectiveStep[] = [breakStep(n.id, t)];
@@ -184,13 +198,14 @@ export const CORE: CandidateGenerator = {
         }
       }
     }
+    const allies: Candidate[] = [];
     if (kinds.has("ally")) {
       for (const [id] of attackers) {
         if (!game.hasPlayer(id)) continue;
         const N = game.player(id);
         if (N.type() !== PlayerType.Nation || !N.isAlive()) continue;
         if (me.isAlliedWith(N)) continue;
-        out.push({
+        allies.push({
           name: `ally:${id}`,
           kind: "ally",
           target: id,
@@ -202,6 +217,6 @@ export const CORE: CandidateGenerator = {
         });
       }
     }
-    return out;
+    return onTop ? [...first, ...allies, ...out] : [...out, ...allies];
   },
 };

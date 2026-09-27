@@ -35,6 +35,18 @@
  *   salvos at a later decision. With hydrogen money the SAM itself scores
  *   100k a level from any aim point that outranges it (> 70 tiles, within
  *   100, :749-778): one hydrogen bomb, which the SAM cannot intercept.
+ * - Refinement 3 (package WP8 review, finding 5): a "no bomb" proves the
+ *   rule only if the decision scored a valid aim point and found none
+ *   above 0; a decision also ends when no aim point has both rings on our
+ *   land or unowned tiles. So every no-structure phase asserts that each
+ *   decision scored aim points (a spy on nukeTileScore) and that the best
+ *   scored 0. From every tile of ours in the crownLead and runnerUp
+ *   worlds the hydrogen bomb's rings (100 and 50 tiles) touch N's or Z's
+ *   strip, so no aim point is valid there: the hydrogen half is pinned on
+ *   crown50, whose strip reaches the map edge. Who aims (the rung) and
+ *   what an aim point scores are separate steps of maybeSendNuke
+ *   (:126-129, :172-219): the atom phases pin every rung, crown50 the
+ *   hydrogen bomb's scoring.
  *
  * Setting: tests/agent/apex/NukeWorld.ts (the real Config, FFA,
  * Singleplayer, Impossible; all-plains maps; no PlayerExecution runs, so
@@ -162,19 +174,48 @@ function scene(rung: Rung, silos = 1, hydro = false): Scene {
   };
 }
 
+/** The aim points `nuke`'s decisions scored (nukeTileScore, NNB :706-804,
+ *  reached only by an aim point with both rings valid, a silo that can
+ *  launch at it and no SAM on its trajectory, :172-205), and the best
+ *  score (refinement 3). */
+interface ScoreSpy {
+  calls: number;
+  best: number;
+}
+
+function spyScores(nuke: NukeBrain): ScoreSpy {
+  const b = nuke as unknown as {
+    nukeTileScore: (...a: unknown[]) => number;
+  };
+  const score = b.nukeTileScore.bind(b);
+  const spy: ScoreSpy = { calls: 0, best: -Infinity };
+  b.nukeTileScore = (...a: unknown[]) => {
+    const v = score(...a);
+    spy.calls++;
+    spy.best = Math.max(spy.best, v);
+    return v;
+  };
+  return spy;
+}
+
 /** One decision every DECISION ticks, `n` times, gold topped up to `gold`
- *  before each; the bombs (and upgrades) it created, as recorded. */
-function decide(s: Scene, n: number, gold: bigint) {
+ *  before each; the bombs (and upgrades) it created, as recorded, and
+ *  with `spy` the aim points each decision scored. */
+function decide(s: Scene, n: number, gold: bigint, spy?: ScoreSpy) {
   const from = s.w.nukes.length;
   const ups = s.w.upgrades.length;
+  const scored: number[] = [];
   for (let i = 0; i < n; i++) {
     setGold(s.w.p.N, gold);
+    const before = spy?.calls ?? 0;
     s.nuke.maybeSendNuke();
+    scored.push((spy?.calls ?? 0) - before);
     tick(s.w, DECISION);
   }
   return {
     bombs: s.w.nukes.slice(from),
     upgrades: s.w.upgrades.length - ups,
+    scored,
   };
 }
 
@@ -226,7 +267,7 @@ describe("WP8 pin: an Impossible nation's bombs follow our structures (NationNuk
   );
 
   it.each(RUNGS)(
-    "%s: while we own no structure, no atom or hydrogen bomb in 15 decisions; once we start a City, one at the next decision, and it takes the city",
+    "%s: while we own no structure, no atom bomb in 15 decisions, though each scores valid aim points (best 0); once we start a City, one at the next decision, and it takes the city",
     (rung) => {
       const s = scene(rung);
       const { w } = s;
@@ -234,16 +275,13 @@ describe("WP8 pin: an Impossible nation's bombs follow our structures (NationNuk
       expect(structures(s)).toHaveLength(0);
       // Atom money, not a hydro nation: it would fire an atom at anything
       // that scores.
-      expect(decide(s, WATCH, ATOM_MONEY).bombs).toEqual([]);
-      // Hydrogen money: the type choice picks a hydrogen bomb (NNB
-      // :139-155), which finds no scoring tile either.
-      expect(decide(s, WATCH, HYDRO_MONEY).bombs).toEqual([]);
-      // A hydro nation with hydrogen money, likewise.
-      const hydro = brain(w, "N", true);
-      expect(hydro.isHydroNation).toBe(true);
-      setGold(w.p.N, HYDRO_MONEY);
-      hydro.maybeSendNuke();
-      expect(w.nukes).toEqual([]);
+      const spy = spyScores(s.nuke);
+      const none = decide(s, WATCH, ATOM_MONEY, spy);
+      expect(none.bombs).toEqual([]);
+      // Not for want of an aim point: every decision scored some, none
+      // above 0 (the bar at Impossible, NNB :212-216).
+      expect(Math.min(...none.scored)).toBeGreaterThan(0);
+      expect(spy.best).toBe(0);
 
       // The City, still under construction (its level not yet in the
       // cap), draws the next decision's bomb.
@@ -269,10 +307,27 @@ describe("WP8 pin: an Impossible nation's bombs follow our structures (NationNuk
     },
   );
 
-  it("crown50 with hydrogen money: a City draws a hydrogen bomb, and so does a lone SAM, from an aim point that outranges it", () => {
+  it("crown50 with hydrogen money: while we own no structure, no hydrogen bomb in 15 decisions (a hydro nation's neither), though each scores valid aim points (best 0); a City draws a hydrogen bomb, and so does a lone SAM, from an aim point that outranges it", () => {
     const s = scene("crown50");
     const { w } = s;
     w.dryRun = true;
+    // The type choice picks a hydrogen bomb (NNB :139-155), which finds no
+    // aim point above 0 either.
+    const spy = spyScores(s.nuke);
+    const none = decide(s, WATCH, HYDRO_MONEY, spy);
+    expect(none.bombs).toEqual([]);
+    expect(Math.min(...none.scored)).toBeGreaterThan(0);
+    expect(spy.best).toBe(0);
+    // A hydro nation with hydrogen money, likewise.
+    const hydro = scene("crown50", 1, true);
+    hydro.w.dryRun = true;
+    expect(hydro.nuke.isHydroNation).toBe(true);
+    const hspy = spyScores(hydro.nuke);
+    const hnone = decide(hydro, WATCH, HYDRO_MONEY, hspy);
+    expect(hnone.bombs).toEqual([]);
+    expect(Math.min(...hnone.scored)).toBeGreaterThan(0);
+    expect(hspy.best).toBe(0);
+
     startCity(s, s.city);
     expect(decide(s, 1, HYDRO_MONEY).bombs.map((b) => b.type)).toEqual([
       UnitType.HydrogenBomb,

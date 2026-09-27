@@ -1,89 +1,89 @@
 {
-  "_doc": "Package WP2 (docs/14-m4-plan.md \u00a72.6): a fork's cost in live-tick equivalents per map, phi = fork ms / live ms per tick (the runner's tick plus apex's think, mean of the 200 ticks before the probe), the median over probes at ticks 2400, 4800 and 7200 of quick-suite games 0-15 (apex defaults, a shared 4-core container at load 1-3). restore: ctx.fork() (snapshot and restore); take: GameFork.source() on a restored fork; clone: ForkSource.fork() (a structural clone). Maps not listed cost the fallback.",
-  "measured": "2026-09-27 at ab3208e (/tmp/claude-0/pkg-WP2/phi-bench.ts)",
+  "_doc": "Package WP2 (docs/14-m4-plan.md \u00a72.6): a fork's cost in live-tick equivalents per map, phi = ms / live ms per tick (the runner's tick plus apex's think, mean of the 200 ticks before the probe), the median over probes at ticks 2400, 4800 and 7200 of quick-suite games 0-15 (apex defaults). fork: ctx.fork() (a structural clone of the live game, AgentHost's default forkMode); take: GameFork.source() on that fork; clone: ForkSource.fork(). A search pays fork + take + clone for its first rollout and a clone for each other. Maps not listed cost the fallback (above the 90th percentile of the measured maps).",
+  "measured": "PROVISIONAL (take, clone from ab3208e; fork = take + clone)",
   "fallback": {
-    "restore": 300,
-    "take": 2,
-    "clone": 30
+    "fork": 30,
+    "take": 4,
+    "clone": 25
   },
   "maps": {
     "Africa": {
-      "restore": 121,
+      "fork": 13,
       "take": 1,
       "clone": 12
     },
     "Alps": {
-      "restore": 161,
+      "fork": 20,
       "take": 1,
       "clone": 19
     },
     "ArchipelagoSea": {
-      "restore": 104,
+      "fork": 18,
       "take": 1,
       "clone": 17
     },
     "Bering Strait": {
-      "restore": 171,
+      "fork": 15,
       "take": 2,
       "clone": 13
     },
     "Europe": {
-      "restore": 103,
+      "fork": 13,
       "take": 1,
       "clone": 12
     },
     "Four Islands": {
-      "restore": 286,
+      "fork": 44,
       "take": 3,
       "clone": 41
     },
     "Giant World Map": {
-      "restore": 106,
+      "fork": 15,
       "take": 1,
       "clone": 14
     },
     "Japan": {
-      "restore": 240,
+      "fork": 20,
       "take": 2,
       "clone": 18
     },
     "Middle East": {
-      "restore": 158,
+      "fork": 18,
       "take": 1,
       "clone": 17
     },
     "Mississippi River": {
-      "restore": 106,
+      "fork": 15,
       "take": 1,
       "clone": 14
     },
     "North America": {
-      "restore": 98,
+      "fork": 9,
       "take": 1,
       "clone": 8
     },
     "Onion": {
-      "restore": 104,
+      "fork": 25,
       "take": 4,
       "clone": 21
     },
     "Passage": {
-      "restore": 101,
+      "fork": 11,
       "take": 1,
       "clone": 10
     },
     "The Box": {
-      "restore": 172,
+      "fork": 13,
       "take": 1,
       "clone": 12
     },
     "World": {
-      "restore": 72,
+      "fork": 10,
       "take": 1,
       "clone": 9
     },
     "Yellow Sea": {
-      "restore": 127,
+      "fork": 13,
       "take": 1,
       "clone": 12
     }

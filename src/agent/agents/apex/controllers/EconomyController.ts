@@ -52,10 +52,12 @@ import type { ApexState } from "../state";
 // Package WP8 (o.goldPolicy, lib/GoldPolicy.ts): from o.goldFrom on, when
 // the nuke rule of this check (the structure policy's exposedSite, or
 // planCityModel) refuses every site it tried, an arm other than "exposure"
-// may still buy, under its gate: the gold above o.goldReserve, the sites
-// the arm allows, and (o.goldGuard) a line on our City levels. So an arm
-// only adds buys to today's rule. Sites, upgrades first, o.cityMaxLevel
-// and o.citySpread are this check's as above.
+// may still buy, under its gate: the gold above o.goldReserve, no buy
+// while bombed or heavily attacked (the gate's hold), the sites the arm
+// allows (never one an enemy bomb in flight will hit), clear of our SAMs,
+// and (o.goldGuard) a line on our City levels. So an arm only adds buys to
+// today's rule. Sites, upgrades first, o.cityMaxLevel and o.citySpread are
+// this check's as above.
 
 /** Grid points sampled over the bounding box of our land (the border's
  *  box, widened to the map edge where our land reaches it). */
@@ -89,14 +91,16 @@ export type CityAction =
   | { kind: "build"; tile: TileRef; cost: bigint; depth: number };
 
 /** Why a check does nothing (logs and tests). "guard": the gold arm's
- *  level line (lib/GoldPolicy, o.goldGuard) leaves no room. */
+ *  level line (lib/GoldPolicy, o.goldGuard) leaves no room; "hold": the
+ *  gold arm holds every buy (CityGate.hold: bombed or heavily attacked). */
 export type CityIdle =
   | "off"
   | "policy"
   | "gold"
   | "exposed"
   | "noSite"
-  | "guard";
+  | "guard"
+  | "hold";
 
 /** What planCity reads of ApexOptions. */
 export type CityOptions = Pick<
@@ -433,9 +437,13 @@ export function citySites(
  * With `gate` (package WP8, lib/GoldPolicy.cityGate: the gold arm, which
  * the controller asks when this check without it refuses as "exposed") the
  * gate replaces the structure policy's nuke rule and the model's: it
- * spends gate.budget, only at the sites (and cities) it allows, holds at
- * most gate.maxLevels City levels, and raises a city only to its
- * gate.cityRoom.
+ * spends gate.budget, buys nothing while gate.hold, only at the sites (and
+ * cities) it allows, holds at most gate.maxLevels City levels, and raises
+ * a city only to its gate.cityRoom. It keeps planCityModel's SAM-hub rules
+ * (package WP8 round 2, the review's finding 8): no new city within
+ * hubRing().min of a SAM of ours (the salvo a SAM draws would take it),
+ * and while the model dooms our hub (nukes.doomed, o.hubDoom) no level in
+ * a hub's covered ring.
  */
 export function planCity(
   game: Game,
@@ -457,6 +465,7 @@ export function planCity(
   ) {
     return planCityModel(game, me, o, nukes, gold, cost);
   }
+  if (gate !== undefined && gate.hold !== null) return "hold";
   const exposure = gate === undefined && o.structurePolicy === "exposure";
   // Levels the gate's line lets us add (unitCount: finished levels and
   // cities under construction).
@@ -467,10 +476,20 @@ export function planCity(
   if (room < 1) return "guard";
   const maxLevel = levelCap(o);
   let exposed = false;
+  const doomed = gate !== undefined && nukes?.doomed === true;
   const refused = (t: TileRef): boolean =>
     exposure
       ? exposedSite(game, me, t, o.exposureWide)
-      : gate !== undefined && !gate.allows(t);
+      : gate !== undefined &&
+        (!gate.allows(t) || (doomed && inHub(game, me, t)));
+  // The gate's builds keep clear of our SAMs (planCityModel's clearOfSams).
+  const sams =
+    gate === undefined
+      ? []
+      : me.units(UnitType.SAMLauncher).map((u) => u.tile());
+  const salvoR2 = sams.length === 0 ? 0 : hubRing(game).min ** 2;
+  const clearOfSams = (t: TileRef) =>
+    sams.every((sam) => game.euclideanDistSquared(sam, t) >= salvoR2);
   if (o.cityUpgradeFirst) {
     // A gate's refusals depend on the site ("model", goldHydroCap), so it
     // picks among the cities it allows.
@@ -478,10 +497,7 @@ export function planCity(
       gate === undefined
         ? undefined
         : (c: Unit) => {
-            if (
-              gate.allows(c.tile()) &&
-              gate.cityRoom(c.tile(), c) > c.level()
-            ) {
+            if (!refused(c.tile()) && gate.cityRoom(c.tile(), c) > c.level()) {
               return true;
             }
             exposed = true;
@@ -520,6 +536,7 @@ export function planCity(
   let probes = 0;
   for (const site of citySites(game, me, o)) {
     if (probes >= BUILD_PROBES) break;
+    if (!clearOfSams(site.tile)) continue;
     probes++;
     const spawn = me.canBuild(UnitType.City, site.tile);
     if (spawn === false) continue;
@@ -530,6 +547,7 @@ export function planCity(
         ? site.depth
         : borderDepth(game, me, spawn, site.depth);
     if (depth < o.cityMinDepth) continue;
+    if (!clearOfSams(spawn)) continue;
     if (refused(spawn) || (gate !== undefined && gate.cityRoom(spawn) < 1)) {
       exposed = true;
       continue;
@@ -1226,13 +1244,15 @@ export class EconomyController implements Controller {
         );
       }
       // And why the gold arm holds gold back, unless we are simply short
-      // ("reserve": the gold is there, above it it is not).
+      // ("reserve": the gold is there, above it it is not; a hold by its
+      // reason, "bombed" or "attacked").
       if (gate !== undefined && minute) {
         const price = v.game
           .config()
           .unitInfo(UnitType.City)
           .cost(v.game, v.me);
-        if (plan !== "gold") v.log?.(gateText(v, gate, plan));
+        const why = plan === "hold" ? (gate.hold ?? plan) : plan;
+        if (plan !== "gold") v.log?.(gateText(v, gate, why));
         else if (v.me.gold() >= price) v.log?.(gateText(v, gate, "reserve"));
       }
       s.timers.lastCity = v.tick;

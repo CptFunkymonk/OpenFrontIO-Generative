@@ -1,6 +1,8 @@
 import { AgentIntent } from "../../../src/agent/Agent";
 import {
   CityAction,
+  hubRing,
+  inHub,
   planCity,
 } from "../../../src/agent/agents/apex/controllers/EconomyController";
 import {
@@ -11,13 +13,16 @@ import {
 import { ApexPolicy } from "../../../src/agent/agents/apex/policy";
 import { createState } from "../../../src/agent/agents/apex/state";
 import {
+  bombsInFlight,
   cityGate,
   densityLine,
-  firingThreats,
   GOLD_POLICIES,
   GoldPolicyArm,
+  heavilyAttacked,
   hydroRoom,
   hydroThreat,
+  inBlast,
+  modelThreats,
   steamrollLine,
   unalliedArmed,
 } from "../../../src/agent/lib/GoldPolicy";
@@ -37,11 +42,13 @@ import { TileRef } from "../../../src/core/game/GameMap";
 import { addTribe, Field, field, Harness, own, rect } from "./Field";
 import {
   ally,
+  attack,
   brain,
   columns,
   GAME_ID,
   model,
   pastImmunity,
+  samAt,
   setGold,
   siloAt,
   tick,
@@ -272,7 +279,7 @@ function crownWorld(): World {
 }
 
 describe('apex gold policy (WP8): "model"', () => {
-  test("refuses a site a firing nation can aim at; a latent ladder, an ally or a nation short of bomb gold does not", () => {
+  test("refuses a site a nation answering us can aim at, firing now or soon (half its perceived price); a latent ladder, an ally or a nation short of half the price does not", () => {
     const w = crownWorld();
     const { game } = w;
     const { N, H, Z } = w.p;
@@ -286,35 +293,97 @@ describe('apex gold policy (WP8): "model"', () => {
         undefined,
         cityGate(game, H, o, game.ticks(), nukes) ?? undefined,
       );
+    const atom = price(game, N, UnitType.AtomBomb);
     setGold(H, 10_000_000n);
-    setGold(N, price(game, N, UnitType.AtomBomb));
-    expect(firingThreats(game, nukes).map((t) => [t.nation, t.bomb])).toEqual([
-      [N, UnitType.AtomBomb],
-    ]);
+    setGold(N, atom);
+    const threats = () =>
+      modelThreats(game, nukes, o).map((t) => [t.nation, t.bombs, t.why]);
+    expect(threats()).toEqual([[N, [UnitType.AtomBomb], "firing"]]);
     expect(cityGate(game, H, o, game.ticks(), nukes)!.blockers).toEqual([
-      "N:A",
+      "N:firing:A",
     ]);
     expect(planned()).toBe("exposed");
-    // Short of the atom: not firing. (The model caches its exposures per
-    // tick, so each change gets a tick.)
-    setGold(N, price(game, N, UnitType.AtomBomb) - 1n);
+    // Short of the atom, with half its price (nukePayShare): it fires
+    // soon. (The model caches its exposures per tick, so each change gets
+    // a tick; its gold only falls, so the projection is the gold now.)
+    setGold(N, atom / 2n);
     tick(w);
-    expect(firingThreats(game, nukes)).toEqual([]);
+    expect(threats()).toEqual([[N, [UnitType.AtomBomb], "soon"]]);
+    expect(planned()).toBe("exposed");
+    // Short of half: no threat.
+    setGold(N, atom / 2n - 1n);
+    tick(w);
+    expect(threats()).toEqual([]);
     expect(planned()).toMatchObject({ kind: "build" });
     // Z attacks N: the retaliation rung answers first and H is latent.
-    setGold(N, price(game, N, UnitType.AtomBomb));
+    setGold(N, atom);
     const hit = Z.createAttack(N, 1000, null, new Set<TileRef>());
     tick(w);
     expect(nukes.aimOf(N.id()).target).toBe(Z.id());
-    expect(firingThreats(game, nukes)).toEqual([]);
+    expect(threats()).toEqual([]);
     expect(planned()).toMatchObject({ kind: "build" });
     // Allied (the attack gone): the ladder names no one.
     hit.delete();
     ally(N, H);
     tick(w);
     expect(nukes.aimOf(N.id()).target).toBeNull();
-    expect(firingThreats(game, nukes)).toEqual([]);
+    expect(threats()).toEqual([]);
     expect(planned()).toMatchObject({ kind: "build" });
+  });
+
+  test("the shooter between two launches: gold below the perceived price its launch raised still refuses the site (the review's probe), and a nation with a bomb in flight at us is a threat whatever its rung", () => {
+    const w = crownWorld();
+    const { game } = w;
+    const { N, H, Z } = w.p;
+    const nukes = model(w, "H");
+    const o = arm("model");
+    const c = H.buildUnit(UnitType.City, game.ref(200, 100), {});
+    setGold(N, 5_000_000n);
+    brain(w, "N", false).sendNuke(game.ref(200, 100), UnitType.AtomBomb, H);
+    for (let i = 0; i < 3; i++) {
+      tick(w);
+      nukes.observe();
+    }
+    expect(game.units(UnitType.AtomBomb)).toHaveLength(1);
+    expect(nukes.launched(N.id()).atoms).toBe(1);
+    // Real atom price 750k, perceived 1.125M now; N holds 1M.
+    setGold(N, 1_000_000n);
+    setGold(H, 20_000_000n);
+    tick(w);
+    nukes.observe();
+    expect(nukes.bombFor(N.id())).toBeNull();
+    const gate = cityGate(game, H, o, game.ticks(), nukes)!;
+    // The bomb flies at our land: every arm holds.
+    expect(gate.hold).toBe("bombed");
+    expect(gate.blockers).toEqual(["N:soon:A"]);
+    expect(gate.allows(c.tile())).toBe(false);
+    expect(planCity(game, H, o, undefined, gate)).toBe("hold");
+    // Z attacks N (the retaliation rung answers first, H is latent): the
+    // bomb in flight at us keeps N a threat.
+    const hit = Z.createAttack(N, 1000, null, new Set<TileRef>());
+    tick(w);
+    expect(nukes.aimOf(N.id()).target).toBe(Z.id());
+    expect(
+      modelThreats(game, nukes, o, bombsInFlight(game, H)).map((t) => [
+        t.nation,
+        t.bombs,
+        t.why,
+      ]),
+    ).toEqual([[N, [UnitType.AtomBomb], "flying"]]);
+    hit.delete();
+    // Landed: the city is gone, no hold; N, at 1M against 1.125M, still
+    // refuses the sites it can aim at.
+    for (let i = 0; i < 400 && game.units(UnitType.AtomBomb).length > 0; i++) {
+      tick(w);
+    }
+    expect(c.isActive()).toBe(false);
+    const after = H.buildUnit(UnitType.City, game.ref(240, 100), {});
+    tick(w);
+    const later = cityGate(game, H, o, game.ticks(), nukes)!;
+    expect(later.hold).toBeNull();
+    expect(later.blockers).toEqual(["N:soon:A"]);
+    expect(later.allows(after.tile())).toBe(false);
+    expect(planCity(game, H, o, undefined, later)).toBe("exposed");
   });
 });
 
@@ -331,8 +400,13 @@ describe('apex gold policy (WP8): "model" in a rollout', () => {
     tick(w, 2);
     live.observe();
     expect(live.launched(N.id())).toEqual({ atoms: 1, hydros: 0 });
-    // Gold above the real atom price, below the perceived one.
-    setGold(N, 1_000_000n);
+    // The bomb lands on bare land.
+    for (let i = 0; i < 400 && game.units(UnitType.AtomBomb).length > 0; i++) {
+      tick(w);
+    }
+    // Gold above half the real atom price (375k), below half the
+    // perceived one (562.5k).
+    setGold(N, 500_000n);
     setGold(H, 10_000_000n);
     tick(w);
     const copy = live.cloneFor(
@@ -351,10 +425,10 @@ describe('apex gold policy (WP8): "model" in a rollout', () => {
         cityGate(game, H, o, game.ticks(), m) ?? undefined,
       ),
     );
-    // The live model knows N cannot pay its perceived price: not firing.
+    // The live model knows N cannot pay half its perceived price: no threat.
     expect(a).toMatchObject({ kind: "build" });
     expect(b).toEqual(a);
-    // A model that missed the launch thinks N fires.
+    // A model that missed the launch thinks N fires soon.
     expect(c).toBe("exposed");
   });
 });
@@ -552,6 +626,138 @@ describe("apex gold policy (WP8): the hydrogen threat that makes goldHydroCap bi
     tick(w);
     expect(hydroThreat(game, nukes, o)).toBe(false);
     expect(room()).toBe(Infinity);
+  });
+});
+
+describe("apex gold policy (WP8 round 2): bombs in flight and heavy attacks, every arm", () => {
+  test('a bomb in flight next door refuses the sites its blast covers (strictly inside the outer radius); one at our land holds every arm ("bombed")', () => {
+    const w = crownWorld();
+    const { game } = w;
+    const { N, H, Z } = w.p;
+    siloAt(w, N, 20, 140);
+    const nukes = model(w, "H");
+    // A city 20 tiles inside our border with Z (x = 120).
+    const c = H.buildUnit(UnitType.City, game.ref(140, 100), {});
+    setGold(H, 20_000_000n);
+    setGold(N, 5_000_000n);
+    // N aims at Z's land 5 tiles past the border: 25 tiles from c, inside
+    // an atom's outer radius (30).
+    brain(w, "N", false).sendNuke(game.ref(115, 100), UnitType.AtomBomb, Z);
+    tick(w, 3);
+    const flying = bombsInFlight(game, H);
+    expect(flying.map((b) => [b.owner, b.type, b.r, b.atUs])).toEqual([
+      [N, UnitType.AtomBomb, 30, false],
+    ]);
+    expect(inBlast(game, flying, c.tile())).toBe(true);
+    expect(inBlast(game, flying, game.ref(144, 100))).toBe(true);
+    expect(inBlast(game, flying, game.ref(145, 100))).toBe(false);
+    const free = arm("free");
+    const gate = cityGate(game, H, free, game.ticks(), nukes)!;
+    expect(gate.hold).toBeNull();
+    expect(gate.allows(c.tile())).toBe(false);
+    // No upgrade of the city the bomb will delete: a new city, clear of it.
+    const p = planCity(game, H, free, undefined, gate);
+    expect(p).toMatchObject({ kind: "build" });
+    if (typeof p === "string" || p.kind !== "build") return;
+    expect(inBlast(game, flying, p.tile)).toBe(false);
+    // A bomb at our land: every arm holds, whatever the site.
+    brain(w, "N", false).sendNuke(game.ref(250, 100), UnitType.AtomBomb, H);
+    tick(w, 3);
+    expect(bombsInFlight(game, H).some((b) => b.atUs)).toBe(true);
+    for (const a of ["free", "allied", "model"] as const) {
+      const g = cityGate(game, H, arm(a), game.ticks(), nukes)!;
+      expect(g.hold).toBe("bombed");
+      expect(planCity(game, H, arm(a), undefined, g)).toBe("hold");
+    }
+    // Landed: no hold.
+    for (let i = 0; i < 400 && bombsInFlight(game, H).length > 0; i++) {
+      tick(w);
+    }
+    expect(cityGate(game, H, free, game.ticks(), nukes)!.hold).toBeNull();
+  });
+
+  test('attacks on us carrying at least our home troops hold every arm ("attacked": the nations\' own heavy-attack test)', async () => {
+    const { f, nation } = await armedWorld();
+    const { game, me } = f;
+    setGold(me, 10_000_000n);
+    me.setTroops(100_000);
+    const free = arm("free");
+    const gate = () => cityGate(game, me, free, game.ticks())!;
+    expect(heavilyAttacked(me)).toBe(false);
+    attack(nation, me, 60_000);
+    expect(heavilyAttacked(me)).toBe(false);
+    expect(gate().hold).toBeNull();
+    expect(planCity(game, me, free, undefined, gate())).toMatchObject({
+      kind: "build",
+    });
+    attack(nation, me, 40_000);
+    expect(heavilyAttacked(me)).toBe(true);
+    expect(gate().hold).toBe("attacked");
+    expect(planCity(game, me, free, undefined, gate())).toBe("hold");
+    // A bomb aimed at us names the hold first.
+    expect(cityGate(game, me, arm("allied"), game.ticks())!.hold).toBe(
+      "attacked",
+    );
+  });
+});
+
+describe("apex gold policy (WP8 round 2): planCityModel's SAM-hub rules in the gate's path", () => {
+  test("a build keeps clear of our SAMs (hubRing().min: the salvo a SAM draws spares it)", async () => {
+    const { f } = await armedWorld();
+    const { game, me } = f;
+    setGold(me, 10_000_000n);
+    const free = arm("free");
+    const first = plan(game, me, free);
+    expect(first).toMatchObject({ kind: "build" });
+    if (typeof first === "string" || first.kind !== "build") return;
+    // A SAM of ours where that city would go.
+    const sam = me.buildUnit(UnitType.SAMLauncher, first.tile, {});
+    const p = plan(game, me, free);
+    expect(p).toMatchObject({ kind: "build" });
+    if (typeof p === "string" || p.kind !== "build") return;
+    expect(
+      game.euclideanDistSquared(sam.tile(), p.tile),
+    ).toBeGreaterThanOrEqual(hubRing(game).min ** 2);
+  });
+
+  test("with the model's hub doomed (nukes.doomed), no level in a SAM's covered ring", () => {
+    const w = crownWorld();
+    const { game } = w;
+    const { H } = w.p;
+    const nukes = model(w, "H");
+    const sam = samAt(w, H, 230, 100);
+    // A city in the SAM's covered ring (31-40 tiles at level 1).
+    const c = H.buildUnit(UnitType.City, game.ref(230, 135), {});
+    expect(inHub(game, H, c.tile())).toBe(true);
+    setGold(H, 20_000_000n);
+    const free = arm("free");
+    const gate = cityGate(game, H, free, game.ticks(), nukes)!;
+    const plan = (doomed: boolean) =>
+      planCity(game, H, free, { model: nukes, threats: [], doomed }, gate);
+    expect(plan(false)).toMatchObject({ kind: "upgrade", unitId: c.id() });
+    const p = plan(true);
+    expect(p).toMatchObject({ kind: "build" });
+    if (typeof p === "string" || p.kind !== "build") return;
+    expect(inHub(game, H, p.tile)).toBe(false);
+    expect(
+      game.euclideanDistSquared(sam.tile(), p.tile),
+    ).toBeGreaterThanOrEqual(hubRing(game).min ** 2);
+  });
+});
+
+describe('apex gold policy (WP8 round 2): "allied" and the alliance\'s end', () => {
+  test("an ally whose alliance ends within extendLead ticks no longer exempts it", async () => {
+    const { f, nation } = await armedWorld();
+    const { game, me } = f;
+    setGold(nation, 10_000_000n);
+    ally(nation, me);
+    const left = me.allianceWith(nation)!.expiresAt() - game.ticks();
+    expect(left).toBeGreaterThan(APEX_DEFAULTS.extendLead);
+    expect(unalliedArmed(game, me, left - 1)).toEqual([]);
+    expect(unalliedArmed(game, me, left)).toEqual([nation]);
+    setGold(me, 10_000_000n);
+    expect(plan(game, me, arm("allied"))).toMatchObject({ kind: "build" });
+    expect(plan(game, me, arm("allied", { extendLead: left }))).toBe("exposed");
   });
 });
 

@@ -44,6 +44,11 @@ export interface Candidate {
   /** The strong-target horizon applies: the last send attacks `target`,
    *  whose troops are read at the send (searchHStrong). */
   strongCheck: boolean;
+  /** Whether the target is strong at the send, when the generator knows
+   *  it (a send now: the live state is the rollout's at the send), so the
+   *  budget prices the long look up front; unset: read at the send, and a
+   *  long look it did not price is bought then (Rounds' `afford`). */
+  strong?: boolean;
   /** Share of the purse its attack is sized by, if any (the budget's
    *  degrade drops the shares below 1 first). */
   frac?: number;
@@ -74,7 +79,9 @@ export interface SearchView {
 export interface BaseView {
   /** Ticks advanced: searchH1 in round 1, its longest horizon in 2b. */
   h: number;
-  /** Nations whose attacks reached us so far, first attack first. */
+  /** Nations whose attacks reached us so far, first attack first; at an
+   *  attack trigger (T4, T5) also the attack's nation, known at the search
+   *  (the live attack, or the followed rollout's foreseen one). */
   attackers: ReadonlyMap<PlayerID, AttackSeen>;
   snaps: readonly Snap[];
 }

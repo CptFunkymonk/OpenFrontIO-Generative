@@ -6,26 +6,32 @@ import { roundUp } from "./Rounds";
 // equivalents (never milliseconds, so arena runs replay):
 //
 //   C_search = Σ over the search's rollouts (φ + ticks advanced)
-//   Σ C ≤ R·(t − searchFrom) + slack   (searchSlack, BUDGET_SLACK = 3,000)
+//   Σ C ≤ R·(t − searchFrom) + slack   (searchSlack)
 //
 // φ is a fork's cost in live ticks, from the committed per-map table
-// phi.json (measured once; the fallback for a map it lacks). Before its
-// rollouts a search is priced to its first looks (rounds 1 and 2, and the
-// break round's first step); one that would exceed the cap degrades, in
-// order: drop the plans sized by a share below 1 of the purse; drop breaks;
-// keep only lapse, keep and defensive plans; skip. The break round's later
-// steps, and the gated look, are bought one at a time from what is left
-// (Rounds' `afford`): a break the cap cannot look further at is dropped.
-// Every decision here is a function of the candidate list, the table and
-// the ticks, so it is deterministic.
+// phi.json (measured once; the fallback for a map it lacks). A search forks
+// the live game once (ctx.fork(), a structural clone of it: a take of its
+// state and a clone) and clones that fork for each rollout (one take of it,
+// then a clone each): its first rollout costs fork + take + clone, every
+// other one a clone.
+//
+// Before its rollouts a search is priced to every look it plans (restCost):
+// each candidate's fork and round 1, round 2's `keep` longest horizons (a
+// strike now on a target already strong at its long horizon), the break
+// round's whole stepwise look, and the base to the longest of them. A search
+// whose price exceeds what it may spend degrades, in order: drop the plans
+// sized by a share below 1 of the purse; drop breaks; keep only lapse, keep
+// and defensive plans; skip. The looks only a rollout reveals (a target
+// strong at a later send, the danger-gated break look) are bought as they
+// come from what is left (Rounds' `afford`): a plan the budget cannot look
+// further at is dropped, never judged short. Every decision here is a
+// function of the candidate list, the table and the ticks, so it is
+// deterministic.
 
-/** Live-tick equivalents granted at searchFrom (the first searches). */
-export const BUDGET_SLACK = 3000;
-
-/** How the search forks: ctx.fork() for every rollout (a snapshot and
- *  restore each), or one ctx.fork() per search whose structural clones
- *  (GameFork.source) the rollouts play on. */
-export type ForkMode = "restore" | "clone";
+/** Live-tick equivalents granted at searchFrom (the first searches), the
+ *  searchSlack default: the first search's whole break look (about 2,900
+ *  on Europe at 2,400) and its danger-gated extension (1,200 more). */
+export const BUDGET_SLACK = 4500;
 
 /** φ of a search's first fork and of each other fork. */
 export interface Phi {
@@ -33,8 +39,11 @@ export interface Phi {
   each: number;
 }
 
-interface PhiRow {
-  restore: number;
+/** A map's row: ctx.fork() (a structural clone of the live game), a take
+ *  of a fork's state (GameFork.source()) and one clone of it
+ *  (ForkSource.fork()), in live ticks. */
+export interface PhiRow {
+  fork: number;
   take: number;
   clone: number;
 }
@@ -47,14 +56,11 @@ export function phiRow(map: string): PhiRow {
     : PHI.fallback;
 }
 
-/** φ for `map` in `mode`: every restore costs `restore`; a clone search
- *  pays one restore, the take and a clone for its first rollout, and a
- *  clone for each other. */
-export function phiFor(map: string, mode: ForkMode): Phi {
+/** φ for `map`: the first rollout pays ctx.fork(), the take of that fork
+ *  and its clone; every other rollout a clone. */
+export function phiFor(map: string): Phi {
   const r = phiRow(map);
-  return mode === "restore"
-    ? { first: r.restore, each: r.restore }
-    : { first: r.restore + r.take + r.clone, each: r.clone };
+  return { first: r.fork + r.take + r.clone, each: r.clone };
 }
 
 /** What a search's rounds may spend (RoundsParams' horizons). */
@@ -63,42 +69,44 @@ export interface CostModel {
   H1: number;
   H: number;
   HStrong: number;
-  /** The break round's first step (its later looks are bought as it
-   *  goes). */
-  breakFirst: number;
+  /** The break round's whole look: its last step. */
+  breakLast: number;
   keep: number;
   grid: number;
 }
 
-/** The longest horizon `c` is taken to up front (a break: its first
- *  step). */
+/** The longest horizon `c` is priced to up front: a break its whole
+ *  stepwise look; a plan whose target is known to be strong at its send
+ *  (Candidate.strong) lastSend + HStrong; any other lastSend + H. */
 export function horizonBound(c: Candidate, m: CostModel): number {
-  if (c.isBreak) return m.breakFirst;
-  const post = c.strongCheck ? Math.max(m.H, m.HStrong) : m.H;
+  if (c.isBreak) return Math.max(m.H1, m.breakLast);
+  const post =
+    c.strongCheck && c.strong === true ? Math.max(m.H, m.HStrong) : m.H;
   return Math.max(m.H, roundUp(c.lastSend + post, m.grid));
 }
 
 /**
- * An upper bound of what a search costs up front, after the base's round 1
- * (whose φ + H1 is spent before the candidates exist): each candidate's
- * fork and round 1, the `keep` longest non-break horizons, the break
- * round's first step, and the base to the longest of them.
+ * What a search costs up front, after the base's round 1 (whose φ + H1 is
+ * spent before the candidates exist): each candidate's fork and round 1,
+ * the `keep` longest non-break horizons, the best break's whole look, and
+ * the base to the longest of them. An upper bound of every look but those
+ * bought later (Rounds' `afford`).
  */
 export function restCost(cands: readonly Candidate[], m: CostModel): number {
   let cost = 0;
   let maxH = m.H;
-  let hasBreak = false;
+  let breakTo = 0;
   const nonBreak: number[] = [];
   for (const c of cands) {
     cost += m.phi.each + m.H1;
     const h = horizonBound(c, m);
-    if (c.isBreak) hasBreak = true;
+    if (c.isBreak) breakTo = Math.max(breakTo, h);
     else nonBreak.push(h);
     maxH = Math.max(maxH, h);
   }
   nonBreak.sort((a, b) => b - a);
   for (const h of nonBreak.slice(0, Math.max(1, m.keep))) cost += h - m.H1;
-  if (hasBreak) cost += m.breakFirst - m.H1;
+  if (breakTo > 0) cost += breakTo - m.H1;
   return cost + (maxH - m.H1);
 }
 
@@ -172,6 +180,15 @@ export class SearchBudget {
   /** What is left at tick `t`. */
   room(t: number): number {
     return this.cap(t) - this.spent;
+  }
+
+  /** The first tick from `t` on at which the room reaches `need` if
+   *  nothing more is spent (t itself if it already does, or no cap). */
+  affordableAt(t: number, need: number): number {
+    if (!this.capped || this.room(t) >= need) return t;
+    // R·(u − from) + slack − spent ≥ need.
+    const u = this.from + Math.ceil((need + this.spent - this.slack) / this.R);
+    return Math.max(t + 1, u);
   }
 
   charge(te: number): void {

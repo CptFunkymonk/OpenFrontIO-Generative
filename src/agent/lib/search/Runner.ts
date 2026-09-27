@@ -71,6 +71,8 @@ export interface RunnerInit {
   /** Package WP4's danger terms, computed at every snap (V's λ terms, and
    *  the logs WP4 fits them on). */
   danger?: DangerModel | null;
+  /** Our transport ships' troops count in the snaps' out (searchOutBoats). */
+  boats?: boolean;
 }
 
 export class Runner implements Roll {
@@ -94,7 +96,7 @@ export class Runner implements Roll {
   natTroops = 0;
   /** Nations (and humans) whose attacks reached us, in order of the first. */
   readonly attackers = new Map<PlayerID, AttackSeen>();
-  /** Alliances ended, when tracked. */
+  /** Alliances held at the fork that ended, when tracked. */
   readonly ended: AllianceEnd[] = [];
   /** The send's state, once passed. */
   sent: SendState | null = null;
@@ -108,7 +110,9 @@ export class Runner implements Roll {
   private readonly seen = new Set<string>();
   private readonly send: { h: number; target: PlayerID } | null;
   private readonly dangerModel: DangerModel | null;
-  /** Tracked alliances: partner -> its expiry as last seen. */
+  private readonly boats: boolean;
+  /** Tracked alliances (those held at the fork, until they end): partner
+   *  -> its expiry as last seen. */
   private readonly allied: Map<PlayerID, number> | null;
 
   constructor(init: RunnerInit) {
@@ -122,6 +126,7 @@ export class Runner implements Roll {
     this.forkMs = init.forkMs;
     this.send = init.send ?? null;
     this.dangerModel = init.danger ?? null;
+    this.boats = init.boats === true;
     const me = init.fork.game.playerByClientID(init.clientID);
     if (me === null) throw new Error("search: no player in the fork");
     this.me = me;
@@ -247,7 +252,9 @@ export class Runner implements Roll {
   }
 
   private push(g: Game): void {
-    this.snaps.push(snapOf(g, this.me, this.h, this.natAtks, this.natTroops));
+    this.snaps.push(
+      snapOf(g, this.me, this.h, this.natAtks, this.natTroops, this.boats),
+    );
     this.land.set(this.h, landOf(g));
     if (this.dangerModel !== null && this.me.isAlive()) {
       this.dangers.set(this.h, this.dangerModel(g, this.me));
@@ -266,14 +273,22 @@ export class Runner implements Roll {
     };
   }
 
+  /** The alliances held at the fork that ended this step (the gate's (a)
+   *  counts no alliance made after the fork); an extension moves the
+   *  expiry an end is judged early against. */
   private trackAlliances(): void {
     const allied = this.allied!;
+    if (allied.size === 0) return;
     const me = this.me;
     const now = new Map<PlayerID, number>();
     for (const a of me.alliances()) now.set(a.other(me).id(), a.expiresAt());
     const tick = this.f.game.ticks();
     for (const [id, expiresAt] of allied) {
-      if (now.has(id)) continue;
+      const still = now.get(id);
+      if (still !== undefined) {
+        allied.set(id, still);
+        continue;
+      }
       this.ended.push({
         id,
         h: this.h,
@@ -282,6 +297,5 @@ export class Runner implements Roll {
       });
       allied.delete(id);
     }
-    for (const [id, expiresAt] of now) allied.set(id, expiresAt);
   }
 }

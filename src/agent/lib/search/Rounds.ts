@@ -21,12 +21,17 @@ import { Danger, Snap, value, ValueParams } from "./Value";
 //   to HBreak[0]; while the break leads by the margin they go on to the
 //   next step. At the last step the break is judged, unless it leads and
 //   the danger gate fires: then both go to HBreakGated and it is judged
-//   there. Each further look is bought from the budget (`afford`); a break
-//   it cannot pay for is dropped, never judged short. The gate (§2.5): (a) an alliance of ours other than the
-//   target's, held at the fork, ended early while we were a traitor in the
-//   break world; (b) the break world has an unallied bordering nation with
-//   maxTroops ≥ 1.1 × ours that the base world holds allied or does not
-//   border.
+//   there. The gate (§2.5): (a) an alliance of ours held at the fork,
+//   other than the target's, ended early while we were a traitor in the
+//   break world and is still gone; (b) the break world has an unallied
+//   bordering nation with maxTroops ≥ 1.1 × ours that the base world holds
+//   allied or does not border.
+// - The budget (Budget.ts) priced round 2's horizons (a strong target's
+//   when known at the search) and the break's whole stepwise look up front;
+//   the looks it could not price (a strong target at a later send, the
+//   gated look) are bought as they come (`afford`, given all that is still
+//   to spend), and a plan the budget cannot look further at is dropped,
+//   never judged short.
 // - Round 2b (defensive): when the base, by its longest horizon, shows a
 //   nation attacking us or a loss of more than lossShare of our tiles, the
 //   r2b generators' candidates go to that horizon.
@@ -85,8 +90,9 @@ export interface RoundsParams {
   tiles0: number;
   /** Round 2b fires on a base loss above this share of tiles0. */
   lossShare: number;
-  /** Whether the budget pays for `te` more live-tick equivalents (a break
-   *  round's next look); absent: always. */
+  /** Whether the budget pays for `te` more live-tick equivalents than the
+   *  rollouts have spent so far (asked with everything still to spend when
+   *  a look it did not price comes up); absent: always. */
   afford?: (te: number) => boolean;
 }
 
@@ -109,9 +115,9 @@ export interface Judged {
   gain: number;
   dipped: boolean;
   /** Why it is out: "pruned" (round 1), "cut" (not a finalist),
-   *  "trail" (a break that stopped leading at a step), "budget" (a break
-   *  whose next look the budget could not pay), "dip"; null for a
-   *  finalist. */
+   *  "trail" (a break that stopped leading at a step), "budget" (a look it
+   *  needed that the budget could not pay: a strong target's, the gated
+   *  one), "dip"; null for a finalist. */
   drop: string | null;
   /** A break's gain at each step. */
   steps: { h: number; gain: number }[];
@@ -170,9 +176,10 @@ export function gainOver(
 
 /**
  * The break gate at the break's last step, with `brk` and `base` at the
- * same tick: (a) an alliance other than `target`'s ended early while we
- * were a traitor; (b) an unallied bordering nation at ≥ GATE_CAP_RATIO of
- * our cap in the break world is allied or not bordering in the base world.
+ * same tick: (a) an alliance held at the fork (the Runner tracks no other),
+ * other than `target`'s, ended early while we were a traitor and is still
+ * gone; (b) an unallied bordering nation at ≥ GATE_CAP_RATIO of our cap in
+ * the break world is allied or not bordering in the base world.
  */
 export function breakGate(
   brk: Roll,
@@ -180,7 +187,10 @@ export function breakGate(
   target: PlayerID | null,
   minContact: number,
 ): { a: boolean; b: boolean } {
-  const a = brk.ended.some((e) => e.id !== target && e.early && e.traitor);
+  const a = brk.ended.some(
+    (e) =>
+      e.id !== target && e.early && e.traitor && !brk.alliedWith(e.id),
+  );
   let b = false;
   if (!brk.dead) {
     const cap = brk.capNow();
@@ -249,37 +259,69 @@ export function runRounds(
     j.drop = "cut";
   }
 
-  // Round 2's judged horizons.
+  // Round 3's break: the best by V at H1, priced up front to its whole
+  // stepwise look (brkTo; 0 once it is out).
+  const steps = [...p.HBreak].filter((h) => h > 0).sort((a, b) => a - b);
+  let brk: Judged | null = steps.length > 0 ? (keptB[0] ?? null) : null;
+  if (keptB[0] !== undefined && brk === null) keptB[0].drop = "cut";
+  let brkTo = brk === null ? 0 : steps[steps.length - 1];
+
+  // What the looks planned so far still cost: each finalist to its judged
+  // horizon, the break to brkTo, and the base to the longest of them. A
+  // look nobody priced up front is bought only if the budget pays for all
+  // of it (`afford`, given everything still to spend).
+  const finals = [...keptS];
+  const outstanding = (): number => {
+    let te = 0;
+    let to = p.H;
+    for (const j of finals) {
+      te += Math.max(0, j.h! - j.roll.h);
+      to = Math.max(to, j.h!);
+    }
+    if (brk !== null) {
+      te += Math.max(0, brkTo - brk.roll.h);
+      to = Math.max(to, brkTo);
+    }
+    return te + Math.max(0, to - base.h);
+  };
+  const affordable = () => p.afford === undefined || p.afford(outstanding());
+
+  // Round 2's judged horizons. A target strong at the send (read as the
+  // rollout passes it) is judged HStrong after it; a strong look the
+  // budget did not price up front (Candidate.strong unset: a send later
+  // than now) is bought here, or the plan is dropped, never judged short.
+  const bought: Judged[] = [];
   for (const j of keptS) {
     j.round = 2;
-    let post = p.H;
-    if (j.cand.strongCheck && p.HStrong > p.H) {
-      // The send's state is read as the rollout passes it.
-      j.roll.advance(j.cand.lastSend + 1, false);
-      const s = j.roll.sent;
-      if (
-        s !== null &&
-        s.targetAlive &&
-        s.targetTroops >= p.strongShare * s.home
-      ) {
-        j.strong = true;
-        post = p.HStrong;
-      }
+    j.h = Math.max(p.H, roundUp(j.cand.lastSend + p.H, p.grid));
+    if (!j.cand.strongCheck || p.HStrong <= p.H) continue;
+    j.roll.advance(j.cand.lastSend + 1, false);
+    const s = j.roll.sent;
+    if (s === null || !s.targetAlive || s.targetTroops < p.strongShare * s.home) {
+      continue;
     }
-    j.h = Math.max(p.H, roundUp(j.cand.lastSend + post, p.grid));
+    j.strong = true;
+    if (j.cand.strong === true) {
+      j.h = Math.max(p.H, roundUp(j.cand.lastSend + p.HStrong, p.grid));
+    } else bought.push(j);
+  }
+  for (const j of bought) {
+    const short = j.h!;
+    j.h = Math.max(p.H, roundUp(j.cand.lastSend + p.HStrong, p.grid));
+    if (affordable()) continue;
+    j.h = short;
+    j.drop = "budget";
+    finals.splice(finals.indexOf(j), 1);
   }
 
   // The finalists go to their horizons now (the rollouts are independent,
   // so the order changes nothing), so that the break round buys its looks
   // from what they leave. The base goes through every horizon in ascending
   // order; round 3's break steps are judged as the base reaches them.
-  for (const j of keptS) j.roll.advance(j.h!);
-  const steps = [...p.HBreak].filter((h) => h > 0).sort((a, b) => a - b);
-  let brk: Judged | null = steps.length > 0 ? (keptB[0] ?? null) : null;
-  if (keptB[0] !== undefined && brk === null) keptB[0].drop = "cut";
+  for (const j of finals) j.roll.advance(j.h!);
   let step = 0;
   const pending = new Set<number>([p.H]);
-  for (const j of keptS) pending.add(j.h!);
+  for (const j of finals) pending.add(j.h!);
   if (brk !== null) {
     brk.round = 3;
     pending.add(steps[0]);
@@ -292,8 +334,8 @@ export function runRounds(
     base.advance(h);
     baseAt.set(h, valueAt(base, base.last(), p));
     if (brk === null) continue;
-    if (brk.gated && h === brk.h) {
-      brk.roll.advance(h);
+    if (brk.gated) {
+      if (h === brk.h) brk.roll.advance(h);
       continue;
     }
     if (step >= steps.length || steps[step] !== h) continue;
@@ -301,22 +343,17 @@ export function runRounds(
     const g = gainOver(brk.roll, base, h, baseAt.get(h)!, p);
     brk.steps.push({ h, gain: g.gain });
     const leads = !g.dipped && g.gain > p.need;
-    // What the break and the base need to look on to `to`: the base goes
-    // at least as far as the other finalists anyway, and that is spent too.
-    const further = (to: number) => {
-      const committed = Math.max(h, ...pending);
-      return to - h + Math.max(0, to - committed) + (committed - h);
-    };
     if (step < steps.length - 1) {
-      const next = steps[step + 1];
-      if (!leads || (p.afford !== undefined && !p.afford(further(next)))) {
+      // The rest of the look was priced up front: the check only keeps
+      // the cap whatever was bought since.
+      if (!leads || !affordable()) {
         brk.h = h;
         brk.drop = g.dipped ? "dip" : leads ? "budget" : "trail";
         brk = null;
         continue;
       }
       step++;
-      pending.add(next);
+      pending.add(steps[step]);
       continue;
     }
     step++;
@@ -324,16 +361,16 @@ export function runRounds(
     if (leads && p.HBreakGated > h) {
       gate = breakGate(brk.roll, base, brk.cand.target, p.minContact);
       if (gate.a || gate.b) {
-        const G = p.HBreakGated;
-        if (p.afford !== undefined && !p.afford(further(G))) {
+        brkTo = p.HBreakGated;
+        if (!affordable()) {
           // Danger, and no budget to see past it: not played.
           brk.drop = "budget";
           brk = null;
           continue;
         }
         brk.gated = true;
-        brk.h = G;
-        pending.add(G);
+        brk.h = p.HBreakGated;
+        pending.add(p.HBreakGated);
       }
     }
   }
@@ -366,7 +403,7 @@ export function runRounds(
   // The choice.
   let best: Judged | null = null;
   let bestGain = -Infinity;
-  const finalists = [...keptS];
+  const finalists = [...finals];
   if (brk !== null) finalists.push(brk);
   finalists.push(...extra);
   for (const j of finalists) {

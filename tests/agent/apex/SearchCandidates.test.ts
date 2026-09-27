@@ -6,14 +6,19 @@
  * games S0 replays act3's candidate lists exactly (the WP2 small screen).
  *
  * Claims:
- * - Nations by contact (≥ searchMinContact, or attacking us in the base's
- *   first ticks), until searchK are counted: an unallied attackable one gets
- *   strike:N:f for each share (1 count); an ally expiring within
- *   searchLapseLead gets lapse:N:1 (a foe mark from the next tick to the
- *   expiry + 900, the strike at the expiry + 2; 1 count) and break:N:f (the
- *   break now, the attack next tick; 1 count for all shares).
+ * - act3 (searchOnTop off): nations by contact (≥ searchMinContact, or
+ *   attacking us in the base's first ticks), until searchK are counted: an
+ *   unallied attackable one gets strike:N:f for each share (1 count); an
+ *   ally expiring within searchLapseLead gets lapse:N:1 (a foe mark from
+ *   searchLapseFoeAt on to the expiry + 900, the strike at the expiry + 2;
+ *   1 count) and break:N:f (the break now, the attack next tick; 1 count for
+ *   all shares).
  * - ally:N for each attacker of the base we are not allied with, in the
  *   order they attacked.
+ * - The plan (searchOnTop, the defaults): every expiring ally's lapse and
+ *   every attacker's strikes come on top of the searchK nations, the
+ *   lapses and the alliance requests first; a strike knows at the search
+ *   whether its target is strong (its send is now).
  * - Round 1's list is cut to searchMaxCands; the stack gate moves strikes
  *   below T + incoming last.
  */
@@ -43,11 +48,27 @@ interface Nat {
 
 const T = 3000;
 
+/** act3's candidate rules (S0); the plan's are APEX_DEFAULTS'. */
+const ACT3: Partial<ApexOptions> = {
+  searchOnTop: false,
+  searchLapseLead: 498,
+  searchLapseFoeAt: 1,
+  searchStackGate: false,
+};
+/** The plan's (the defaults). */
+const PLAN: Partial<ApexOptions> = {
+  searchOnTop: APEX_DEFAULTS.searchOnTop,
+  searchLapseLead: APEX_DEFAULTS.searchLapseLead,
+  searchLapseFoeAt: APEX_DEFAULTS.searchLapseFoeAt,
+  searchStackGate: APEX_DEFAULTS.searchStackGate,
+};
+
 function view(
   nations: Nat[],
   o: Partial<ApexOptions> = {},
   strikePurse = 1_000_000,
   incoming: { from: string; troops: number }[] = [],
+  myHome = 1_000_000,
 ): SearchView {
   const byId = new Map(nations.map((n) => [n.id, n]));
   const player = (n: Nat) => ({
@@ -57,6 +78,7 @@ function view(
     type: () => n.type ?? PlayerType.Nation,
   });
   const me = {
+    troops: () => myHome,
     allianceWith: (p: { id(): string }) => {
       const n = byId.get(p.id())!;
       return n.expiresAt === undefined
@@ -90,7 +112,7 @@ function view(
           }) as unknown as NeighborInfo,
       ),
   };
-  const opts = { ...APEX_DEFAULTS, ...o } as ApexOptions;
+  const opts = { ...APEX_DEFAULTS, ...ACT3, ...o } as ApexOptions;
   return {
     o: opts,
     t: T,
@@ -246,5 +268,70 @@ describe("core search candidates", () => {
     ]);
     // A name made twice keeps the first.
     expect(roundOneCandidates([cands, cands], false, 8)).toHaveLength(4);
+  });
+
+  test("the plan: lapses and attackers' strikes on top of searchK, first", () => {
+    const nations: Nat[] = [
+      { id: "A", smallID: 1, contact: 100, troops: 400_000 },
+      { id: "B", smallID: 2, contact: 80, troops: 950_000 },
+      { id: "Z", smallID: 3, contact: 20, troops: 1, expiresAt: T + 400 },
+      { id: "Y", smallID: 4, contact: 10, troops: 1 },
+      { id: "W", smallID: 5, contact: 9, troops: 1, expiresAt: T + 2000 },
+    ];
+    const base: BaseView = {
+      h: 150,
+      attackers: new Map([["Y", { h: 60, troops: 1 }]]),
+      snaps: [],
+    };
+    const cands = CORE.generate(view(nations, PLAN), base);
+    // K = 2: A and B by contact; Z's lapse (expiring) and Y's strikes (an
+    // attacker) on top; W (allied, not expiring, past K) nothing.
+    expect(cands.map((c) => c.name)).toEqual([
+      "lapse:Z:1",
+      "ally:Y",
+      "strike:A:0.5",
+      "strike:A:1",
+      "strike:B:0.5",
+      "strike:B:1",
+      "strike:Y:0.5",
+      "strike:Y:1",
+    ]);
+    // The plan's lapse: the foe mark now, the lead 500.
+    expect(cands[0].steps[0]).toEqual({
+      at: T,
+      foe: { id: "Z", until: T + 400 + 900 },
+    });
+    // Strength at the search (0.9 of our home, 1M): B is strong, A not.
+    const strong = Object.fromEntries(
+      cands.filter((c) => c.kind === "strike").map((c) => [c.name, c.strong]),
+    );
+    expect(strong["strike:A:1"]).toBe(false);
+    expect(strong["strike:B:1"]).toBe(true);
+    // act3 on the same state: K is reached at B; nothing on top.
+    expect(
+      CORE.generate(view(nations, ACT3), base).map((c) => c.name),
+    ).toEqual([
+      "strike:A:0.5",
+      "strike:A:1",
+      "strike:B:0.5",
+      "strike:B:1",
+      "ally:Y",
+    ]);
+  });
+
+  test("the plan: an expiring ally counts once (its breaks), not twice", () => {
+    const nations: Nat[] = [
+      { id: "Z", smallID: 3, contact: 90, troops: 1, expiresAt: T + 400 },
+      { id: "N", smallID: 2, contact: 40, troops: 300_000 },
+    ];
+    expect(
+      CORE.generate(view(nations, PLAN), NO_BASE).map((c) => c.name),
+    ).toEqual([
+      "lapse:Z:1",
+      "break:Z:0.5",
+      "break:Z:1",
+      "strike:N:0.5",
+      "strike:N:1",
+    ]);
   });
 });

@@ -6,7 +6,7 @@ import {
   UnitType,
 } from "../../../../core/game/Game";
 import type { TileRef } from "../../../../core/game/GameMap";
-import type { NationModel } from "../../../lib/NationModel";
+import type { NationModel, NationState } from "../../../lib/NationModel";
 import { Prio } from "../../../lib/Scheduler";
 import {
   conquestStack,
@@ -385,6 +385,9 @@ export function deterrenceFloor(
   // o.strikeFloorReplicaUnseen (the prototype's): the replica for nations
   // its last full refresh did not see on our border too.
   const unseen = replica && v.o.strikeFloorReplicaUnseen;
+  // o.strikeFloorReplicaSteady: not for a nation whose "another player
+  // first" may rest on something about to end (transientExit).
+  const steady = replica && v.o.strikeFloorReplicaSteady;
   let floor = 0;
   const seen = new Set<PlayerID>();
   for (const info of v.wm.nations) {
@@ -402,8 +405,10 @@ export function deterrenceFloor(
     const g = v.nm.gates(info.id, d);
     if (g === "locked" || g === "belowReserve") continue;
     const land = (v.nm.troopsAt(info.id, d) + 1) / safe;
+    const st = v.nm.get(info.id);
     const read =
-      unseen || (replica && v.nm.get(info.id)?.sharesBorderWithUs === true);
+      (unseen || (replica && st?.sharesBorderWithUs === true)) &&
+      !(steady && st !== undefined && transientExit(v, N, st) !== null);
     floor = Math.max(floor, read ? replicaLine(v, info.id, d, lo, land) : land);
   }
   if (!v.o.strikeDetNearTarget || except === null) {
@@ -428,6 +433,48 @@ export function deterrenceFloor(
 
 /** Bisection steps of replicaLine: the line to (land − lo)/256. */
 export const REPLICA_STEPS = 8;
+/** transientExit: an attack on the nation under this share of its troops
+ *  is a remnant (two attacks cancel 1:1 at init [PIN AttackMerge], and
+ *  what is left dies out within ticks). */
+export const REMNANT_SHARE = 0.05;
+/** transientExit: at most this many tribes to eat (B1's detTribeSlack): it
+ *  eats its last within a decision or two, and our home cannot regrow as
+ *  fast. */
+export const TRIBE_SLACK = 1;
+
+/**
+ * Package WP7b (o.strikeFloorReplicaSteady): why nation N's replica may
+ * answer "another player first" from a state that ends before its next
+ * decision, or null. The replica's list starts with retaliate (the
+ * largest non-friendly, non-tribe attack on N; one by another player ends
+ * the list there) and bots (any affordable tribe ends it), and it reads
+ * both as they are now:
+ * - "remnant": the largest such attack on N but ours is under
+ *   REMNANT_SHARE of N's troops. quick@20 Bering Strait g3, 5471: Russia's
+ *   answer cancelled Alaska's 535k attack on it and left 1k, which ended at
+ *   5488; the replica read "retaliates against Russia" for Alaska's
+ *   decision at 5504, where Alaska land-attacked us with 1.82M;
+ * - "lastTribe": its last full refresh counted 1 to TRIBE_SLACK affordable
+ *   tribes (NationState.affordableTribes).
+ * Read-only.
+ */
+export function transientExit(
+  v: Pick<View, "me">,
+  N: Player,
+  st: NationState,
+): "remnant" | "lastTribe" | null {
+  let largest = 0;
+  for (const a of N.incomingAttacks()) {
+    const x = a.attacker();
+    if (x === v.me || x.type() === PlayerType.Bot || N.isFriendly(x)) continue;
+    if (a.troops() > largest) largest = a.troops();
+  }
+  if (largest > 0 && largest < REMNANT_SHARE * N.troops()) return "remnant";
+  if (st.affordableTribes > 0 && st.affordableTribes <= TRIBE_SLACK) {
+    return "lastTribe";
+  }
+  return null;
+}
 
 /**
  * Package WP7b R1 FLOOR (o.strikeFloorReplica; docs/14-m4-plan.md §2.7

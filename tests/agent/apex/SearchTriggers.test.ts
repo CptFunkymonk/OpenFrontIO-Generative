@@ -3,21 +3,28 @@
  *
  * Claims:
  * - Nothing before searchFrom; the floor clock (T7) makes the first search
- *   at searchFrom and one at least every floorTicks.
+ *   at searchFrom (high priority) and one at least every floorTicks (low).
  * - T1 fires once per alliance term, in (extendLead, lapseLead] ticks
- *   before a bordering ally's expiry.
+ *   before a bordering ally's expiry, whatever the gap since the last try;
+ *   a budget refusal does not use the term up: T1 fires again at the
+ *   budget's retry tick while the window is open.
  * - T2 fires `chain` ticks after an act; T3 at the stall onset, every
  *   stallEvery ticks in stall, and sooner when a bordering nation's
- *   alliance flips, one appears, or its troops fall by stallChange;
- *   T4 at a nation attack of at least attackMin of our home, unless a search
- *   ran in the last minGap ticks (then never for that attack); T5 when the
- *   followed rollout's first attack of a nation is `foresight` ticks off.
- * - A search counts under the first trigger it matches, in T1-T7 order,
- *   and nothing fires within minGap of the last search.
+ *   alliance flips, an unallied one appears, or its troops fall by
+ *   stallChange; never while a chain is pending, and the chain search
+ *   takes T3's snapshot.
+ * - T4 fires at a nation attack of at least attackMin of our home unless a
+ *   search RAN in the last minGap ticks (a refusal or a trigger with no
+ *   plan does not count), then never for that attack; T5 when the followed
+ *   rollout's first attack of a nation is `foresight` ticks off.
+ * - A refused low-priority trigger holds every low-priority one until its
+ *   retry tick; the high-priority ones fire meanwhile.
+ * - A search counts under the first trigger it matches, in T1-T7 order.
  * - The clock mode (act3) fires every `clock` ticks from searchFrom and
  *   nothing else.
  */
 import {
+  Fired,
   NationObs,
   TriggerObs,
   TriggerParams,
@@ -54,81 +61,118 @@ function obs(t: number, over: Partial<TriggerObs> = {}): TriggerObs {
   };
 }
 
-/** Steps the triggers from `from` to `to` with `at(t)`'s observations,
- *  marking each firing as a search; returns the firings. */
+/** What happens to each firing: a search runs (the default), the budget
+ *  refuses it (retry at the tick given), or no plan. */
+type Fate = "run" | "none" | { retryAt: number };
+
+/** Steps the triggers from `from` to `to` with `at(t)`'s observations;
+ *  returns the firings as [tick, name, why?]. */
 function drive(
   tr: Triggers,
   from: number,
   to: number,
   at: (t: number) => Partial<TriggerObs> = () => ({}),
-): [number, string][] {
-  const out: [number, string][] = [];
+  fate: (f: Fired, t: number) => Fate = () => "run",
+  whys = false,
+): (string | number)[][] {
+  const out: (string | number)[][] = [];
   for (let t = from; t <= to; t++) {
     const o = obs(t, at(t));
     const fired = tr.check(o);
-    if (fired !== null) {
-      out.push([t, fired]);
-      tr.searched(o, fired, null);
-    }
+    if (fired === null) continue;
+    out.push(whys ? [t, fired.name, fired.why] : [t, fired.name]);
+    const f = fate(fired, t);
+    if (f === "run") tr.searched(o, fired, []);
+    else if (f === "none") tr.none(o, fired);
+    else tr.refused(o, fired, f.retryAt);
   }
   return out;
 }
 
+const ally = (expiresAt: number, id = "Z"): NationObs => ({
+  id,
+  allied: true,
+  expiresAt,
+  troops: 500_000,
+});
+
 describe("search triggers", () => {
-  test("the floor clock: first at searchFrom, then every floorTicks", () => {
+  test("the floor clock: first at searchFrom (high priority), then every floorTicks (low)", () => {
     const tr = new Triggers(P);
-    expect(drive(tr, 2000, 6000)).toEqual([
+    const lows: boolean[] = [];
+    const fired = drive(tr, 2000, 6000, undefined, (f) => {
+      lows.push(f.low);
+      return "run";
+    });
+    expect(fired).toEqual([
       [2400, "floor"],
       [4200, "floor"],
       [6000, "floor"],
     ]);
+    expect(lows).toEqual([false, true, true]);
   });
 
-  test("T1: once per alliance term, before the web would ask", () => {
+  test("T1: once per alliance term, before the web would ask, whatever the gap", () => {
     const tr = new Triggers(P);
     drive(tr, 2400, 2400);
-    const ally = (expiresAt: number): NationObs => ({
-      id: "Z",
-      allied: true,
-      expiresAt,
-      troops: 500_000,
-    });
-    // Expiry at 3,400: the window is (2,900, 3,100], after the gap.
-    expect(drive(tr, 2401, 3399, () => ({ nations: [ally(3400)] }))).toEqual([
-      [2900, "end"],
+    // Expiry at 2,950: the window (2,450, 2,650] opens 50 ticks after the
+    // search at 2,400, inside the gap; T1 fires at once.
+    expect(drive(tr, 2401, 2949, () => ({ nations: [ally(2950)] }))).toEqual([
+      [2450, "end"],
     ]);
-    // Extended: a new term, a new search (after the floor clock's at 5,100:
-    // 2,200 ticks since the last).
-    expect(drive(tr, 5100, 5600, () => ({ nations: [ally(5900)] }))).toEqual([
-      [5100, "floor"],
-      [5400, "end"],
+    // Extended: a new term, a new search (after the floor clock's at 4,250:
+    // 1,800 ticks since the last).
+    expect(drive(tr, 4250, 4500, () => ({ nations: [ally(4800)] }))).toEqual([
+      [4250, "floor"],
+      [4300, "end"],
     ]);
   });
 
-  test("T1 waits out the gap, and is dropped once the web would ask", () => {
+  test("T1 refused: retried at the budget's tick while the window is open, else given up", () => {
     const tr = new Triggers(P);
     drive(tr, 2400, 2400);
-    // Expiry at 3,050: the window opens at 2,550, the gap ends at 2,700.
+    const retries: Fate[] = [{ retryAt: 2600 }, "run"];
+    // Expiry at 3,000: window (2,500, 2,700].
     expect(
-      drive(tr, 2401, 2800, () => ({
-        nations: [{ id: "Z", allied: true, expiresAt: 3050, troops: 1 }],
-      })),
-    ).toEqual([[2700, "end"]]);
+      drive(
+        tr,
+        2401,
+        2999,
+        () => ({ nations: [ally(3000)] }),
+        () => retries.shift()!,
+      ),
+    ).toEqual([
+      [2500, "end"],
+      [2600, "end"],
+    ]);
+    // A retry tick past the window: the term is given up.
     const late = new Triggers(P);
     drive(late, 2400, 2400);
-    // Expiry at 2,950: the window (2,450, 2,650] closes before the gap.
     expect(
-      drive(late, 2401, 2900, () => ({
-        nations: [{ id: "Z", allied: true, expiresAt: 2950, troops: 1 }],
-      })),
-    ).toEqual([]);
+      drive(
+        late,
+        2401,
+        2999,
+        () => ({ nations: [ally(3000)] }),
+        () => ({ retryAt: 2700 }),
+      ),
+    ).toEqual([[2500, "end"]]);
   });
 
-  test("T2: chain ticks after an act", () => {
+  test("T2: chain ticks after an act; a search just before it counts as the chain", () => {
     const tr = new Triggers(P);
     drive(tr, 2400, 2400);
     tr.acted(2400);
     expect(drive(tr, 2401, 3100)).toEqual([[3000, "chain"]]);
+    const early = new Triggers(P);
+    drive(early, 2400, 2400);
+    early.acted(2400);
+    // T1 at 2,850, within minGap of the chain's 3,000: no second search.
+    expect(
+      drive(early, 2401, 3400, (t) => ({
+        nations: t >= 2850 ? [ally(3350)] : [],
+      })),
+    ).toEqual([[2850, "end"]]);
   });
 
   test("T3: the stall onset, every stallEvery ticks, sooner on a change", () => {
@@ -142,37 +186,119 @@ describe("search triggers", () => {
     });
     // Stall from 2,800; the neighbour's troops rise 30% at 4,100 (no
     // window) and fall 30% below the last search's at 4,500 (one opens).
-    const fired = drive(tr, 2401, 5000, (t) => ({
-      inStall: t >= 2800,
-      nations: [nbr(t >= 4500 ? 700_000 : t >= 4100 ? 1_300_000 : 1_000_000)],
-    }));
+    const fired = drive(
+      tr,
+      2401,
+      5000,
+      (t) => ({
+        inStall: t >= 2800,
+        nations: [
+          nbr(t >= 4500 ? 700_000 : t >= 4100 ? 1_300_000 : 1_000_000),
+        ],
+      }),
+      undefined,
+      true,
+    );
     expect(fired).toEqual([
-      [2800, "stall"],
-      [4000, "stall"],
-      [4500, "stall"],
+      [2800, "stall", "onset"],
+      [4000, "stall", "every"],
+      [4500, "stall", "troops:N"],
     ]);
   });
 
-  test("T4: a big enough nation attack, not within the gap of a search", () => {
+  test("T3 waits out a pending chain: our own act's effects are the chain's", () => {
     const tr = new Triggers(P);
-    drive(tr, 2400, 2400);
+    drive(tr, 2400, 2400, () => ({ nations: [ally(9000, "Z")] }));
+    tr.acted(2400);
+    // The act broke Z (unallied from 2,401) and home fell out of stall and
+    // back (a new onset at 2,700): nothing before the chain; the chain's
+    // snapshot sees Z unallied, so no change fires after it.
+    const fired = drive(
+      tr,
+      2401,
+      4000,
+      (t) => ({
+        inStall: t < 2500 || t >= 2700,
+        nations: [{ id: "Z", allied: false, expiresAt: null, troops: 1 }],
+      }),
+      undefined,
+      true,
+    );
+    expect(fired).toEqual([[3000, "chain", "chain"]]);
+  });
+
+  test("T4: an attack is dropped only after a search that ran", () => {
     const attack = (id: string, troops: number) => ({
       attacks: [{ id, attacker: "N", troops }],
     });
-    // Too small (5% of home), then within the gap, then counted.
+    const tr = new Triggers(P);
+    drive(tr, 2400, 2400);
+    // Too small (5% of home), then within minGap of the search that ran:
+    // dropped for good; then counted.
     expect(tr.check(obs(2800, attack("a1", 50_000)))).toBeNull();
     expect(tr.check(obs(2600, attack("a2", 500_000)))).toBeNull();
-    // a2 was seen inside the gap: never again.
     expect(tr.check(obs(2800, attack("a2", 500_000)))).toBeNull();
-    expect(tr.check(obs(2801, attack("a3", 500_000)))).toBe("attack");
+    const a3 = tr.check(obs(2801, attack("a3", 500_000)));
+    expect(a3).toMatchObject({ name: "attack", nation: "N", low: false });
+    // A refusal and a trigger with no plan do not hold T4 back.
+    for (const fate of ["none", { retryAt: 99_999 }] as Fate[]) {
+      const t2 = new Triggers(P);
+      drive(t2, 2400, 2400);
+      drive(t2, 4200, 4200, undefined, () => fate); // the floor, not run
+      const f = t2.check(obs(4210, attack(`b${String(fate)}`, 500_000)));
+      expect(f?.name).toBe("attack");
+    }
   });
 
   test("T5: a foreseen attack within its window", () => {
     const tr = new Triggers(P);
     const o = obs(2400);
-    expect(tr.check(o)).toBe("floor");
-    tr.searched(o, "floor", [{ id: "N", at: 3300 }]);
+    const f = tr.check(o)!;
+    expect(f.name).toBe("floor");
+    tr.searched(o, f, [{ id: "N", at: 3300 }]);
     expect(drive(tr, 2401, 3400)).toEqual([[3000, "foresight"]]);
+  });
+
+  test("a refused low-priority trigger holds the low ones; the high ones fire meanwhile", () => {
+    const tr = new Triggers(P);
+    drive(tr, 2400, 2400);
+    const fates: Fate[] = ["run", { retryAt: 4500 }];
+    const unallied: NationObs = {
+      id: "N",
+      allied: false,
+      expiresAt: null,
+      troops: 1,
+    };
+    const fired = drive(
+      tr,
+      2401,
+      4600,
+      (t) => ({
+        inStall: t >= 2500,
+        nations:
+          t < 4000 ? [] : [ally(4400), ...(t >= 4100 ? [unallied] : [])],
+      }),
+      () => fates.shift() ?? "run",
+      true,
+    );
+    // The onset (after the gap) runs; "every" at 3,900 is refused until
+    // 4,500; T1 fires at 4,000 all the same; the new neighbour at 4,100
+    // (a change) waits for the hold.
+    expect(fired).toEqual([
+      [2700, "stall", "onset"],
+      [3900, "stall", "every"],
+      [4000, "end", "end:Z"],
+      [4500, "stall", "new:N"],
+    ]);
+  });
+
+  test("a trigger with no plan counts as a look: the periodic ones wait", () => {
+    const tr = new Triggers(P);
+    // The first floor finds no plan: the next floor is floorTicks later.
+    expect(drive(tr, 2400, 4300, undefined, () => "none")).toEqual([
+      [2400, "floor"],
+      [4200, "floor"],
+    ]);
   });
 
   test("the first matching trigger names the search", () => {
@@ -184,7 +310,7 @@ describe("search triggers", () => {
       inStall: true,
       attacks: [{ id: "a", attacker: "N", troops: 900_000 }],
     });
-    expect(tr.check(o)).toBe("chain");
+    expect(tr.check(o)?.name).toBe("chain");
   });
 
   test("the clock mode fires on the clock only", () => {
