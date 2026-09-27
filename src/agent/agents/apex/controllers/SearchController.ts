@@ -15,6 +15,7 @@ import { Checkpoints } from "../../../lib/search/Checkpoints";
 import {
   BaseView,
   Candidate,
+  CandidateGenerator,
   DANGER,
   GENERATORS,
   generatorsFor,
@@ -163,6 +164,8 @@ export class SearchController implements LiveSearch {
   };
 
   private readonly valueParams: ValueParams;
+  /** The generators with a T6 test (boat plans, package WP3). */
+  private readonly naval: readonly CandidateGenerator[];
 
   constructor(private readonly o: ApexOptions) {
     validateSearchOptions(o);
@@ -175,7 +178,11 @@ export class SearchController implements LiveSearch {
       share: o.searchShare,
     };
     this.kinds = new Set(o.searchKinds.split(",").map((k) => k.trim()));
-    this.budget = new SearchBudget(o.searchR, o.searchFrom);
+    this.naval = GENERATORS.filter(
+      (g) =>
+        g.wantsNaval !== undefined && g.kinds.some((k) => this.kinds.has(k)),
+    );
+    this.budget = new SearchBudget(o.searchR, o.searchFrom, o.searchSlack);
     this.triggers = new Triggers({
       from: o.searchFrom,
       clock: o.searchClock,
@@ -290,14 +297,23 @@ export class SearchController implements LiveSearch {
         troops: a.troops(),
       });
     }
+    const home = me.troops();
+    const cap = ctx.game.config().maxTroops(me);
+    // T6 asks the generators only when it could fire: no bordering nation,
+    // home near the cap.
+    const naval =
+      this.o.searchClock <= 0 &&
+      nations.length === 0 &&
+      home >= NAVAL_HOME * cap &&
+      this.naval.some((g) => g.wantsNaval!(ctx, host));
     return {
       t,
       inStall: host.inStall(t),
-      home: me.troops(),
-      cap: ctx.game.config().maxTroops(me),
+      home,
+      cap,
       nations,
       attacks,
-      naval: false,
+      naval,
     };
   }
 

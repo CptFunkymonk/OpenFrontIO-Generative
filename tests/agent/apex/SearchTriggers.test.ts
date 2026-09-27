@@ -7,7 +7,8 @@
  * - T1 fires once per alliance term, in (extendLead, lapseLead] ticks
  *   before a bordering ally's expiry.
  * - T2 fires `chain` ticks after an act; T3 at the stall onset, every
- *   stallEvery ticks in stall, and sooner on a bordering nation's change;
+ *   stallEvery ticks in stall, and sooner when a bordering nation's
+ *   alliance flips, one appears, or its troops fall by stallChange;
  *   T4 at a nation attack of at least attackMin of our home, unless a search
  *   ran in the last minGap ticks (then never for that attack); T5 when the
  *   followed rollout's first attack of a nation is `foresight` ticks off.
@@ -139,10 +140,11 @@ describe("search triggers", () => {
       expiresAt: null,
       troops,
     });
-    // Stall from 2,800; the neighbour's troops move 30% at 4,500.
+    // Stall from 2,800; the neighbour's troops rise 30% at 4,100 (no
+    // window) and fall 30% below the last search's at 4,500 (one opens).
     const fired = drive(tr, 2401, 5000, (t) => ({
       inStall: t >= 2800,
-      nations: [nbr(t >= 4500 ? 1_300_000 : 1_000_000)],
+      nations: [nbr(t >= 4500 ? 700_000 : t >= 4100 ? 1_300_000 : 1_000_000)],
     }));
     expect(fired).toEqual([
       [2800, "stall"],

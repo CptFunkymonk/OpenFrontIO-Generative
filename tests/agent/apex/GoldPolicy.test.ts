@@ -17,6 +17,7 @@ import {
   GOLD_POLICIES,
   GoldPolicyArm,
   hydroRoom,
+  hydroThreat,
   steamrollLine,
   unalliedArmed,
 } from "../../../src/agent/lib/GoldPolicy";
@@ -521,6 +522,36 @@ describe("apex gold policy (WP8): goldHydroCap", () => {
       unitId: b.id(),
       amount: 1,
     });
+  });
+});
+
+describe("apex gold policy (WP8): the hydrogen threat that makes goldHydroCap bind", () => {
+  test("a silo owner whose ladder names us, with half its perceived hydrogen price, binds the cap; less gold, or an ally, does not", () => {
+    const w = crownWorld();
+    const { game } = w;
+    const { N, H } = w.p;
+    const nukes = model(w, "H");
+    const o = arm("free", { goldHydroCap: 3 });
+    const hydro = game.config().unitInfo(UnitType.HydrogenBomb).cost(game, N);
+    const a = H.buildUnit(UnitType.City, game.ref(200, 100), {});
+    a.increaseLevel();
+    a.increaseLevel();
+    const room = () =>
+      cityGate(game, H, o, game.ticks(), nukes)!.cityRoom(game.ref(240, 100));
+    setGold(N, hydro / 2n - 1n);
+    tick(w);
+    expect(hydroThreat(game, nukes, o)).toBe(false);
+    expect(room()).toBe(Infinity);
+    setGold(N, hydro / 2n);
+    tick(w);
+    expect(hydroThreat(game, nukes, o)).toBe(true);
+    // a (3 levels) is 40 tiles away: no room left under a cap of 3.
+    expect(room()).toBe(0);
+    // Allied, N's ladder names no one: no threat.
+    ally(N, H);
+    tick(w);
+    expect(hydroThreat(game, nukes, o)).toBe(false);
+    expect(room()).toBe(Infinity);
   });
 });
 

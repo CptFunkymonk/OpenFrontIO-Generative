@@ -1137,10 +1137,12 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** The share factor L0/Lh (land net of fallout) on V's tiles, for our
    *  own bombs (M5). */
   searchShare: boolean;
-  /** The budget: Σ search cost ≤ searchR·(t − searchFrom) + 3,000
+  /** The budget: Σ search cost ≤ searchR·(t − searchFrom) + searchSlack
    *  live-tick equivalents (φ per fork from lib/search/phi.json, plus the
    *  ticks advanced); 0 = no cap. */
   searchR: number;
+  /** The budget's grant at searchFrom (the first searches). */
+  searchSlack: number;
   /** "restore": ctx.fork() for every rollout. "clone": one ctx.fork() per
    *  search, and its structural clones (GameFork.source) for the rollouts;
    *  the same games, several times cheaper forks. */
@@ -1190,10 +1192,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  nation's dense-target line (more than 1/75 structure levels a tile,
    *  at least 5). */
   goldGuard: boolean;
-  /** The arm's buys keep the City levels one hydrogen bomb can take (our
-   *  cities within twice its outer radius of each other) at most this
-   *  many; 0 = off. quick@20 Mississippi ("free" without it): one
-   *  hydrogen bomb took 15 levels of cities 64 tiles apart. */
+  /** While a hydrogen threat names us (a silo owner whose nuke ladder
+   *  names us, latent included, with nukePayShare of its perceived
+   *  hydrogen price, or one fired within nukeMemory ticks), the arm's buys
+   *  keep the City levels one hydrogen bomb can take (our cities within
+   *  twice its outer radius of each other) at most this many; 0 = off.
+   *  quick@20 Mississippi ("free" without it): one hydrogen bomb took 15
+   *  levels of cities 64 tiles apart. */
   goldHydroCap: number;
 }
 
@@ -1518,7 +1523,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchRival: 0,
   searchShare: false,
   searchR: 2.5,
-  searchFork: "restore",
+  searchSlack: 3000,
+  searchFork: "clone",
   searchLapseLead: 498,
   searchChain: 600,
   searchStallEvery: 1200,

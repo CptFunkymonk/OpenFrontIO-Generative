@@ -6,7 +6,7 @@ import { roundUp } from "./Rounds";
 // equivalents (never milliseconds, so arena runs replay):
 //
 //   C_search = Σ over the search's rollouts (φ + ticks advanced)
-//   Σ C ≤ R·(t − searchFrom) + BUDGET_SLACK
+//   Σ C ≤ R·(t − searchFrom) + slack   (searchSlack, BUDGET_SLACK = 3,000)
 //
 // φ is a fork's cost in live ticks, from the committed per-map table
 // phi.json (measured once; the fallback for a map it lacks). Before its

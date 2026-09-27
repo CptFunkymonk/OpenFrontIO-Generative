@@ -26,8 +26,17 @@ export interface AgentHostOptions {
   gameStart: GameStartInfo;
   /** The runner whose game the agent reads. */
   runner: GameRunner;
-  /** Needed for `ctx.fork()`; without it forking throws. */
+  /** Needed for `ctx.fork()` by snapshot restore (forkMode "restore"). */
   terrain?: TerrainSource;
+  /**
+   * How `ctx.fork()` copies the game. "clone" (the default): a structural
+   * clone (GameFork.clone, src/core/snapshot/GameClone.ts), several times
+   * faster on large maps and with no TerrainSource. "restore": the game's
+   * snapshot restored onto fresh maps from `terrain`. Both give the game the
+   * snapshot holds; with water nukes only the clone keeps the game's water
+   * graph, and a restore can route ships differently from the game.
+   */
+  forkMode?: "clone" | "restore";
   /** Delivers an accepted intent to the game (turn queue or transport). */
   deliver: (intent: AgentIntent) => void;
   /** Clock for the rate limiter, in ms. Arena: game time. Browser: wall. */
@@ -52,8 +61,8 @@ export interface AgentHostStats {
   errors: number;
   firstErrors: string[];
   forks: number;
-  /** Wall-clock milliseconds spent inside `ctx.fork()` (snapshot and
-   *  restore; stepping the fork afterwards is think time). */
+  /** Wall-clock milliseconds spent inside `ctx.fork()`, one sample per
+   *  fork (the copy; stepping the fork afterwards is think time). */
   forkMs: { count: number; total: number; max: number };
 }
 
@@ -213,19 +222,22 @@ export class AgentHost {
 
   fork(): GameFork {
     const { terrain, runner, gameStart, clientID } = this.opts;
-    if (terrain === undefined) {
-      throw new Error("forking needs a TerrainSource");
+    const restore = this.opts.forkMode === "restore";
+    if (restore && terrain === undefined) {
+      throw new Error("forking by restore needs a TerrainSource");
     }
     this.stats.forks++;
     const start = performance.now();
     try {
-      return new GameFork(
-        runner.game,
-        runner.snapshot(),
-        terrain,
-        gameStart,
-        clientID,
-      );
+      return restore
+        ? new GameFork(
+            runner.game,
+            runner.snapshot(),
+            terrain!,
+            gameStart,
+            clientID,
+          )
+        : GameFork.clone(runner.game, gameStart, clientID);
     } finally {
       const ms = performance.now() - start;
       const forkMs = this.stats.forkMs;

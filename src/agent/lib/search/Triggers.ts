@@ -10,7 +10,9 @@ import type { PlayerID } from "../../../core/game/Game";
 // | T2 chain     | `chain` ticks after an act                            |
 // | T3 stall     | stall onset; then every stallEvery ticks in stall, or
 // |              | sooner when a bordering nation's alliance flips, one
-// |              | appears, or its troops move more than stallChange     |
+// |              | appears, or its troops fall by more than stallChange
+// |              | (a window opens; a rise opens none, and a growing
+// |              | neighbour's +25% came every 300 ticks on Japan g8)    |
 // | T4 attack    | a nation attack on us starts with ≥ attackMin of our
 // |              | home troops, no search in the last minGap ticks       |
 // | T5 foresight | the followed rollout shows a nation's first attack on
@@ -205,7 +207,7 @@ export class Triggers {
       const was = this.nbrs.get(n.id);
       if (was === undefined) return true;
       if (was.allied !== n.allied) return true;
-      if (Math.abs(n.troops - was.troops) > this.p.stallChange * was.troops) {
+      if (was.troops - n.troops > this.p.stallChange * was.troops) {
         return true;
       }
     }

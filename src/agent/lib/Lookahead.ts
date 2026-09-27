@@ -265,7 +265,8 @@ export class Lookahead {
    *  this tick, or `replay` must hold what was sent (Ledger.sentThisTick()).
    *  The replay goes into the fork's first step, ahead of what that step is
    *  given (the arena's latency of 1 turn: an intent sent at ctx.tick = T
-   *  runs in turn T, the fork's first). */
+   *  runs in turn T, the fork's first); forks branched from it before that
+   *  step get it too (GameFork.replay, branch). */
   fork(ctx: AgentContext, replay: readonly AgentIntent[]): GameFork | null {
     if (!this.canFork(ctx)) return null;
     const spawn = ctx.game.inSpawnPhase();
@@ -278,7 +279,7 @@ export class Lookahead {
       ctx.log(`lookahead: fork failed, forks off: ${String(e)}`);
       return null;
     }
-    if (replay.length > 0) withReplay(f, replay);
+    f.replay(replay);
     this.info.set(f, {
       spawn,
       tick: ctx.tick,
@@ -287,6 +288,40 @@ export class Lookahead {
     });
     this.charge(f, performance.now() - start);
     return f;
+  }
+
+  /**
+   * `n` forks of this tick: one fork (as `fork`), and `n - 1` branched from
+   * it (`branch`). Null when `fork` refuses.
+   */
+  forkMany(
+    ctx: AgentContext,
+    replay: readonly AgentIntent[],
+    n: number,
+  ): GameFork[] | null {
+    const f = this.fork(ctx, replay);
+    if (f === null) return null;
+    return n <= 1 ? [f] : [f, ...this.branch(f, n - 1)];
+  }
+
+  /**
+   * `n` forks of `f` as it is now (GameFork.clones: the replay it still has
+   * queued included), each registered as `f` is, with its own copy of `f`'s
+   * budget as spent so far, so they roll out like `f` would from here. The
+   * time is charged as `f`'s.
+   */
+  branch(f: GameFork, n: number): GameFork[] {
+    const info = this.info.get(f);
+    if (info === undefined) {
+      throw new Error("Lookahead.branch: the fork was not made by fork()");
+    }
+    const start = performance.now();
+    const out = f.clones(n);
+    for (const c of out) {
+      this.info.set(c, { ...info, budget: info.budget.clone() });
+    }
+    this.charge(f, performance.now() - start);
+    return out;
   }
 
   /** Spawn phase: ends the phase on the fork (fork.game.endSpawnPhase(); the
@@ -370,16 +405,6 @@ export class Lookahead {
     const window = WINDOW_MS / game.config().msPerTick();
     this.charges = this.charges.filter((c) => c.tick > tick - window);
   }
-}
-
-/** Puts `replay` ahead of the intents of the fork's next step. */
-function withReplay(f: GameFork, replay: readonly AgentIntent[]): void {
-  const base = f.step.bind(f);
-  const pending = [...replay];
-  f.step = (mine = [], others = []) => {
-    f.step = base;
-    base([...pending, ...mine], others);
-  };
 }
 
 /** AgentHost.isValid: not a forbidden type, the wire schema and the size

@@ -82,8 +82,13 @@ export interface AgentContext {
 
   /**
    * Copies the game at this tick into an independent simulation that can be
-   * stepped forward with hypothetical intents, for lookahead. Expensive on
-   * large maps (a full snapshot and restore), so use it deliberately.
+   * stepped forward with hypothetical intents, for lookahead. By default a
+   * structural clone (src/core/snapshot/GameClone.ts; AgentHostOptions
+   * forkMode): tens of milliseconds on most maps mid-game, a few hundred on
+   * the largest, about 10-30 live ticks' worth, so still use it
+   * deliberately. Intents sent this tick have not run yet: give them to the
+   * fork's first step, or queue them with `GameFork.replay`. More forks of
+   * the same tick: `fork.clones(n)` or `fork.source()`, before it steps.
    */
   fork(): GameFork;
 

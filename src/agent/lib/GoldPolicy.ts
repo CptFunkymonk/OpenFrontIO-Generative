@@ -49,10 +49,12 @@ import { Bomb, NukeModel } from "./NukeModel";
 //   left an ally does aim at us, so none is exempt. Unlike exposedSite's
 //   wide rule, gold for a silo and a bomb without a silo does not count.
 // - "free": no nuke gate (citySpread and cityMaxLevel still hold).
-// An arm's buys spend only the gold above goldReserve, and with goldGuard
+// An arm's buys spend only the gold above goldReserve; with goldGuard they
 // never cross the MIRV steamroll line or the line of the richest nation's
 // dense-target rung (> 1/75 structure levels a tile, at least 5 levels,
-// NNB :318-349); today's buys keep today's rule.
+// NNB :318-349); with goldHydroCap, while a hydrogen threat names us
+// (hydroThreat), they keep the City levels one hydrogen bomb can take at
+// most that many (hydroRoom). Today's buys keep today's rule.
 //
 // Pure in the game: only getters (and NukeModel.exposures, which samples
 // the silo owners' gold as every call does); no ctx.random, no state of its
@@ -74,6 +76,9 @@ export interface GoldOptions {
   goldReserve: number;
   goldGuard: boolean;
   goldHydroCap: number;
+  /** Package B3's knobs, read by the hydrogen threat (hydroThreat). */
+  nukePayShare: number;
+  nukeMemory: number;
 }
 
 /** The gold arm's gate on one city check (EconomyController.planCity). */
@@ -114,10 +119,11 @@ export function cityGate(
   const maxLevels = o.goldGuard
     ? Math.min(steamrollLine(game, me), densityLine(me))
     : Infinity;
+  // The cap binds only under a hydrogen threat (without a model, always).
+  const capped =
+    o.goldHydroCap > 0 && (nukes === undefined || hydroThreat(game, nukes, o));
   const cityRoom = (tile: TileRef, self?: Unit) =>
-    o.goldHydroCap > 0
-      ? hydroRoom(game, me, tile, o.goldHydroCap, self)
-      : Infinity;
+    capped ? hydroRoom(game, me, tile, o.goldHydroCap, self) : Infinity;
   const base = { budget, maxLevels, cityRoom };
   switch (o.goldPolicy) {
     case "free":
@@ -146,6 +152,34 @@ export function cityGate(
       };
     }
   }
+}
+
+/**
+ * Whether a hydrogen bomb may come our way (goldHydroCap binds then): a
+ * silo owner whose nuke ladder names us, on the rung that answers now or a
+ * lower one (NukeModel.exposures, latent included), holds at least
+ * o.nukePayShare of its perceived hydrogen price (NukeModel.perceivedCost)
+ * or launched a hydrogen bomb within o.nukeMemory ticks (package B3's
+ * test of a hydrogen threat, EconomyController.nukeThreats). quick@20
+ * (package WP8): an unconditional cap of 6 levels turned World g0's 27
+ * levels, which no bomb came for and which deterred every nation attack,
+ * into 4 (9.5% of the land at minute 20 against 0.2%), while it saved 4
+ * levels and 11 points on Bering Strait, where Alaska's ladder named us.
+ */
+export function hydroThreat(
+  game: Game,
+  nukes: NukeModel,
+  o: Pick<GoldOptions, "nukePayShare" | "nukeMemory">,
+): boolean {
+  const share = BigInt(Math.round(o.nukePayShare * 1000));
+  const since = game.ticks() - o.nukeMemory;
+  for (const e of nukes.exposures()) {
+    if (!e.hasSilo) continue;
+    const price = nukes.perceivedCost(e.nation, UnitType.HydrogenBomb);
+    if (game.player(e.nation).gold() * 1000n >= price * share) return true;
+    if (o.nukeMemory > 0 && nukes.hydroSince(e.nation, since)) return true;
+  }
+  return false;
 }
 
 /**

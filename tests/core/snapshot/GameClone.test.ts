@@ -116,7 +116,8 @@ const NOT_COPIED = new Set([
   // the chain object of the version it had, a clone's (and a restore's) the
   // current one. Chains are stateless wrappers of the game's one water
   // search (AStarWaterHierarchical, whose graph the rebuild swapped), so
-  // both search alike; only the object differs.
+  // both search alike; only the object differs. (A trade ship's chain is a
+  // route memo, which can differ: the snapshot README's known gaps.)
   "finder",
 ]);
 // And from a restore: the paths the game cached on its water graph, which a

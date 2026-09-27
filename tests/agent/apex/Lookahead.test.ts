@@ -533,4 +533,65 @@ describe("Lookahead forks and rollouts", () => {
     expect(value(r, 17, 1, 0)).toBeCloseTo(1000 + 5100 / 17, 9);
     expect(value({ ...r, alive: false }, 17)).toBe(-Infinity);
   });
+
+  test(
+    "forks branched from a Lookahead fork (branch, forkMany) carry its replay, are registered, and roll out like it",
+    async () => {
+      const la = new Lookahead({ msPer10s: 1e9, wallBudgetMs: 1e9 });
+      let many: GameFork[] = [];
+      let early: GameFork[] = [];
+      let replay: AgentIntent[] = [];
+      let gameID = "";
+      const arena = await newArena(
+        "LOOKBRCH",
+        at(FORK_AT, (ctx, sent) => {
+          replay = [...sent];
+          gameID = ctx.gameID;
+          many = la.forkMany(ctx, sent, 3)!;
+          // Before the first step: the branches get the replay too.
+          early = la.branch(many[0], 2);
+        }),
+      );
+      arena.play(FORK_AT);
+      expect(replay.length).toBeGreaterThan(0);
+      const forks = [...many, ...early];
+      expect(forks).toHaveLength(5);
+
+      // Each one's first step is the game's turn FORK_AT, the replayed
+      // sends included.
+      arena.runTurn();
+      for (const f of forks) f.step([]);
+      const real = snapshotGame(arena.game, { gameID });
+      for (const f of forks) {
+        expect(diffSnapshots(snapshotGame(f.game, { gameID }), real)).toEqual(
+          [],
+        );
+      }
+
+      // Registered, each with its own budget: rollouts run and agree.
+      const rolled = forks.map((f) =>
+        withoutMs(la.rollout(f, ME, new EveryTenth(), ROLLOUT_TICKS)),
+      );
+      const bytes = forks.map((f) => snapshotGame(f.game, { gameID }));
+      for (let i = 1; i < forks.length; i++) {
+        expect(rolled[i]).toEqual(rolled[0]);
+        expect(diffSnapshots(bytes[i], bytes[0])).toEqual([]);
+      }
+
+      // Branched mid-rollout, a fork's branches roll on exactly like it:
+      // the budget as spent so far is copied, not shared.
+      const [mid] = la.branch(forks[0], 1);
+      const on = la.rollout(forks[0], ME, new EveryTenth(), ROLLOUT_TICKS);
+      const branchOn = la.rollout(mid, ME, new EveryTenth(), ROLLOUT_TICKS);
+      expect(withoutMs(branchOn)).toEqual(withoutMs(on));
+      expect(
+        diffSnapshots(
+          snapshotGame(mid.game, { gameID }),
+          snapshotGame(forks[0].game, { gameID }),
+        ),
+      ).toEqual([]);
+      expect(() => la.branch({} as GameFork, 1)).toThrow(/not made by fork/);
+    },
+    TIMEOUT,
+  );
 });

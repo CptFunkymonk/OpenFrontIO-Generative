@@ -85,6 +85,10 @@ export interface CandidateGenerator {
   /** Kinds it makes; it runs only if searchKinds has one of them. */
   readonly kinds: readonly string[];
   generate(sv: SearchView, base: BaseView): Candidate[];
+  /** Trigger T6 (naval, §2.3): whether this generator has a plan across
+   *  the water now (e.g. a nation within searchBoatMaxVoyage); asked only
+   *  while no nation borders us and home idles near the cap. */
+  wantsNaval?(ctx: AgentContext, host: SearchHost): boolean;
 }
 
 /** Every generator, in candidate order. */
