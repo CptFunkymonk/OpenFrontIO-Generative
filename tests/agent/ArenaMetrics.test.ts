@@ -651,6 +651,18 @@ describe("searches from the log", () => {
     });
   });
 
+  test("with a drop count, a log is cut only if the host dropped lines", () => {
+    const many = Array.from(
+      { length: LOG_LINES_KEPT + 10 },
+      (_, i) => `[${i}] ${i} tn`,
+    );
+    // The arena's own cap keeps long logs whole: nothing dropped, not cut.
+    expect(seatLogStats(many, 0).truncated).toBe(false);
+    expect(seatLogStats(many.slice(0, 5), 1).truncated).toBe(true);
+    // Without one (an older run), the old rule: at the host's cap, cut.
+    expect(seatLogStats(many).truncated).toBe(true);
+  });
+
   test("apex's defence lines time nation attacks once it logs ships", () => {
     const why = (lines: string[]) => seatLogStats(lines).defWhy;
     expect(

@@ -134,6 +134,9 @@ export interface SeatResult {
   tilesUncredited?: number;
   logTail: string[];
   logs: string[];
+  /** Log lines the host did not keep (past ARENA_LOG_LINES). Added with
+   *  the arena's own cap; older result files lack it. */
+  logsDropped?: number;
 }
 
 export interface ArenaGameResult {
@@ -157,6 +160,11 @@ export interface ArenaGameResult {
 }
 
 const LOG_TAIL = 40;
+
+/** Log lines kept per seat: far above AgentHost's browser default of 2,000,
+ *  which a 60-minute game with search passes, so a game log keeps its late
+ *  search lines and checkpoints. */
+export const ARENA_LOG_LINES = 100_000;
 
 interface Seat {
   spec: SeatSpec;
@@ -274,6 +282,7 @@ export async function runArenaGame(
       nowMs: () => game.ticks() * 100,
       rateLimit: spec.rateLimit,
       strict: spec.strict,
+      maxLogLines: ARENA_LOG_LINES,
     });
     seats.push({
       spec: seatSpec,
@@ -511,6 +520,7 @@ function seatResult(
     ...records,
     logTail: s.host.logs.slice(-LOG_TAIL),
     logs: s.host.logs,
+    logsDropped: s.host.logsDropped,
   };
 }
 

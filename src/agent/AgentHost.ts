@@ -47,6 +47,12 @@ export interface AgentHostOptions {
   strict?: boolean;
   /** Receives every log line as it is written. */
   onLog?: (line: string) => void;
+  /**
+   * Lines of the log kept in `logs` (default 2,000, enough for a browser
+   * session). Later lines still reach `onLog`, and are counted in
+   * `logsDropped`. The arena keeps far more, for its game logs.
+   */
+  maxLogLines?: number;
 }
 
 export interface AgentHostStats {
@@ -84,6 +90,8 @@ export class AgentHost {
     forkMs: { count: 0, total: 0, max: 0 },
   };
   readonly logs: string[] = [];
+  /** Log lines written after `logs` reached its cap (maxLogLines). */
+  logsDropped = 0;
 
   private readonly budget: IntentBudget;
   private readonly random: PseudoRandom;
@@ -250,7 +258,11 @@ export class AgentHost {
 
   log(message: string): void {
     const line = `[${this.game.ticks()}] ${message}`;
-    if (this.logs.length < MAX_LOG_LINES) this.logs.push(line);
+    if (this.logs.length < (this.opts.maxLogLines ?? MAX_LOG_LINES)) {
+      this.logs.push(line);
+    } else {
+      this.logsDropped++;
+    }
     this.opts.onLog?.(line);
   }
 

@@ -119,6 +119,33 @@ describe("AgentHost", () => {
     expect(host.stats.intentsRateLimited).toBe(1);
   });
 
+  test("keeps maxLogLines lines, counts the rest, and passes all on", () => {
+    const seen: string[] = [];
+    const { host } = makeHost(
+      runner,
+      (ctx) => {
+        for (let i = 0; i < 5; i++) ctx.log(`line ${i}`);
+      },
+      { maxLogLines: 3, onLog: (line) => seen.push(line) },
+    );
+    host.tick();
+    expect(host.logs.map((l) => l.split("] ")[1])).toEqual([
+      "line 0",
+      "line 1",
+      "line 2",
+    ]);
+    expect(host.logsDropped).toBe(2);
+    expect(seen).toHaveLength(5);
+
+    // The default keeps 2,000 lines, a browser session's worth.
+    const { host: dflt } = makeHost(runner, (ctx) => {
+      for (let i = 0; i < 2001; i++) ctx.log(`x ${i}`);
+    });
+    dflt.tick();
+    expect(dflt.logs).toHaveLength(2000);
+    expect(dflt.logsDropped).toBe(1);
+  });
+
   test("records agent exceptions, and rethrows them when strict", () => {
     const boom = () => {
       throw new Error("boom");

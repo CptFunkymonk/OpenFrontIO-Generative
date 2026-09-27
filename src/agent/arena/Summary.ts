@@ -124,6 +124,8 @@ export type SummarySeat = Pick<
   /** Read by the search metrics: a SeatResult's log in memory, or what
    *  storedGame and readRun read out of it (seatLogStats). */
   logs?: readonly string[];
+  /** The lines of `logs` the host dropped (ArenaGame's logsDropped). */
+  logsDropped?: number;
   logStats?: SeatLogStats;
 };
 
@@ -564,8 +566,9 @@ export function nationBefore(
 
 // ── Search, from the agent's log ─────────────────────────────────────────
 
-/** Lines AgentHost keeps of a seat's log (its MAX_LOG_LINES): a log this
- *  long may have lost later lines, so the counts read from it are short. */
+/** Lines AgentHost kept of a seat's log in runs recorded before the arena
+ *  counted the lines it dropped (logsDropped): a log this long from such a
+ *  run may have lost later lines, so the counts read from it are short. */
 export const LOG_LINES_KEPT = 2000;
 
 /**
@@ -608,7 +611,9 @@ export interface SearchLogStats {
 /** What the summary reads out of a seat's log. */
 export interface SeatLogStats {
   lines: number;
-  /** The log reached LOG_LINES_KEPT: lines after it were not kept. */
+  /** Lines after the kept ones were not kept: the host dropped some
+   *  (logsDropped > 0), or, in a run from before it counted them, the log
+   *  reached LOG_LINES_KEPT. */
   truncated: boolean;
   /** Ticks of apex's `def why` lines, one for each nation attack on it
    *  (a land attack, or a boat's when it lands): the pile-on fallback for
@@ -624,8 +629,12 @@ export interface SeatLogStats {
 
 const LOG_LINE = /^\[(\d+)\] (?:\d+ )?(.*)$/;
 
-/** Reads a seat's log lines (as AgentHost writes them, `[tick] message`). */
-export function seatLogStats(lines: readonly string[]): SeatLogStats {
+/** Reads a seat's log lines (as AgentHost writes them, `[tick] message`);
+ *  `dropped` is the seat's logsDropped, undefined in runs from before it. */
+export function seatLogStats(
+  lines: readonly string[],
+  dropped?: number,
+): SeatLogStats {
   const defWhy: number[] = [];
   // apex logs a `def why` for each nation attack on its land since 92ebf90,
   // and a `def boat` for each nation ship at sea bound for it since
@@ -720,7 +729,8 @@ export function seatLogStats(lines: readonly string[]): SeatLogStats {
   }
   return {
     lines: lines.length,
-    truncated: lines.length >= LOG_LINES_KEPT,
+    truncated:
+      dropped === undefined ? lines.length >= LOG_LINES_KEPT : dropped > 0,
     defWhy: times ? defWhy : null,
     search,
   };
@@ -749,7 +759,8 @@ function sameSnap(a: unknown, b: unknown): boolean {
 /** A seat's log stats: as stored, else read from its log in memory. */
 export function logStatsOf(s: SummarySeat): SeatLogStats | undefined {
   return (
-    s.logStats ?? (s.logs === undefined ? undefined : seatLogStats(s.logs))
+    s.logStats ??
+    (s.logs === undefined ? undefined : seatLogStats(s.logs, s.logsDropped))
   );
 }
 
@@ -1419,7 +1430,7 @@ export function storedGame(
     ...rest,
     seats: seats.map(({ logs, ...s }) => ({
       ...s,
-      logStats: seatLogStats(logs),
+      logStats: seatLogStats(logs, s.logsDropped),
     })),
   };
 }
@@ -1542,7 +1553,7 @@ function withLogStats<T extends { seats: StoredSeat[] }>(
   for (const s of game.seats) {
     const lines = bySeat.get(s.clientID);
     if (s.logStats === undefined && lines !== undefined) {
-      s.logStats = seatLogStats(lines);
+      s.logStats = seatLogStats(lines, s.logsDropped);
     }
   }
   return game;
