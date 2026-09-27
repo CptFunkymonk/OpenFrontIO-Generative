@@ -1359,8 +1359,13 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** hydro:N / atom:N — a salvo at a nation's finished silos to remove its
    *  MIRV (MIRV denial). */
   searchNukeDeny: boolean;
-  /** silo — build a missile silo at an interior tile when we own none and
-   *  gold ≥ searchNukeSiloGold, so a later search can strike or MIRV. */
+  /** mirvx — an alliance-preserving price-denial MIRV at the nearest tribe
+   *  tile: it breaks no alliance and makes us no traitor, but raises every
+   *  nation's next MIRV by 15M (review F7). */
+  searchNukeMirvDeny: boolean;
+  /** silo+launch — when we own no silo, build one and launch a MIRV/bomb at
+   *  the silo-ready tick (the combined candidate). The pure-cost standalone
+   *  silo candidate was removed in review F5. */
   searchNukeSilo: boolean;
   /** Most nations given a denial salvo (mirv:N is always just the single
    *  most dangerous one). */
@@ -1379,15 +1384,19 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** A rival counts as a mirv:N target (out-caps us) when its cap is at
    *  least this many times ours. */
   searchNukeCapRatio: number;
-  /** Least gold before the silo candidate builds one (≈ a hydrogen bomb, so
-   *  a denial is possible once it is ready). */
-  searchNukeSiloGold: number;
   /** Cap on bombs in one denial candidate (its steps' amounts summed),
    *  besides our ready-slot and gold limits. */
   searchNukeMaxBombs: number;
   /** Ticks after building a silo before the combined silo+launch candidate
    *  fires its MIRV/bomb (a new silo is ready at intent + 102; OwnNukes). */
   searchNukeSiloReady: number;
+  /** Ticks between the follow-up attack waves a MIRV plan schedules on the
+   *  crippled nation, one per searchFracs share (review F1). */
+  searchNukeStrikeGap: number;
+  /** The window (ticks) the NukeWatch measures a nation's income over, for
+   *  T8's ticks-to-price lead and the generator's target choice (review
+   *  F2). */
+  searchNukeWindow: number;
 
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
   // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
@@ -1837,15 +1846,17 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchNukes: false,
   searchNukeMirv: true,
   searchNukeDeny: true,
+  searchNukeMirvDeny: true,
   searchNukeSilo: true,
   searchNukeK: 2,
   searchNukeLead: 600,
   searchNukeLandShare: 0.35,
   searchNukeCityLead: 1,
   searchNukeCapRatio: 1.1,
-  searchNukeSiloGold: 5_000_000,
   searchNukeMaxBombs: 8,
   searchNukeSiloReady: 110,
+  searchNukeStrikeGap: 20,
+  searchNukeWindow: 600,
 
   // Package WP8 GOLD.
   goldPolicy: "exposure",
