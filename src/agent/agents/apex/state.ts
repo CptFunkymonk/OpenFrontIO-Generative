@@ -33,8 +33,9 @@ export interface DirectiveStep {
   /** Marks a foe from this step's run on: until tick `until` (inclusive)
    *  the policy vetoes our alliance requests (`ally:<id>`: the web's, the
    *  recall's, the renewal's and the counter-accept's) and extensions
-   *  (`ext:<id>`) with it. An `until` before `at` clears the mark. Foe
-   *  marks go first, so a foe step and an offer in the same run see it. */
+   *  (`ext:<id>`) with it. An `until` before `at` clears the mark (a
+   *  directive's `replace` does not). Foe marks go first, so a foe step and
+   *  an offer in the same run see it. */
   foe?: { id: PlayerID; until: number };
   /** Offered through the Scheduler; refused, it is logged and dropped. */
   p?: Proposal;

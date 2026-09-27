@@ -121,7 +121,7 @@ export class GameFork {
     source: Game,
     snapshot: Uint8Array | Game,
     terrain: TerrainSource | null,
-    gameStart: GameStartInfo,
+    private readonly gameStart: GameStartInfo,
     private readonly clientID: ClientID,
   ) {
     const game =
@@ -158,6 +158,21 @@ export class GameFork {
 
   get game(): Game {
     return this.runner.game;
+  }
+
+  /**
+   * Forks of this fork as it is now, from one take of its state: a
+   * ForkSource (by structural clone) on the fork's game. The fork itself
+   * can then step on; forks are made before it does (ForkSource checks).
+   * Use it to branch a rollout, or to clone a fork that ctx.fork() made.
+   */
+  source(): ForkSource {
+    return new ForkSource(this.game, this.gameStart, this.clientID);
+  }
+
+  /** `n` independent forks of this fork as it is now (see `source`). */
+  clones(n: number): GameFork[] {
+    return this.source().forks(n);
   }
 
   /**

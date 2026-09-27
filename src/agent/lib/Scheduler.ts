@@ -254,6 +254,14 @@ export class Scheduler {
     this.vetoedKeys.add(key);
   }
 
+  /** Whether `key` is vetoed this tick (veto). An offer with it is refused
+   *  as "key", which a caller counting the key's taker as a held slot
+   *  cannot tell from a taken key: such a caller asks this first (review
+   *  F1: DiplomacyController.counterAccept). */
+  vetoed(key: string): boolean {
+    return this.vetoedKeys.has(key);
+  }
+
   /** Start of tick: copies ctx.budget(). Drops whatever an earlier tick
    *  accepted and did not flush, and the last tick's vetoes. */
   begin(tick: number, remaining: IntentBudgetRemaining, purse: Purse): void {

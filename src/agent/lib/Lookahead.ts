@@ -9,6 +9,7 @@ import {
 } from "../Agent";
 import { GameFork } from "../Fork";
 import {
+  FORBIDDEN_INTENTS,
   INTENTS_PER_MINUTE,
   INTENTS_PER_SECOND,
   MAX_INTENT_BYTES,
@@ -381,10 +382,12 @@ function withReplay(f: GameFork, replay: readonly AgentIntent[]): void {
   };
 }
 
-/** AgentHost.isValid without the forbidden list (AgentIntent excludes those
- *  types): the wire schema and the size bound. */
+/** AgentHost.isValid: not a forbidden type, the wire schema and the size
+ *  bound. AgentHost refuses such an intent before it touches the budget, so
+ *  a rollout's sends must too (ApexPolicy's rollout step does). */
 export function isValidIntent(intent: AgentIntent): boolean {
   return (
+    !FORBIDDEN_INTENTS.has((intent as { type: string }).type) &&
     IntentSchema.safeParse(intent).success &&
     JSON.stringify(intent).length <= MAX_INTENT_BYTES
   );

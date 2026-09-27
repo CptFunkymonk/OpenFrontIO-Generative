@@ -14,6 +14,13 @@
  *   the same edit live and refuses plans that cannot be played; the
  *   LiveSearch runs before the tick's run, sees what it sent afterwards,
  *   and an error it throws comes out after the run.
+ * - Round 2 (the review of package WP1): the host's Ledger and
+ *   NationModel copies are observed at the tick (F2); a copy spends no
+ *   budget on an invalid intent (F3) and records a directive attack
+ *   without meta.target against its target at the send, as live (F4); a
+ *   copy plays one game only (F5); the states the search reads hold the
+ *   Ledger's data of the last run. A copy stepped on the live game itself
+ *   (it only reads the game) must send what the live policy sends.
  *
  * Setting: a synthetic 200x100 plains field (as Diplomacy.test.ts builds
  * it) with the agent on x < 100 and four nations with no nation AI (the
@@ -26,6 +33,7 @@ import { parseApexOptions } from "../../../src/agent/agents/apex/options";
 import {
   ApexPolicy,
   LiveSearch,
+  RolloutCopy,
   SearchHost,
 } from "../../../src/agent/agents/apex/policy";
 import {
@@ -33,6 +41,9 @@ import {
   createState,
   DirectiveStep,
 } from "../../../src/agent/agents/apex/state";
+import { PendingSend, UNRESOLVED } from "../../../src/agent/lib/Ledger";
+import { BudgetMirror } from "../../../src/agent/lib/Lookahead";
+import { NationModel } from "../../../src/agent/lib/NationModel";
 import { Prio, Proposal } from "../../../src/agent/lib/Scheduler";
 import { Config } from "../../../src/core/configuration/Config";
 import { AllianceRequestExecution } from "../../../src/core/execution/alliance/AllianceRequestExecution";
@@ -193,6 +204,39 @@ const attacksOn = (w: World, id: PlayerID) =>
     .sent()
     .filter((x) => x.intent.type === "attack" && x.intent.targetID === id);
 
+/** One step of `copy` on the live game at its current tick (the copy only
+ *  reads it), with a BudgetMirror of the live budget now. */
+function stepOnLive(w: World, copy: RolloutCopy): AgentIntent[] {
+  return copy.step({
+    game: w.game,
+    me: w.us,
+    tick: w.game.ticks(),
+    gameID: GAME_ID,
+    budget: BudgetMirror.fromContext(w.h.context()),
+  });
+}
+
+/** Our live Ledger's pending sends, written into the state (by a copy). */
+function livePending(w: World): PendingSend[] {
+  w.policy.forRolloutWith();
+  return w.s.ledger.pending ?? [];
+}
+
+/** Steps past the nations' spawn immunity (50 ticks), before which no
+ *  attack of ours on a nation starts. */
+function pastImmunity(w: World): void {
+  while (w.game.ticks() <= 55) w.h.step();
+}
+
+/** Troops of our non-retreating attacks on `N` in the game. */
+function inFlightOn(w: World, N: Player): number {
+  let n = 0;
+  for (const a of w.us.outgoingAttacks()) {
+    if (!a.retreating() && a.target() === N) n += a.troops();
+  }
+  return n;
+}
+
 describe("apex directive (package WP1)", () => {
   test("a step goes in the run of its tick, sized from that tick's purse", () => {
     const probe = new Probe();
@@ -334,6 +378,34 @@ describe("apex directive (package WP1)", () => {
     expect(w.us.isAlliedWith(w.nation(A))).toBe(true);
   });
 
+  test("replace keeps the foe marks; a foe step with until before its tick clears one", () => {
+    const w = world({});
+    for (let i = 0; i < 10; i++) w.h.step();
+    const t = w.game.ticks();
+    w.policy.setDirective([{ at: t, foe: { id: A, until: t + 500 } }]);
+    w.game.addExecution(new AllianceRequestExecution(w.nation(A), AGENT_ID));
+    for (let i = 0; i < 5; i++) w.h.step();
+    // A new plan with replace: the pending steps go, the mark stays.
+    w.policy.setDirective([], true);
+    for (let i = 0; i < 5; i++) w.h.step();
+    expect(w.s.search.foes).toEqual({ [A]: t + 500 });
+    expect(w.us.isAlliedWith(w.nation(A))).toBe(false);
+    // A plan that allies A clears the mark first: accepted in that run.
+    const at = w.game.ticks();
+    w.policy.setDirective([{ at, foe: { id: A, until: at - 1 } }], true);
+    w.h.step();
+    expect(w.s.search.foes).toEqual({});
+    expect(
+      w
+        .sent()
+        .filter(
+          (x) =>
+            x.intent.type === "allianceRequest" && x.intent.recipient === A,
+        )
+        .map((x) => x.tick),
+    ).toEqual([at]);
+  });
+
   test("a foe mark vetoes the extension", () => {
     // One-minute alliances: the web asks A's extension 300 ticks before
     // expiry (extendLead), A being in the ally set.
@@ -455,4 +527,207 @@ describe("apex directive (package WP1)", () => {
     const h = new Harness(w.f, (ctx) => bare.tick(ctx));
     expect(() => h.step()).toThrow(/no LiveSearch was given/);
   });
+});
+
+describe("apex directive, review round 2 (package WP1)", () => {
+  test("F2: the host's Ledger shows our attacks in flight, and its copies are observed at the tick", () => {
+    const probe = new Probe();
+    const w = world({}, { search: probe });
+    const N = w.nation(A);
+    pastImmunity(w);
+    const t = w.game.ticks();
+    w.policy.setDirective([{ at: t, label: "strike", p: strike(N, 20_000) }]);
+    const seen: {
+      tick: number;
+      stack: number;
+      inFlight: number;
+      observed: number | null;
+    }[] = [];
+    probe.onTick = (ctx, host) => {
+      const nm = host.nationModel() as unknown as {
+        lastObserve: number | null;
+      };
+      seen.push({
+        tick: ctx.tick,
+        stack: host.ledger()!.stackOn(N.smallID()),
+        inFlight: inFlightOn(w, N),
+        observed: nm.lastObserve,
+      });
+    };
+    for (let i = 0; i < 12; i++) w.h.step();
+    // From the tick after the send's attack showed, the copy's stack is
+    // what is in flight (unobserved it was 0: its pending send gone, its
+    // view of the attacks empty).
+    const later = seen.filter((x) => x.tick >= t + 2);
+    expect(later).toHaveLength(10);
+    for (const x of later) {
+      expect(x.inFlight).toBeGreaterThan(0);
+      expect(x.stack).toBe(x.inFlight);
+    }
+    // Both copies are observed at the tick the search runs in.
+    for (const x of seen) expect(x.observed).toBe(x.tick);
+    // A private copy: querying it moved nothing live.
+    const live = (w.policy as unknown as { rt: { nm: NationModel } }).rt.nm;
+    expect(probe.host!.nationModel()).not.toBe(live);
+  });
+
+  test("F3: an invalid step spends no budget in a copy, as live; the next step goes out in both", () => {
+    const w = world({});
+    const N = w.nation(A);
+    pastImmunity(w);
+    const t = w.game.ticks();
+    // Eight attacks the wire schema refuses (troops < 0; no spend, so the
+    // Scheduler accepts them), then an intent the next tick that needs the
+    // per-second budget they would have spent.
+    const steps: DirectiveStep[] = [];
+    for (let i = 0; i < 8; i++) {
+      steps.push({
+        at: t,
+        label: `bad${i}`,
+        p: {
+          intent: { type: "attack", targetID: N.id(), troops: -1 },
+          prio: Prio.Strike,
+          cls: "strike",
+          key: `bad:${i}`,
+        },
+      });
+    }
+    steps.push({
+      at: t + 1,
+      label: "good",
+      p: {
+        intent: { type: "embargo", targetID: N.id(), action: "start" },
+        prio: Prio.Strike,
+        cls: "strike",
+        key: "good",
+      },
+    });
+    const copy = w.policy.forRolloutWith({ steps });
+    w.policy.setDirective(steps);
+    for (let i = 0; i < 4; i++) {
+      const rolled = stepOnLive(w, copy);
+      const live = w.h.step();
+      expect(rolled).toEqual(live);
+    }
+    expect(
+      w
+        .sent()
+        .filter((x) => x.intent.type === "embargo")
+        .map((x) => x.tick),
+    ).toEqual([t + 1]);
+    expect(copy.state().search.stats).toEqual(w.s.search.stats);
+    expect(w.s.search.stats).toEqual({ offered: 9, refused: 0, skipped: 0 });
+  });
+
+  test("F4: a directive attack without meta.target is pending on its target at the send, in a copy as live", () => {
+    const w = world({});
+    const N = w.nation(A);
+    pastImmunity(w);
+    const t0 = w.game.ticks();
+    // A strike with meta.target: the live Ledger learns A's smallID at
+    // the send; a copy's Ledger, from LedgerData, only from sends still
+    // pending and, at its observes, from our attacks running: none, once
+    // this one has ended.
+    w.policy.setDirective([{ at: t0, label: "first", p: strike(N, 500) }]);
+    w.h.step();
+    w.h.step();
+    expect(inFlightOn(w, N)).toBeGreaterThan(0);
+    for (let i = 0; i < 300 && w.us.outgoingAttacks().length > 0; i++) {
+      w.h.step();
+    }
+    expect(w.us.outgoingAttacks()).toEqual([]);
+    w.h.step(); // its observe drops the plan
+    expect(livePending(w)).toEqual([]);
+    expect(w.s.ledger.plans).toEqual([]);
+    const t = w.game.ticks();
+    const bare: Proposal = {
+      intent: { type: "attack", targetID: N.id(), troops: 1_000 },
+      prio: Prio.Strike,
+      cls: "strike",
+      key: `attack:${N.smallID()}`,
+      spend: { kind: "strike", troops: 1_000 },
+      plan: "strike",
+    };
+    const steps: DirectiveStep[] = [{ at: t, label: "bare", p: bare }];
+    const copy = w.policy.forRolloutWith({ steps });
+    w.policy.setDirective(steps);
+    expect(stepOnLive(w, copy)).toEqual(w.h.step());
+    const mine = (ps: readonly PendingSend[] | undefined) =>
+      (ps ?? []).filter((p) => p.tick === t);
+    const live = mine(livePending(w));
+    expect(live).toHaveLength(1);
+    expect(live[0].target).toBe(N.smallID());
+    expect(live[0].target).not.toBe(UNRESOLVED);
+    expect(mine(copy.state().ledger.pending)).toEqual(live);
+    expect(copy.state().ledger.plans).toEqual(w.s.ledger.plans);
+  });
+
+  test("F5: a copy plays the game of its first step only", () => {
+    const w = world({});
+    const other = world({});
+    w.h.step();
+    other.h.step();
+    const copy = w.policy.forRolloutWith();
+    stepOnLive(w, copy);
+    stepOnLive(w, copy);
+    expect(() => stepOnLive(other, copy)).toThrow(
+      /plays only the game of its first step/,
+    );
+    // A fresh copy steps anywhere once.
+    expect(() => stepOnLive(other, w.policy.forRolloutWith())).not.toThrow();
+  });
+
+  test("the states the search reads hold the Ledger's data of the last run", () => {
+    const probe = new Probe();
+    const w = world({}, { search: probe });
+    const N = w.nation(A);
+    pastImmunity(w);
+    const t = w.game.ticks();
+    const hasPlan = (s: Readonly<ApexState>) =>
+      s.ledger.plans.some(
+        (p) => p.targetSmallID === N.smallID() && p.kind === "strike",
+      );
+    // A copy stepped with a strike: state() shows the copy's plan.
+    const steps = [{ at: t, label: "strike", p: strike(N, 5_000) }];
+    const copy = w.policy.forRolloutWith({ steps });
+    expect(hasPlan(copy.state())).toBe(false);
+    stepOnLive(w, copy);
+    expect(hasPlan(copy.state())).toBe(true);
+    // Live: the plan the run made shows in host.state at the next tick.
+    w.policy.setDirective(steps);
+    let seen: boolean | null = null;
+    probe.onTick = (ctx, host) => {
+      if (ctx.tick === t + 1) seen = hasPlan(host.state);
+    };
+    w.h.step();
+    expect(hasPlan(w.s)).toBe(false);
+    w.h.step();
+    expect(seen).toBe(true);
+  });
+
+  // Known defect, review F1: the fix is DiplomacyController's (not this
+  // package's file): counterAccept counts the vetoed key's refusal ("key")
+  // as a slot the recall took, so a foe's pending request holds a slot and
+  // the next nation's request is not accepted. With the fix proposed in
+  // /tmp/claude-0/pkg-WP1/f1-diplomacy.patch (Scheduler.vetoed asked
+  // first) this passes: make it a plain test then.
+  test.fails(
+    "F1 (known, needs DiplomacyController): a foe's pending request holds no counter-accept slot",
+    () => {
+      // Impossible: ceil(0.25 * 5 players) = 2 slots. D takes one.
+      const w = world({});
+      const [nA, , C, D] = NATIONS.map((n) => w.nation(n.id));
+      for (let i = 0; i < 10; i++) w.h.step();
+      w.game.addExecution(new AllianceRequestExecution(D, AGENT_ID));
+      for (let i = 0; i < 5; i++) w.h.step();
+      expect(w.us.isAlliedWith(D)).toBe(true);
+      const t = w.game.ticks();
+      w.policy.setDirective([{ at: t, foe: { id: nA.id(), until: t + 500 } }]);
+      w.game.addExecution(new AllianceRequestExecution(nA, AGENT_ID));
+      w.game.addExecution(new AllianceRequestExecution(C, AGENT_ID));
+      for (let i = 0; i < 30; i++) w.h.step();
+      expect(w.us.isAlliedWith(nA)).toBe(false);
+      expect(w.us.isAlliedWith(C)).toBe(true);
+    },
+  );
 });

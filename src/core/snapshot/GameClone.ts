@@ -31,18 +31,24 @@ import { readVersioned, SnapshotError } from "./SnapshotType";
  *   `restoreSnapshot()`, as a restore does. The records are copied with the
  *   codec's semantics (`copySnapshotData`) and read with `readVersioned`, so
  *   `restoreSnapshot` sees the same data it would after decoding.
- * - Player tile sets are not listed: the writer's structural mode leaves a
- *   placeholder and the reader copies the set (`TileSet.clone`).
+ * - Player tile sets are not listed: a set written with
+ *   `SnapshotWriter.tileSet` is a placeholder in structural mode, and
+ *   `SnapshotReader.tileSet` copies the set (`TileSet.clone`). A placeholder
+ *   read any other way would read as no tiles, so the clone checks that
+ *   every one was read back (`checkTileSetsRead`).
  * - Both maps are copied (`GameMapImpl.clone`): terrain with its edits, owner,
- *   fallout and defense bits. A restore rebuilds the same arrays.
- * - The water components and graph are copied while the minimap still has
- *   the map file's water, when a rebuild would compute the same; after water
- *   nukes they are rebuilt as a restore does (`WaterManager` constructor).
+ *   fallout and defense bits. A restore rebuilds the same arrays: it writes
+ *   the owners from the players' tile sets, which the simulation keeps in
+ *   step with the map (GameImpl.conquer and relinquish).
+ * - The water components and graph are copied while a restore would build
+ *   the same: the minimap still has the map file's water and the graph was
+ *   never rebuilt. Otherwise they are built and restored from the record, as
+ *   a restore does (`WaterManager` constructor).
  *
  * The tests (tests/core/snapshot/GameClone.test.ts) hold a clone to a
  * restore: the same object graph, the same snapshot bytes, the same map
- * arrays, and the same hashes and bytes for 600 ticks with nukes and ships
- * in flight.
+ * arrays, the same hashes and bytes for 600 ticks with nukes and ships in
+ * flight, and chains of clones on a straight run's track for a whole game.
  */
 
 /**

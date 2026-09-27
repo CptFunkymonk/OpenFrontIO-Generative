@@ -91,6 +91,7 @@ interface Arena {
   runner: GameRunner;
   game: Game;
   host: AgentHost;
+  terrain: TerrainSource;
   /** Intents waiting for their turn, keyed by turn number. */
   queue: Map<number, StampedIntent[]>;
   /** Hash after every tick, indexed by game.ticks(). */
@@ -169,6 +170,7 @@ async function newArena(opts: {
     runner,
     game,
     host,
+    terrain,
     queue,
     hashes,
     runTurn() {
@@ -196,6 +198,20 @@ async function newArena(opts: {
     },
   };
   return arena;
+}
+
+/**
+ * A fork by snapshot and restore, whatever ctx.fork() is wired to: the
+ * reference the structural clones are held to.
+ */
+function restoreFork(arena: Arena): GameFork {
+  return new GameFork(
+    arena.game,
+    arena.runner.snapshot(),
+    arena.terrain,
+    arena.gameStart,
+    ME,
+  );
 }
 
 interface ForkUnderTest {
@@ -549,7 +565,7 @@ describe("fork fidelity (H10)", () => {
       arena.play(WARMUP_TICKS);
       expect(arena.inFlight()).toEqual([]);
       const { gameStart, game } = arena;
-      const restored = arena.host.fork();
+      const restored = restoreFork(arena);
       const cloned = GameFork.clone(game, gameStart, ME);
       const many = forkMany(game, gameStart, ME, 3);
       for (const f of [cloned, ...many]) {
@@ -571,9 +587,9 @@ describe("fork fidelity (H10)", () => {
         expect(r.snapshotDiffs).toEqual([]);
       }
 
-      // Hash for hash with the game of the first test, which forked once by
-      // snapshot: five forks, three of them clones of one take, left the
-      // real game exactly as one did.
+      // Hash for hash with the same game never forked: five forks, four of
+      // them clones and three of those from one take, left the real game
+      // exactly as it was.
       const twin = await newArena({
         gameID: "FORKFID1",
         map: GameMapType.Onion,
@@ -645,6 +661,39 @@ describe("fork fidelity (H10)", () => {
     TIMEOUT,
   );
 
+  test(
+    "a fork branched mid-rollout (GameFork.clones) gives forks identical to it and to the real game",
+    async () => {
+      const arena = await newArena({
+        gameID: "FORKBRCH",
+        map: GameMapType.Onion,
+      });
+      arena.play(WARMUP_TICKS);
+      // A restored fork (what ctx.fork() gives today) runs 50 ticks, then
+      // branches in two, the way a search reuses a rollout as its next base.
+      const base = restoreFork(arena);
+      const {
+        results: [before],
+      } = lockstep(arena, [{ fork: base }], 50);
+      expect(before.firstDivergence).toBeNull();
+      const branches = base.clones(2);
+      for (const b of branches) {
+        expect(b.game.ticks()).toBe(arena.game.ticks());
+        expect(hash(b.game)).toBe(hash(arena.game));
+      }
+      const { results } = lockstep(
+        arena,
+        [base, ...branches].map((fork) => ({ fork })),
+        LOCKSTEP_TICKS / 2,
+      );
+      for (const r of results) {
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
+      }
+    },
+    TIMEOUT,
+  );
+
   test.each([1, 3])(
     "clones made from inside the agent's tick need the same replay of intents in flight (latency %i)",
     async (latency) => {
@@ -694,7 +743,7 @@ describe("fork fidelity (H10)", () => {
       });
       arena.play(WORLD_FORK_TICK);
       expect(arena.inFlight()).toEqual([]);
-      const { game, gameStart, host } = arena;
+      const { game, gameStart } = arena;
       const median = (xs: number[]) =>
         [...xs].sort((x, y) => x - y)[xs.length >> 1];
       const restoreMs: number[] = [];
@@ -702,7 +751,7 @@ describe("fork fidelity (H10)", () => {
       let fork: GameFork | null = null;
       for (let i = 0; i < 3; i++) {
         let t = performance.now();
-        host.fork();
+        restoreFork(arena);
         restoreMs.push(performance.now() - t);
         t = performance.now();
         fork = GameFork.clone(game, gameStart, ME);

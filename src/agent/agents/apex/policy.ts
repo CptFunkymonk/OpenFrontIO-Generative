@@ -7,7 +7,12 @@ import {
   SendResult,
 } from "../../Agent";
 import { Ledger } from "../../lib/Ledger";
-import { Lookahead, RolloutPolicy, SimView } from "../../lib/Lookahead";
+import {
+  isValidIntent,
+  Lookahead,
+  RolloutPolicy,
+  SimView,
+} from "../../lib/Lookahead";
 import { createModels, Models } from "../../lib/Models";
 import { NationModel, relationTracker } from "../../lib/NationModel";
 import { NukeModel } from "../../lib/NukeModel";
@@ -298,6 +303,11 @@ interface CopySource {
  * after the directive steps still pending (DirectiveStep; absolute live
  * ticks), or replace them with `replace`: a base rollout (no spec) plays
  * the pending steps, as the live game will unless a new plan is adopted.
+ * So roll the base without `replace` unless keeping the base clears the
+ * live directive too (a base with `replace` while steps are pending is not
+ * what live plays). `replace` drops steps, not the foe marks in force: a
+ * plan that allies a foe first clears its mark (a foe step with `until`
+ * before its `at`).
  */
 export interface RolloutSpec {
   steps?: readonly DirectiveStep[];
@@ -313,7 +323,8 @@ export interface RolloutSpec {
 /** A rollout copy of the live policy (forRolloutWith). */
 export interface RolloutCopy extends RolloutPolicy {
   /** The copy's state (read only): its directive, foe marks, stats and
-   *  log ring. */
+   *  log ring, and its Ledger's and relation tracker's data as of its last
+   *  step (written into the state at each call). */
   state(): Readonly<ApexState>;
 }
 
@@ -326,7 +337,9 @@ export interface RolloutCopy extends RolloutPolicy {
  */
 export interface SearchHost {
   readonly o: ApexOptions;
-  /** The live state. Read only. */
+  /** The live state, with its Ledger's and relation tracker's data as the
+   *  last run left them (written into it at the first read after each
+   *  run). Read only. */
   readonly state: Readonly<ApexState>;
   /** The last decision's scan (null before the first decision). */
   wm(): WorldModel | null;
@@ -344,10 +357,14 @@ export interface SearchHost {
   race(): RaceGrid | null;
   owners(): OwnerGrid | null;
   /** A private copy of the live NationModel, made at the first call of the
-   *  tick: refresh and query it at will, it never feeds the live policy.
-   *  Null before the first decision. */
+   *  tick and observed at this tick (as this tick's run will observe the
+   *  live one before its decisions): refresh and query it at will, it
+   *  never feeds the live policy. Null before the first decision. */
   nationModel(): NationModel | null;
-  /** A private copy of the live Ledger (plans and stacks in flight). */
+  /** A private copy of the live Ledger, fresh at each call and observed at
+   *  this tick as this tick's run will observe the live one: its plans, and
+   *  our attacks and ships in flight (stackOn, retreatingOn,
+   *  expectedRefunds). */
   ledger(): Ledger | null;
   /** A copy of the live policy as it is now, playing `spec`. */
   forRolloutWith(spec?: RolloutSpec): RolloutCopy;
@@ -399,6 +416,23 @@ function withTroops(p: Proposal, troops: number): Proposal | null {
   return null;
 }
 
+/**
+ * `p` with meta.target set for an attack on a player that has none (review
+ * F4): the Ledger resolves an attack without it from the targets it has
+ * learnt, and a rollout copy's Ledger (from LedgerData) has learnt fewer
+ * than the live one, so live would hold a plan and a pending stack from
+ * the send that the copy holds only once the attack shows (never, if it
+ * does not). Every controller sets it; a directive step may not.
+ */
+function withTarget(game: Game, p: Proposal): Proposal {
+  const i = p.intent;
+  if (i.type !== "attack" || p.meta?.target !== undefined) return p;
+  const id = i.targetID;
+  if (id !== null && !game.hasPlayer(id)) return p;
+  const target = id === null ? 0 : game.player(id).smallID();
+  return { ...p, meta: { ...p.meta, target } };
+}
+
 /** A plan's edit of a directive: the same in a copy and live. */
 function applySteps(
   mem: SearchMemory,
@@ -443,6 +477,9 @@ export class ApexPolicy {
   private searchHost: SearchHost | null = null;
   /** SearchHost.nationModel's copy and the tick it was made at. */
   private nmCopy: { tick: number; nm: NationModel } | null = null;
+  /** Whether the state holds the Ledger and relation data of the runtime
+   *  as the last run left it (SearchHost.state). */
+  private stateSynced = false;
 
   /** `search`: the LiveSearch to run live (package WP1), with o.search. */
   constructor(
@@ -501,6 +538,8 @@ export class ApexPolicy {
       }
     }
     const sent: AgentIntent[] = [];
+    // The run moves the Ledger and the relations: host.state syncs again.
+    this.stateSynced = false;
     this.run({
       game: ctx.game,
       me: ctx.me,
@@ -571,7 +610,13 @@ export class ApexPolicy {
     }
     if (spec.shift !== undefined) copy.s.timers.lastThink -= spec.shift;
     applySteps(copy.s.search, spec.steps ?? [], spec.replace === true);
-    return { step: (v) => copy.step(v), state: () => copy.s };
+    return {
+      step: (v) => copy.step(v),
+      state: () => {
+        copy.syncState();
+        return copy.s;
+      },
+    };
   }
 
   /**
@@ -587,9 +632,21 @@ export class ApexPolicy {
   /** The SearchHost onto this (live) policy. */
   private host(): SearchHost {
     if (this.searchHost !== null) return this.searchHost;
+    // The state's Ledger and relation data are written at each copy (and
+    // read only when a runtime is built): written again at the first read
+    // after each run, so host.state never shows an older tick's plans.
+    const synced = () => {
+      if (!this.stateSynced) {
+        this.syncState();
+        this.stateSynced = true;
+      }
+      return this.s;
+    };
     this.searchHost = {
       o: this.o,
-      state: this.s,
+      get state() {
+        return synced();
+      },
       wm: () => this.rt?.wm ?? null,
       floors: () => this.rt?.floors ?? NO_FLOORS,
       available: (kind) => {
@@ -607,16 +664,23 @@ export class ApexPolicy {
         if (rt === null) return null;
         const t = rt.game.ticks();
         if (this.nmCopy === null || this.nmCopy.tick !== t) {
-          this.nmCopy = {
-            tick: t,
-            nm: rt.nm.cloneFor(rt.game, rt.me, rt.models),
-          };
+          // Observed at this tick, as the run's step 2 observes the live
+          // model (review F2: unobserved, it was one tick behind).
+          const nm = rt.nm.cloneFor(rt.game, rt.me, rt.models);
+          nm.observe(t);
+          this.nmCopy = { tick: t, nm };
         }
         return this.nmCopy.nm;
       },
       ledger: () => {
         const rt = this.rt;
-        return rt === null ? null : Ledger.fromData(rt.ledger.toData());
+        if (rt === null) return null;
+        // Observed at this tick, as the run's step 2 observes the live
+        // Ledger (review F2: from LedgerData alone its view of our attacks
+        // in flight is empty, and stackOn missed every one of them).
+        const l = Ledger.fromData(rt.ledger.toData());
+        l.observe(rt.me, rt.game.ticks(), rt.game);
+        return l;
       },
       forRolloutWith: (spec) => this.forRolloutWith(spec),
       adopt: (spec) => {
@@ -642,7 +706,10 @@ export class ApexPolicy {
   }
 
   /** One rollout step: the intents this tick's policy sends, rate limited
-   *  by the fork's BudgetMirror on the fork clock. */
+   *  by the fork's BudgetMirror on the fork clock. An invalid intent is
+   *  refused before the budget, as AgentHost.send refuses it (review F3:
+   *  counted as sent, it spent the mirror's budget and entered the Ledger
+   *  and the class windows, which live it never does). */
   private step(v: SimView): AgentIntent[] {
     const sent: AgentIntent[] = [];
     const nowMs = v.tick * v.game.config().msPerTick();
@@ -653,6 +720,7 @@ export class ApexPolicy {
       gameID: v.gameID,
       budget: () => v.budget.remaining(nowMs),
       send: (i) => {
+        if (!isValidIntent(i)) return "invalid";
         if (!v.budget.tryConsume(nowMs)) return "rate_limited";
         sent.push(i);
         return "ok";
@@ -802,14 +870,14 @@ export class ApexPolicy {
     if (w?.unallied !== undefined && allied(w.unallied)) {
       return skip(`allied with ${w.unallied}`);
     }
-    let p: Proposal | null = given;
+    let p: Proposal | null = withTarget(v.game, given);
     let size = "";
     if (d.frac !== undefined) {
       const S = Math.floor(
         d.frac * v.purse.available(given.spend?.kind ?? "strike"),
       );
       if (S < (d.minTroops ?? DIRECTIVE_MIN_TROOPS)) return skip(`S=${S}`);
-      p = withTroops(given, S);
+      p = withTroops(p, S);
       if (p === null) return skip(`no troops to size on ${given.intent.type}`);
       size = ` S=${S}`;
     }
@@ -859,6 +927,14 @@ export class ApexPolicy {
   private runtime(env: Env): Runtime {
     const rt = this.rt;
     if (rt !== null && rt.game === env.game && rt.me === env.me) return rt;
+    // Review F5: the live runtime a copy carries is bound at its first step
+    // and used up there; on another game it would silently start cold.
+    if (rt !== null && this.inRollout) {
+      throw new Error(
+        "apex: a rollout copy plays only the game of its first step; " +
+          "take a new one (forRolloutWith) for each fork",
+      );
+    }
     const { o, s } = this;
     const models = createModels(env.game);
     // A rollout copy binds the live runtime's models and memory, copied at

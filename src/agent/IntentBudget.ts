@@ -10,6 +10,16 @@ export const INTENTS_PER_SECOND = 10;
 export const INTENTS_PER_MINUTE = 150;
 /** The server kicks for an intent frame larger than this. */
 export const MAX_INTENT_BYTES = 2000;
+/** Server-internal intent types a client may never send (AgentIntent
+ *  excludes them; AgentHost and Lookahead's isValidIntent refuse them at
+ *  runtime too). */
+export const FORBIDDEN_INTENTS: ReadonlySet<string> = new Set([
+  "mark_disconnected",
+  "kick_player",
+  "update_game_config",
+  "toggle_game_start_timer",
+  "toggle_pause",
+]);
 
 /**
  * One interval of the `limiter` package's RateLimiter, which the server uses:

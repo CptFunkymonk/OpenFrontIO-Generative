@@ -169,7 +169,14 @@ describe("Scheduler.copyFrom and veto (package WP1)", () => {
     expect(s.lastRefusal).toBe("key");
     expect(s.stats.vetoed).toBe(1);
     expect(s.offer(ally("Y"))).toBe(true);
+    // A taken key and a vetoed one are both refused as "key"; vetoed()
+    // tells them apart (review F1).
+    expect(s.offer(ally("Y"))).toBe(false);
+    expect(s.lastRefusal).toBe("key");
+    expect(s.vetoed("ally:X")).toBe(true);
+    expect(s.vetoed("ally:Y")).toBe(false);
     s.begin(11, ALL, createPurse(1e6, FLOORS));
+    expect(s.vetoed("ally:X")).toBe(false);
     expect(s.offer(ally("X"))).toBe(true);
   });
 });

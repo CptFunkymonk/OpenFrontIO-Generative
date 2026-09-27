@@ -11,15 +11,11 @@ import {
   SendResult,
 } from "./Agent";
 import { GameFork, TerrainSource } from "./Fork";
-import { IntentBudget, MAX_INTENT_BYTES } from "./IntentBudget";
-
-const FORBIDDEN_INTENTS: ReadonlySet<string> = new Set([
-  "mark_disconnected",
-  "kick_player",
-  "update_game_config",
-  "toggle_game_start_timer",
-  "toggle_pause",
-]);
+import {
+  FORBIDDEN_INTENTS,
+  IntentBudget,
+  MAX_INTENT_BYTES,
+} from "./IntentBudget";
 
 const MAX_LOG_LINES = 2000;
 const MAX_RECORDED_ERRORS = 5;

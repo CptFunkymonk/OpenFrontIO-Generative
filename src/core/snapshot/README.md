@@ -31,25 +31,34 @@ would make, without the bytes. It is what forks use (`src/agent/Fork.ts`:
 
 - The small object graph goes through the same `snapshot()` and
   `restoreSnapshot()` as a restore. The records are copied with the codec's
-  semantics (`copySnapshotData`: plain data rebuilt, typed arrays copied, no
-  identity kept) and read with `readVersioned`, so `restoreSnapshot` sees
-  what it would after decoding. The copy is required: some records hold live
-  objects (`StatsSnapshot` stores the live stats tree under `z.unknown`), and
+  semantics (`copySnapshotData`: plain data rebuilt, typed arrays copied,
+  strings as their UTF-8 round trip gives them, no identity kept) and read
+  with `readVersioned`, so `restoreSnapshot` sees what it would after
+  decoding. The copy is required: some records hold live objects
+  (`StatsSnapshot` stores the live stats tree under `z.unknown`), and
   `restoreSnapshot` may keep what it reads.
-- The parts that scale with the map are copied as they are: player tile sets
-  (`TileSet.clone`, through the writer's structural mode, which leaves a
-  placeholder in the record), both maps (`GameMapImpl.clone`: terrain with its
-  edits, owners, fallout and defense), and the water components and graph
-  while the minimap still has the map file's water (`WaterManager`'s `source`;
-  after water nukes they are rebuilt, as a restore does).
+- The parts that scale with the map are copied as they are:
+  - player tile sets (`TileSet.clone`): a set written with
+    `SnapshotWriter.tileSet` is a placeholder in structural mode, and must be
+    read back with `SnapshotReader.tileSet`, which copies the set (a clone
+    fails if a placeholder is read any other way; `w.tiles` always lists);
+  - both maps (`GameMapImpl.clone`: terrain with its edits, owners, fallout
+    and defense). A restore writes the owners from the players' tile sets,
+    which the simulation keeps in step with the map;
+  - the water components and graph, while the minimap still has the map
+    file's water and the graph was never rebuilt (`WaterManager`'s `source`).
+    Otherwise they are built, and restored from the record, as a restore
+    does.
 - One take serves any number of clones, all made before the game ticks again
   (checked). To clone a state later, keep a clone and take from it.
 
-`tests/core/snapshot/GameClone.test.ts` holds a clone to a restore: the same
-object graph (`diffGraphs`), snapshot bytes and map arrays, and the same
-hashes and bytes for 600 ticks with nukes and ships in flight, with and
-without water nukes. It also checks that a clone shares no writable object
-with its game or with another clone.
+`tests/core/snapshot/GameClone.test.ts` holds a clone to a restore, in the
+variants of FullGameSnapshot.test.ts (free for all, water nukes, teams): the
+same object graph (`diffGraphs`), snapshot bytes and map arrays; the same
+hashes and bytes for 600 ticks with nukes and ships in flight; and chains of
+clones (every 100 ticks, and every tick of a window, from a restored game)
+that stay on the straight run's track to the end of the game. It also checks
+that a clone shares no writable object with its game or with another clone.
 
 When a class's snapshot changes, the clone follows by itself; a field that
 restore rebuilds from the map (not from the record) needs its clone
