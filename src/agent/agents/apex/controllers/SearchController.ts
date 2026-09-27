@@ -586,6 +586,7 @@ export class SearchController implements LiveSearch {
       afford: this.budget.capped
         ? (more) => room() - spent() >= more
         : undefined,
+      gateVeto: o.searchGateVeto,
     };
     const res = runRounds(p, base, cands, openCand, defend);
 
@@ -755,7 +756,7 @@ export class SearchController implements LiveSearch {
       gain: j === null ? null : finite(j.gain),
       drop: j?.drop ?? null,
       strong: j?.strong ? true : undefined,
-      gated: j?.gated ? true : undefined,
+      gated: j?.gated ? true : j?.gateUnpaid ? "unpaid" : undefined,
       steps:
         j !== null && j.steps.length > 0
           ? j.steps.map((s) => [s.h, Math.round(s.gain)])

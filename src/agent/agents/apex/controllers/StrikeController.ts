@@ -149,9 +149,10 @@ export function strikeStack(
 //   o.strikeFloorReplica (package WP7b, off) an unallied bordering
 //   nation's land line is lowered to its replica line (replicaLine), never
 //   below o.strikeFlowFloor·cap; with o.strikeFloorReplicaFirm only where
-//   that line rests on the nation's own choice (firmExit), and with
-//   o.strikeFloorReplicaBoats never below the boats A1's floor kept out
-//   (boatLine).
+//   that line rests on the nation's own choice (firmExit), with
+//   o.strikeFloorReplicaRegrow for its next decision only (regrowLine),
+//   and with o.strikeFloorReplicaBoats never below the boats A1's floor
+//   kept out (boatLine).
 // - Value: tiles expected (all of them and gold/strikeGoldPerTile on a
 //   kill, else the stack's worth at the loss per tile) per troop spent (on
 //   a kill the tiles' losses and the answer's cancel, the rest comes home;
@@ -378,9 +379,11 @@ export function windowInput(
  * Review of WP7b: with o.strikeFloorReplicaFirm a line below the land line
  * holds only where firmExit finds nothing it rests on that ends within a
  * decision or two (it keeps the land line otherwise); with
- * o.strikeFloorReplicaBoats the floor is at least min(A1's floor,
- * boatLine). `why` (logs and tests only) gets the nation whose line set
- * the floor and the nations firmExit kept at their land lines.
+ * o.strikeFloorReplicaRegrow it is at least regrowLine (the replica for
+ * the nation's next decision only); with o.strikeFloorReplicaBoats the
+ * floor is at least min(A1's floor, boatLine). `why` (logs and tests only)
+ * gets the nation whose line set the floor and the nations kept at their
+ * land lines, by firmExit's reason or "regrow".
  */
 export function deterrenceFloor(
   v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models"> &
@@ -406,6 +409,9 @@ export function deterrenceFloor(
   // o.strikeFloorReplicaFirm: a lowered line only on the nation's own
   // choice of a player the strike leaves alone (firmExit).
   const firm = replica && v.o.strikeFloorReplicaFirm;
+  // o.strikeFloorReplicaRegrow: the replica for the nation's next decision
+  // only; by the one after, our home is back at its land line (regrowLine).
+  const regrow = replica && v.o.strikeFloorReplicaRegrow;
   let floor = 0;
   // A1's floor, the land lines alone (o.strikeFloorReplicaBoats).
   let landFloor = 0;
@@ -417,14 +423,24 @@ export function deterrenceFloor(
     }
   };
   // The line of an unallied nation with land line `land` (firmExit's
-  // verdict on a lowered one).
+  // verdict on a lowered one, then regrowLine's bound).
   const lineOf = (N: Player, d: number, land: number, read: boolean) => {
     const line = read ? replicaLine(v, N.id(), d, lo, land) : land;
-    if (!firm || line >= land) return line;
-    const r = firmExit(v, N, d, line, except);
-    if (r === null) return line;
-    why?.kept.push(`${N.id()}:${r}`);
-    return land;
+    if (line >= land) return line;
+    if (firm) {
+      const r = firmExit(v, N, d, line, except);
+      if (r !== null) {
+        why?.kept.push(`${N.id()}:${r}`);
+        return land;
+      }
+    }
+    if (!regrow) return line;
+    const bound = Math.min(
+      land,
+      Math.max(line, regrowLine(v, N.id(), d, safe)),
+    );
+    if (bound >= land) why?.kept.push(`${N.id()}:regrow`);
+    return bound;
   };
   const seen = new Set<PlayerID>();
   for (const info of v.wm.nations) {
@@ -484,7 +500,8 @@ export function deterrenceFloor(
 export interface FloorWhy {
   /** The nation whose line set the floor ("boats": boatLine), or null. */
   bind: PlayerID | "boats" | null;
-  /** The nations firmExit kept at their land lines, as "id:reason". */
+  /** The nations kept at their land lines, as "id:reason" (firmExit's
+   *  reason, or "regrow": regrowLine reached the land line). */
   kept: string[];
 }
 
@@ -600,6 +617,45 @@ function landBorder(A: Player, B: Player): boolean {
   return A.borderTiles().size <= B.borderTiles().size
     ? A.sharesBorderWith(B)
     : B.sharesBorderWith(A);
+}
+
+/**
+ * Package WP7b (o.strikeFloorReplicaRegrow): the lowest home now from which
+ * ours regrows, spending nothing, to nation `id`'s land line at its
+ * decision after d (d2 = nextDecision(id, d + 1)) by d2: the replica is
+ * trusted for decision d only, and from d2 on A1's land line holds. The
+ * nation's troops at d2 as troopsAt projects them; ours step back from
+ * that line one tick at a time (models.regrowthAt at our tiles and
+ * finished city levels now, floored as troops are added; a conquest only
+ * raises both), with one corrector step. Infinity when the line is at or
+ * above our cap: no home of ours regrows there (above the cap troops
+ * shrink). Read-only.
+ */
+export function regrowLine(
+  v: Pick<View, "nm" | "me" | "models" | "tick">,
+  id: PlayerID,
+  d: number,
+  safe: number,
+): number {
+  const d2 = v.nm.nextDecision(id, d + 1);
+  const L2 = (v.nm.troopsAt(id, d2) + 1) / safe;
+  if (L2 >= v.models.cap(v.me)) return Infinity;
+  const tiles = v.me.numTilesOwned();
+  let cities = 0;
+  for (const u of v.me.units(UnitType.City)) {
+    if (!u.isUnderConstruction()) cities += u.level();
+  }
+  const type = v.me.type();
+  const grow = (H: number) =>
+    Math.max(
+      0,
+      Math.floor(v.models.regrowthAt(type, Math.max(0, H), tiles, cities)),
+    );
+  let H = L2;
+  for (let t = Math.max(0, d2 - v.tick); t > 0 && H > 0; t--) {
+    H -= grow(H - grow(H));
+  }
+  return Math.max(0, H);
 }
 
 /** boatLine's reach: a nation's random boat lands within 150 tiles (x and

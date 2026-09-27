@@ -576,9 +576,16 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
         ),
       ),
     ).toBe(true);
-    // One that out-troops us (1.05x our cap) is renewed either way.
-    const strong = lapse({ webKeepRenewThreat: false }, { [A]: 1.05 }, A);
+    // One we do not out-troop (7,000 tiles against our 5,000, holding
+    // 1.39x our cap, 95% of its own) is renewed either way.
+    const strong = lapse({ webKeepRenewThreat: false }, { [A]: 1.39 }, A, 70);
     expect(strong.requests.map((x) => x.tick)).toEqual([strong.lapsedAt]);
+    expect(
+      strong.w.h.logs.some(
+        (l) =>
+          l.includes("dip keep-renew nationaa p=") && !l.includes("threat"),
+      ),
+    ).toBe(true);
   });
 
   test("an alliance the ally breaks before its expiry is not renewed at that expiry", () => {

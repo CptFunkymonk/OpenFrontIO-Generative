@@ -30,8 +30,9 @@ import { Danger, Snap, value, ValueParams } from "./Value";
 //   when known at the search) and the break's whole stepwise look up front;
 //   the looks it could not price (a strong target at a later send, the
 //   gated look) are bought as they come (`afford`, given all that is still
-//   to spend), and a plan the budget cannot look further at is dropped,
-//   never judged short.
+//   to spend). A strong target's look it cannot buy drops the plan, never
+//   judged short; a gated look it cannot buy leaves the break judged at its
+//   last step, the ungated rule (dropped with gateVeto).
 // - Round 2b (defensive): when the base, by its longest horizon, shows a
 //   nation attacking us or a loss of more than lossShare of our tiles, the
 //   r2b generators' candidates go to that horizon.
@@ -94,6 +95,9 @@ export interface RoundsParams {
    *  rollouts have spent so far (asked with everything still to spend when
    *  a look it did not price comes up); absent: always. */
   afford?: (te: number) => boolean;
+  /** The gate fired and the gated look is unaffordable: drop the break
+   *  (true) instead of judging it at its last step. */
+  gateVeto?: boolean;
 }
 
 /** The gate's cap ratio: an unallied bordering nation this much above
@@ -125,6 +129,9 @@ export interface Judged {
   strong: boolean;
   /** The gate extended it (round 3). */
   gated: boolean;
+  /** The gate fired, and the budget could not pay the gated look: judged
+   *  at its last step (or dropped, with gateVeto). */
+  gateUnpaid: boolean;
 }
 
 export interface RoundsResult {
@@ -232,6 +239,7 @@ export function runRounds(
     steps: [],
     strong: false,
     gated: false,
+    gateUnpaid: false,
   });
 
   // Round 1.
@@ -366,9 +374,14 @@ export function runRounds(
       if (gate.a || gate.b) {
         brkTo = p.HBreakGated;
         if (!affordable()) {
-          // Danger, and no budget to see past it: not played.
-          brk.drop = "budget";
-          brk = null;
+          // Danger, and no budget to see past it: judged where it is (the
+          // ungated rule), or, with gateVeto, not played.
+          brkTo = h;
+          brk.gateUnpaid = true;
+          if (p.gateVeto) {
+            brk.drop = "budget";
+            brk = null;
+          }
           continue;
         }
         brk.gated = true;

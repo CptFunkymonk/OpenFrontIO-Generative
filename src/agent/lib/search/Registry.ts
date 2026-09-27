@@ -74,6 +74,11 @@ export interface SearchView {
   floors: HomeFloors;
   /** searchKinds, after the budget's degrade. */
   kinds: ReadonlySet<string>;
+  /** Package WP10n: a nation's observed gross income per tick, from the live
+   *  SearchController's NukeWatch (review F2); absent when no watcher is
+   *  attached (tests, or searchNukes off), when the nuke candidates fall
+   *  back to the passive rate. */
+  nukeIncome?: (id: PlayerID) => bigint;
 }
 
 /** The base rollout as a generator sees it. */

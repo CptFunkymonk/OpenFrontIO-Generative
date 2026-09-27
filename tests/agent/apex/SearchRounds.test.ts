@@ -16,9 +16,10 @@
  *   bordering in the base world.
  * - The budget: the break's whole stepwise look and the strong look of a
  *   strike known strong at the search were priced up front; a look nobody
- *   priced (the gated one, a lapse strong only at its send) is bought with
- *   everything still to spend, or the plan is dropped ("budget"), never
- *   judged short; the rounds never spend past what `afford` allowed.
+ *   priced is bought with everything still to spend: a lapse strong only
+ *   at its send is dropped ("budget") if it cannot be, never judged short;
+ *   an unpaid gated look leaves the break judged at its last step (dropped
+ *   with gateVeto); the rounds never spend past what `afford` allowed.
  * - The margin is strict (a gain equal to it keeps the base), ties between
  *   plans keep the first, and the dip guard drops a plan more than `dip`
  *   below the base at a common checkpoint.
@@ -364,7 +365,7 @@ describe("search rounds", () => {
     expect(base.h).toBe(1200);
   });
 
-  test("the break's whole look is priced up front; the gated look is bought, or the break dropped", () => {
+  test("the break's whole look is priced up front; the gated look is bought, or the break judged at its last step", () => {
     const p = params({ HBreak: [600, 1200], HBreakGated: 1800 });
     const leading: FakeInit = {
       points: [
@@ -385,13 +386,28 @@ describe("search rounds", () => {
       2400 + 1199,
     );
     // Asked at 600 for the rest of the priced look (600 + 600), and at
-    // 1,200 for the gated one (600 + 600): the second does not fit.
+    // 1,200 for the gated one (600 + 600): the second does not fit, so the
+    // break is judged at 1,200, as without the gate.
     expect(r.asked).toEqual([1200, 1200]);
-    expect(r.judged("break:Z:1").drop).toBe("budget");
     expect(r.res.gate?.a).toBe(true);
-    expect(r.res.chosen).toBeNull();
+    expect(r.judged("break:Z:1").gateUnpaid).toBe(true);
+    expect(r.judged("break:Z:1").drop).toBeNull();
+    expect(r.judged("break:Z:1").h).toBe(1200);
+    expect(r.res.chosen?.cand.name).toBe("break:Z:1");
     expect(base.h).toBe(1200);
     expect(r.spent).toBeLessThanOrEqual(2400 + 1199);
+    // With gateVeto it is not played.
+    base = new FakeRoll("base", flat(10_000));
+    r = run(
+      { ...p, gateVeto: true },
+      base,
+      [cand("break:Z:1")],
+      { "break:Z:1": leading },
+      undefined,
+      2400 + 1199,
+    );
+    expect(r.judged("break:Z:1").drop).toBe("budget");
+    expect(r.res.chosen).toBeNull();
     // With 1,200 more it is bought and judged at 1,800.
     base = new FakeRoll("base", flat(10_000));
     r = run(

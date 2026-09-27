@@ -3,6 +3,7 @@ import {
   deterrenceFloor,
   firmExit,
   FloorWhy,
+  regrowLine,
   REMNANT_SHARE,
   REPLICA_STEPS,
   replicaLine,
@@ -23,15 +24,7 @@ import { createPurse, HomeFloors } from "../../../src/agent/lib/Scheduler";
 import { scanWorld } from "../../../src/agent/lib/WorldModel";
 import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Player, PlayerInfo, PlayerType } from "../../../src/core/game/Game";
-import {
-  addTribe,
-  field,
-  Field,
-  GAME_ID,
-  own,
-  rect,
-  Terrain,
-} from "./Field";
+import { addTribe, field, Field, GAME_ID, own, rect, Terrain } from "./Field";
 
 // Package WP7b R1 FLOOR (docs/14-m4-plan.md §2.7 item 7b, §3 WP7): the
 // strike floor's replica line (StrikeController.replicaLine), ported from
@@ -119,6 +112,7 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(APEX_DEFAULTS.strikeFloorReplicaSteady).toBe(false);
     expect(APEX_DEFAULTS.strikeFloorReplicaFirm).toBe(false);
     expect(APEX_DEFAULTS.strikeFloorReplicaBoats).toBe(false);
+    expect(APEX_DEFAULTS.strikeFloorReplicaRegrow).toBe(false);
     expect(REPLICA_STEPS).toBe(8);
   });
 
@@ -272,6 +266,7 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
           strikeFloorReplicaSteady: true,
           strikeFloorReplicaFirm: true,
           strikeFloorReplicaBoats: true,
+          strikeFloorReplicaRegrow: true,
         }),
       ]) {
         expect(deterrenceFloor(w.v(o), A.id(), [])).toBe(landOf(B));
@@ -767,9 +762,10 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
       const dB = nm.nextDecision(B.id(), f.game.ticks());
       return { v, land: (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe() };
     };
-    let { v, land } = at(true);
+    let { land } = at(true);
     expect(land).toBeGreaterThan(lo);
     K.setTroops(Math.round((lo + land) / 2));
+    let v: ReturnType<typeof at>["v"];
     ({ v, land } = at(true));
     expect(deterrenceFloor(v(R1), null)).toBe(lo);
     expect(deterrenceFloor(v(UE), null)).toBeCloseTo(land, 6);
@@ -789,17 +785,82 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(boatLine(v(BOATS), 0)).toBe(Infinity);
     expect(deterrenceFloor(v(BOATS), null)).toBeCloseTo(land, 6);
     me.createAllianceRequest(K)!.accept();
-    ({ v, land } = at(true));
+    ({ v } = at(true));
     expect(boatLine(v(BOATS), 0)).toBe(W.troops());
     expect(deterrenceFloor(v(BOATS), null)).toBe(lo);
     // Off: R1's floor.
     expect(deterrenceFloor(v(R1), null)).toBe(lo);
   });
 
+  test("strikeFloorReplicaRegrow: a lowered line is at least the home that regrows to B's land line at its decision after next; a nation whose land line tops our cap keeps it", async () => {
+    const { f, P } = await scene(COLUMNS);
+    const { NATIONB1: B, NATIONC1: C, NATIOND1: D } = P;
+    const { config, me, game } = f;
+    // B mid-cap (a nation's cap is 1.25x ours on the same land here): its
+    // land line is half our cap. C, weaker, is juicier than us at any home
+    // from lo up, so the replica line is lo.
+    B.setTroops(Math.round(0.45 * config.maxTroops(B)));
+    C.setTroops(Math.round(0.5 * B.troops()));
+    D.setTroops(Math.round(0.5 * config.maxTroops(D)));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const REGROW = parseApexOptions({
+      strikeFloorReplica: true,
+      strikeFloorReplicaFirm: true,
+      strikeFloorReplicaRegrow: true,
+    });
+    const { nm, v } = look(f);
+    const tick = game.ticks();
+    const safe = nm.sendCapSafe();
+    const d = nm.nextDecision(B.id(), tick);
+    const d2 = nm.nextDecision(B.id(), d + 1);
+    expect(d2).toBeGreaterThan(d);
+    const land = (nm.troopsAt(B.id(), d) + 1) / safe;
+    const L2 = (nm.troopsAt(B.id(), d2) + 1) / safe;
+    // Firm's line (B's pick above C's troops is C, a steady land neighbour).
+    const line = deterrenceFloor(v(FIRM), D.id(), []);
+    expect(line).toBeLessThan(land);
+    // From regrowLine our home, regrowing tick by tick (floored), reaches
+    // B's land line at d2 by d2, and from a little below it does not.
+    const H0 = regrowLine(v(REGROW), B.id(), d, safe);
+    expect(H0).toBeLessThan(L2);
+    const models = createModels(game);
+    const regrow = (H: number) => {
+      for (let t = 0; t < d2 - tick; t++) {
+        H += Math.floor(models.regrowthAt(me.type(), H, me.numTilesOwned(), 0));
+      }
+      return H;
+    };
+    expect(regrow(H0)).toBeGreaterThanOrEqual(L2 - 2);
+    expect(regrow(H0 - 0.01 * L2)).toBeLessThan(L2);
+    // Here the bound binds between the two: our regrowth over the two
+    // decisions outruns B's growth.
+    expect(line).toBeLessThan(H0);
+    expect(H0).toBeLessThan(land);
+    const why: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(v(REGROW), D.id(), [], why)).toBeCloseTo(H0, 6);
+    expect(why).toEqual({ bind: B.id(), kept: [] });
+    // A nation whose land line at d2 tops our cap: no home of ours regrows
+    // there, and it keeps its land line.
+    B.setTroops(Math.round(2.2 * config.maxTroops(me)));
+    C.setTroops(Math.round(0.5 * config.maxTroops(me)));
+    const g = look(f);
+    const dg = g.nm.nextDecision(B.id(), tick);
+    const landG = (g.nm.troopsAt(B.id(), dg) + 1) / safe;
+    expect(landG).toBeGreaterThan(config.maxTroops(me));
+    expect(regrowLine(g.v(REGROW), B.id(), dg, safe)).toBe(Infinity);
+    const lowered = deterrenceFloor(g.v(FIRM), D.id(), []);
+    expect(lowered).toBeLessThan(landG);
+    const whyG: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(g.v(REGROW), D.id(), [], whyG)).toBeCloseTo(
+      landG,
+      6,
+    );
+    expect(whyG.kept).toEqual([`${B.id()}:regrow`]);
+  });
+
   test("boatLine: no ocean shore of ours, no boats", async () => {
     const { f, P } = await scene(COLUMNS);
-    const { nm, v } = look(f, true);
-    void nm;
+    const { v } = look(f, true);
     expect(P.NATIONB1.isAlive()).toBe(true);
     expect(boatLine(v(R1), 0)).toBe(0);
   });

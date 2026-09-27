@@ -626,7 +626,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  UE's 32 games: former allies sent 214M of the 435M nation troops sent
    *  at apex (51M after a lapse never asked, 162M after a refused
    *  extension); 11 of the 13 unasked allies that attacked after their
-   *  lapse held 1.1x our cap or more. */
+   *  lapse held 1.1x our cap or more. Screened quick@20, 32 games against
+   *  UE, with webKeepAsk off, webKeepGift on and webKeepRenewThreat off:
+   *  land at minute 20 +0.9 points [−0.03, +1.95], Δprogress −0.006
+   *  [−0.020, +0.004], eliminations before minute 20 4 against 4. */
   webKeepStrong: boolean;
   /** The strong rule's own extension asks (at the lead, sooner for
    *  webKeepGap). Off: a strong ally is asked only when the web keeps it
@@ -1080,6 +1083,17 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  R1 screen, quick@20 Europe g6 at 11227: home 4.35M to 1.65M, and
    *  Kazakhstan (2.69M, over the Caspian) landed 446k at 11252. Off. */
   strikeFloorReplicaBoats: boolean;
+  /** With strikeFloorReplica: trust the replica for a nation's next
+   *  decision d only. A lowered line is at least the home from which ours
+   *  regrows, spending nothing, to the nation's land line at its decision
+   *  after d by then (StrikeController.regrowLine), so from that decision
+   *  on A1's land line holds again. A preference is a knife edge: the
+   *  replica line is where the nation's pick turns to us, and its regrowth
+   *  moves that point up. quick@20 The Box g9, R1 with Firm and Boats: at
+   *  7213 Evan The Dev's line was 1988k (juicy on Box Fighter) against its
+   *  land line 6364k and our cap 5022k; by 7283 it was 2419k, above our
+   *  home 2367k, and Evan attacked with 3.44M at 7300. Off. */
+  strikeFloorReplicaRegrow: boolean;
 
   // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
   //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
@@ -1255,6 +1269,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  or an undeterrable unallied neighbour the base world does not face);
    *  0 = off. */
   searchHBreakGated: number;
+  /** When the gate fires and the budget cannot pay the gated look: drop
+   *  the break (a veto). Off: judge it at its last step, as without the
+   *  gate (package WP4's probes: the gated look never changed a choice). */
+  searchGateVeto: boolean;
   /** Round 2's finalists (non-break plans). */
   searchKeepFinalists: number;
   /** Act only if V beats the base's by max(searchMargin·tiles,
@@ -1389,7 +1407,10 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  enemy bomb in flight will hit, no buy at all while one flies at our
    *  land or while the attacks on us carry our home troops, no new city
    *  within a salvo's reach of our SAMs. The SAM hub (nukeModel) still runs
-   *  first. */
+   *  first. quick@20 without search (package WP8 round 2, 32 games): land
+   *  at minute 20 +2.0 points ("model") and +1.7 ("free"), both carried by
+   *  Yellow Sea g28 (+48); progress +0.001, few-nation maps -0.06, City
+   *  levels lost to bombs +30-40%: not adopted. */
   goldPolicy: GoldPolicyArm;
   /** First tick of the gold arm: minute 4 (the opening's cities stay
    *  today's). */
@@ -1728,6 +1749,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeFloorReplicaSteady: false,
   strikeFloorReplicaFirm: false,
   strikeFloorReplicaBoats: false,
+  strikeFloorReplicaRegrow: false,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
@@ -1785,6 +1807,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchStrongShare: 0.9,
   searchHBreak: [600, 1200],
   searchHBreakGated: 1800,
+  searchGateVeto: false,
   searchKeepFinalists: 2,
   searchMargin: 0.01,
   searchMarginAbs: 300,
