@@ -12,6 +12,7 @@ import {
   SearchBudget,
 } from "../../../lib/search/Budget";
 import { mirvThreatState, NUKE_KINDS } from "../../../lib/search/cands/nuke";
+import { NukeWatch } from "../../../lib/search/cands/nukeWatch";
 import { Checkpoints } from "../../../lib/search/Checkpoints";
 import {
   BaseView,
@@ -97,6 +98,12 @@ function finite(x: number): number | null {
  *  lapse of its ally, an attack trigger's (T4, T5) alliance request to the
  *  attacker; none for the other triggers. */
 export function focusOf(fired: Fired): ((c: Candidate) => boolean) | undefined {
+  // Package WP10n T8 (review F9): a threat search's own plans are its MIRV and
+  // bomb candidates, so a tight budget keeps them instead of dropping the
+  // whole threat response at the "defensive only" level.
+  if (fired.name === "nuke") {
+    return (c) => c.kind === "mirv" || c.kind === "hydro" || c.kind === "atom";
+  }
   const id = fired.nation;
   if (id === undefined) return undefined;
   if (fired.name === "end") {
@@ -199,6 +206,10 @@ export class SearchController implements LiveSearch {
   private readonly valueParams: ValueParams;
   /** The generators with a T6 test (boat plans, package WP3). */
   private readonly naval: readonly CandidateGenerator[];
+  /** Package WP10n: the live income watcher for T8 (review F2); null unless
+   *  o.searchNukes. Only the live controller holds it; rollout copies never
+   *  do, so nothing here rides in a fork. */
+  private readonly watch: NukeWatch | null;
 
   constructor(private readonly o: ApexOptions) {
     validateSearchOptions(o);
@@ -215,6 +226,7 @@ export class SearchController implements LiveSearch {
     // to the effective set only when o.searchNukes is on (off: no change).
     if (o.searchNukes) for (const k of NUKE_KINDS) kinds.add(k);
     this.kinds = kinds;
+    this.watch = o.searchNukes ? new NukeWatch(o.searchNukeWindow) : null;
     this.naval = GENERATORS.filter(
       (g) =>
         g.wantsNaval !== undefined && g.kinds.some((k) => this.kinds.has(k)),
@@ -257,6 +269,9 @@ export class SearchController implements LiveSearch {
 
   tick(ctx: AgentContext, host: SearchHost): void {
     const t = ctx.tick;
+    // Package WP10n (review F2): record every nation's income each live tick,
+    // so T8's warning lead is the real ticks-to-price, not the passive rate.
+    this.watch?.sample(ctx.game, ctx.me, t);
     for (const line of this.checks.verify(t, () => {
       const s = snapOf(ctx.game, ctx.me, 0, 0, 0, this.o.searchOutBoats);
       return { tiles: s.tiles, home: s.home, out: s.out };
@@ -350,9 +365,9 @@ export class SearchController implements LiveSearch {
     // and the triggers (not the clock) drive the search (off: both false, so
     // T8 never fires).
     const mirv =
-      this.o.searchNukes && this.o.searchClock <= 0
-        ? mirvThreatState(ctx.game, me, this.o)
-        : { threat: false, chance: false };
+      this.watch !== null && this.o.searchClock <= 0
+        ? mirvThreatState(ctx.game, me, this.o, (id) => this.watch!.income(id))
+        : { threat: false, chance: false, term: undefined };
     return {
       t,
       inStall: host.inStall(t),
@@ -361,7 +376,7 @@ export class SearchController implements LiveSearch {
       nations,
       attacks,
       naval,
-      mirvThreat: mirv.threat,
+      mirvThreatTerm: mirv.threat ? mirv.term : undefined,
       mirvChance: mirv.chance,
     };
   }
@@ -404,6 +419,10 @@ export class SearchController implements LiveSearch {
       wm,
       floors: host.floors(),
       kinds: this.kinds,
+      // Package WP10n (review F2): the nuke candidates read the observed
+      // income for a nation's ticks-to-price, not the passive rate.
+      nukeIncome:
+        this.watch === null ? undefined : (id) => this.watch!.income(id),
     };
     const map = ctx.game.config().gameConfig().gameMap;
     const phi = phiFor(map);
@@ -416,7 +435,16 @@ export class SearchController implements LiveSearch {
       keep: o.searchKeepFinalists,
       grid: HORIZON_GRID,
     };
-    const r1 = generatorsFor("r1", this.kinds);
+    const r1base = generatorsFor("r1", this.kinds);
+    // Package WP10n (review F9): when T8 fired, put the nuke generator first so
+    // its plans survive the searchMaxCands cut (which keeps candidate order).
+    const r1 =
+      fired.name === "nuke"
+        ? [
+            ...r1base.filter((g) => g.name === "nuke"),
+            ...r1base.filter((g) => g.name !== "nuke"),
+          ]
+        : r1base;
     const known = this.known(obs, fired);
     // The base's attackers, with the attack trigger's nation (on top).
     const withKnown = (b: BaseView): BaseView =>

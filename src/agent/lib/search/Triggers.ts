@@ -104,12 +104,15 @@ export interface TriggerObs {
   attacks: readonly { id: string; attacker: PlayerID; troops: number }[];
   /** A registered boat generator would search now (T6's own test). */
   naval: boolean;
-  /** Package WP10n T8 (MIRV threat): a silo owner is about to be able to
-   *  MIRV us while we are a MIRV magnet (high priority). Absent/false unless
-   *  o.searchNukes. */
-  mirvThreat?: boolean;
+  /** Package WP10n T8 (MIRV threat): the term "<nation>:<price>" of the most
+   *  urgent silo owner about to be able to MIRV us while we are a MIRV magnet
+   *  (high priority). Absent unless o.searchNukes and a threat is live. Fired
+   *  once per term (like T1's alliance terms, review F3): a new price after a
+   *  MIRV launch re-arms it. */
+  mirvThreatTerm?: string;
   /** Package WP10n T8: we could MIRV offensively (we can pay and are rank
-   *  ≤ 2); low priority. Absent/false unless o.searchNukes. */
+   *  ≤ 2); low priority, on its own clock (review F3). Absent/false unless
+   *  o.searchNukes. */
   mirvChance?: boolean;
 }
 
@@ -144,8 +147,14 @@ export class Triggers {
   /** Since when home ≥ navalHome·cap with no bordering nation (T6). */
   private idleSince: number | null = null;
   private lastNaval = NEVER;
-  /** Package WP10n T8: the last MIRV-threat try (its own minGap clock). */
-  private lastMirv = NEVER;
+  /** Package WP10n T8 (review F3): MIRV-threat terms already searched
+   *  ("<nation>:<price>"), fired once each like T1's alliance terms; and the
+   *  tick a refused/found-nothing term may be retried. The offensive-chance
+   *  rule has its own clock, so a low-priority chance try never blocks the
+   *  high-priority threat. */
+  private readonly mirvDone = new Set<string>();
+  private readonly mirvRetry = new Map<string, number>();
+  private lastMirvChance = NEVER;
 
   constructor(private readonly p: TriggerParams) {
     this.lastRun = p.from - p.floorTicks;
@@ -210,10 +219,17 @@ export class Triggers {
     }
     // T8 (MIRV threat, package WP10n): a silo owner about to be able to MIRV
     // us while we are a MIRV magnet. Urgent (the nation fires at its next
-    // decision, ~30-50 ticks), so high priority, on its own minGap clock so
-    // a recent stall search does not block it (absent unless o.searchNukes).
-    if (obs.mirvThreat === true && t - this.lastMirv >= p.minGap) {
-      return { name: "nuke", why: "threat", low: false };
+    // decision, ~30-50 ticks), so high priority and NOT held back by minGap
+    // (like T1). Fired once per (nation, price) term; a refused or empty try
+    // is retried at the tick the budget can pay (review F3). Absent unless
+    // o.searchNukes.
+    const threat = obs.mirvThreatTerm;
+    if (
+      threat !== undefined &&
+      !this.mirvDone.has(threat) &&
+      t >= (this.mirvRetry.get(threat) ?? NEVER)
+    ) {
+      return { name: "nuke", why: "threat", low: false, term: threat };
     }
     // T3, not while a chain is pending.
     const chainWait = this.chainAt !== null && t < this.chainAt;
@@ -268,11 +284,12 @@ export class Triggers {
     }
     // T8 low (package WP10n): we could MIRV offensively (we can pay and are
     // rank ≤ 2), so a search may consider it even with no imminent enemy MIRV.
+    // Its own clock (review F3), so it never blocks the high-priority threat.
     if (
       gap &&
       low &&
       obs.mirvChance === true &&
-      t - this.lastMirv >= p.minGap
+      t - this.lastMirvChance >= p.stallEvery
     ) {
       return { name: "nuke", why: "chance", low: true };
     }
@@ -297,6 +314,7 @@ export class Triggers {
     this.lastRun = t;
     this.runs++;
     this.looked(obs, fired);
+    this.mirvResolved(obs, fired, false);
     if (this.chainAt !== null && t >= this.chainAt - this.p.minGap) {
       this.chainAt = null;
     }
@@ -308,6 +326,7 @@ export class Triggers {
    *  from the last search that ran. */
   none(obs: TriggerObs, fired: Fired): void {
     this.looked(obs, fired);
+    this.mirvResolved(obs, fired, true);
     if (fired.name === "chain") this.chainAt = null;
   }
 
@@ -341,7 +360,14 @@ export class Triggers {
         this.lastNaval = t;
         break;
       case "nuke":
-        this.lastMirv = t;
+        // A refused threat is retried at the budget's retry tick (review F3);
+        // a refused chance moves its own clock (and, being low priority,
+        // holds the low triggers via lowHold below).
+        if (fired.why === "threat" && fired.term !== undefined) {
+          this.mirvRetry.set(fired.term, retryAt);
+        } else {
+          this.lastMirvChance = t;
+        }
         break;
       case "stall":
         if (fired.why === "onset") this.stallOnset = false;
@@ -380,7 +406,20 @@ export class Triggers {
     );
     this.foreseenDone(t);
     if (fired.name === "naval") this.lastNaval = t;
-    if (fired.name === "nuke") this.lastMirv = t;
+  }
+
+  /** Package WP10n T8: a threat or chance try was resolved (searched, or no
+   *  plan). A searched threat term is used up (the chain trigger follows up);
+   *  an empty one is retried after minGap, so a real threat we cannot yet act
+   *  on is re-checked without spinning. The chance rule moves its own clock. */
+  private mirvResolved(obs: TriggerObs, fired: Fired, empty: boolean): void {
+    if (fired.name !== "nuke") return;
+    if (fired.why === "threat" && fired.term !== undefined) {
+      if (empty) this.mirvRetry.set(fired.term, obs.t + this.p.minGap);
+      else this.mirvDone.add(fired.term);
+    } else {
+      this.lastMirvChance = obs.t;
+    }
   }
 
   private foreseenDone(t: number): void {
