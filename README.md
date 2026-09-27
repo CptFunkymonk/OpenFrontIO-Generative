@@ -87,6 +87,17 @@ This will:
 - Launch the game server with development settings
 - Open the game in your default browser (to disable this behavior, set `SKIP_BROWSER_OPEN=true` in your environment)
 
+### Play with the bot
+
+This fork ships an AI player, `apex` (`src/agent/`). With `npm run dev` up,
+open `http://localhost:9000/?agent=apex`, click **Solo** and start a game
+without clicking the map: the bot spawns and plays your seat, with its
+reasoning in the browser console under the `[agent]` prefix. Open
+`http://localhost:9000/?agent=off` to get your seat back. To play against it,
+create a private lobby in one tab and join the lobby link from a second tab
+with `?agent=apex` appended. Step by step, with what to expect and how to
+watch arena games as pictures: [`docs/16-playing-with-apex.md`](docs/16-playing-with-apex.md).
+
 ### Client Only
 
 To run just the client with hot reloading:

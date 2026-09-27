@@ -237,8 +237,9 @@ describe("adversarial decode", () => {
         }
       }
       // A decoder that allocates on an attacker-supplied count would show up
-      // here long before it ran the machine out of memory.
-      expect(Date.now() - started).toBeLessThan(250);
+      // here long before it ran the machine out of memory. 2s, not 250ms: a
+      // single decode was seen at 686ms on a CPU shared with arena runs.
+      expect(Date.now() - started).toBeLessThan(2_000);
     }
     // Spliced prefixes rarely complete a whole message, so a full decode is
     // not the bar; reaching nested codecs is what makes the corpus worth

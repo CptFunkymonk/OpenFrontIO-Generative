@@ -232,7 +232,9 @@ describe("Client.initialize() booted from Main.ts module scope", () => {
     // listener, join-lobby listener and slider wiring are all in place.
     await vi.waitFor(() => expect(mocks.userAuth).toHaveBeenCalled());
     await new Promise((resolve) => setTimeout(resolve, 25));
-  }, 20_000);
+    // 120s, not 20s: importing Main.ts pulls in the whole client graph, which
+    // takes over 20s on a CPU shared with arena runs; this only guards a hang.
+  }, 120_000);
 
   it("runs the signed-out boot: onUserMe(false) and the missing-version warn", () => {
     // renderNavVersion() === 0 branch (line 411).
