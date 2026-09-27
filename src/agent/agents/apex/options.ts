@@ -1077,8 +1077,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   spawnWallBudgetMs: 120_000,
 
   // Package A3 SPAWN PREVIEW.
-  spawnPreview: false,
-  spawnErase: false,
+  spawnPreview: true,
+  spawnErase: true,
   spawnEraseMargin: -0.25,
   spawnEraseK: 4,
   spawnEraseMinLeft: 2,
@@ -1270,7 +1270,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   bombs: false,
 
   // Package A1 STRIKES.
-  strikes: false,
+  strikes: true,
   strikeW1: true,
   strikeW2: true,
   strikeW3: true,
@@ -1291,12 +1291,12 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeRetreat: false,
   strikeRetreatRatio: 1.5,
   strikeDetHorizon: 0,
-  strikeMinContact: 0,
-  strikeDetNearTarget: false,
-  strikeDetNearReach: false,
+  strikeMinContact: 8,
+  strikeDetNearTarget: true,
+  strikeDetNearReach: true,
   strikeSaveOpenOnly: false,
   strikeReachModel: false,
-  strikeLiveCheck: false,
+  strikeLiveCheck: true,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
