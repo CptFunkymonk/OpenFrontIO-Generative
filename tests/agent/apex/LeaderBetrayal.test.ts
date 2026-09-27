@@ -190,6 +190,8 @@ describe("WP10b leader guard: a strong ally's betrayal line, live", () => {
       expect(r.decisions.length).toBeGreaterThan(10);
       expect(underLine(r)).toEqual([]);
       expect(r.tiles).toBeGreaterThan(r.tiles0);
+      // The guard's memory is plain data: JSON keeps the whole state.
+      expect(JSON.parse(JSON.stringify(r.s))).toEqual(r.s);
       const mem = r.s.leader as LeaderMemory;
       expect(mem.lines).toHaveLength(1);
       expect(mem.lines[0]).toMatchObject({ id: Z, rule: "alone" });
@@ -203,6 +205,105 @@ describe("WP10b leader guard: a strong ally's betrayal line, live", () => {
       expect(
         r.sent.some((i) => i.type === "attack" && i.targetID === "TRIBE001"),
       ).toBe(false);
+    },
+  );
+});
+
+/**
+ * The cap signal (o.leaderCap): a tribe on x < 10 (a third player: with two
+ * left an ally bombs us, NNB :224-233), us on [10, 120) (11,000 tiles, cap
+ * 632k, gold 3M), the ally Z on [120, 200) with a level-3 City (cap 1.61M)
+ * at its cap, a finished silo and 1M gold, inert (no NationExecution: its
+ * gold stays). Z borders only us, so its line is rule (c)'s, 1.05 T/3 =
+ * 564k, above 0.8 of our cap (506k): not holdable, so it is left out of the
+ * floor and asks for cap. Today's City rule refuses every site (a nation
+ * with a finished silo and an atom's gold, EconomyController.exposedSite);
+ * with the guard the gold arm's gate ("model": Z, our ally, aims no bomb at
+ * us) buys the one level that makes the line holdable (632k + 250k: 0.8 x
+ * 882k = 706k).
+ */
+function playCap(options: Record<string, unknown>, ticks: number) {
+  const t = new Uint8Array(W * H).fill(LAND);
+  const m = new Uint8Array((W / 2) * (H / 2)).fill(LAND);
+  const map = new GameMapImpl(W, H, t, W * H);
+  const mini = new GameMapImpl(W / 2, H / 2, m, (W * H) / 4);
+  const config = new Config(GAME_CONFIG, null, false);
+  const game: Game = createGame(
+    [new PlayerInfo("agent", PlayerType.Human, AGENT_CLIENT, AGENT_ID)],
+    [
+      new Nation(
+        new Cell(160, 50),
+        new PlayerInfo("zeta", PlayerType.Nation, null, Z),
+      ),
+    ],
+    map,
+    mini,
+    config,
+  );
+  game.endSpawnPhase();
+  const us = game.player(AGENT_ID);
+  const z = game.player(Z);
+  // A third player (else two are left, and an ally bombs, NNB :224-233).
+  const tribe = game.addPlayer(
+    new PlayerInfo("tribe", PlayerType.Bot, null, "TRIBE001"),
+  );
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < 10; x++) tribe.conquer(game.ref(x, y));
+    for (let x = 10; x < 120; x++) us.conquer(game.ref(x, y));
+    for (let x = 120; x < W; x++) z.conquer(game.ref(x, y));
+  }
+  tribe.setTroops(Math.floor(config.maxTroops(tribe)));
+  const city = z.buildUnit(UnitType.City, game.ref(170, 50), {});
+  city.increaseLevel();
+  city.increaseLevel();
+  z.buildUnit(UnitType.MissileSilo, game.ref(180, 20), {});
+  z.addGold(1_000_000n);
+  us.addGold(3_000_000n);
+  const req = z.createAllianceRequest(us);
+  if (req === null) throw new Error("no alliance request");
+  req.accept();
+  us.setTroops(Math.floor(config.maxTroops(us)));
+  z.setTroops(Math.floor(config.maxTroops(z)));
+  game.addExecution(new PlayerExecution(us));
+  const f: Field = {
+    game,
+    config,
+    me: us,
+    executor: new Executor(game, GAME_ID, undefined),
+  };
+  const s = createState();
+  const policy = new ApexPolicy(parseApexOptions(options), s);
+  const h = new Harness(f, (ctx) => policy.tick(ctx));
+  const cap0 = config.maxTroops(us);
+  const shorts: number[] = [];
+  for (let i = 0; i < ticks; i++) {
+    h.step();
+    if (s.leader !== undefined) shorts.push(s.leader.capShort);
+  }
+  return { us, z, s, cap0, cap: config.maxTroops(us), shorts, logs: h.logs };
+}
+
+describe("WP10b leader guard: a line above our cap buys City levels", () => {
+  test(
+    "without the guard no City goes up (today's rule refuses every site); with it, the one level that makes the ally's line holdable",
+    { timeout: 120_000 },
+    () => {
+      const off = playCap({}, 200);
+      expect(off.us.unitCount(UnitType.City)).toBe(0);
+      expect(off.cap).toBe(off.cap0);
+      const on = playCap({ leaderGuard: true }, 200);
+      // The line asked for cap first ...
+      expect(on.shorts[0]).toBeGreaterThan(0);
+      // ... one City level went up and finished ...
+      expect(on.us.unitCount(UnitType.City)).toBe(1);
+      expect(on.cap).toBe(on.cap0 + 250_000);
+      // ... and the line is holdable now: the floor, no cap asked.
+      const mem = on.s.leader as LeaderMemory;
+      expect(mem.capShort).toBe(0);
+      expect(mem.floor).toBe(mem.lines[0].home);
+      expect(mem.floor).toBeGreaterThan(0.8 * on.cap0);
+      expect(mem.floor).toBeLessThanOrEqual(0.8 * on.cap);
+      expect(on.logs.some((l) => / city build .*arm=model/.test(l))).toBe(true);
     },
   );
 });

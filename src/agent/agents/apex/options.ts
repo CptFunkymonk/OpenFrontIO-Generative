@@ -615,9 +615,9 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   webDiag: boolean;
 
   // ── Package WP7a WEB KEEP: keep the strong bordering allies
-  //    (DiplomacyController planStrong, extensions, renewStrong;
-  //    docs/14-m4-plan.md §2.7 item 7a). A base rule: the search's
-  //    rollouts copy it. Off by default. ──────────────────────────────────
+  //    (DiplomacyController planStrong, extensions, renewStrong,
+  //    keepGifts; docs/14-m4-plan.md §2.7 item 7a). A base rule: the
+  //    search's rollouts copy it. Off by default. ────────────────────────
   /** Ask the extension of every bordering ally (land contact) that is
    *  strong, in allySet (or the midgame keep set) or not: maxTroops(Z) at
    *  least webKeepCapRatio times ours, or troops(Z) at least
@@ -656,6 +656,14 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   webKeepRenew: boolean;
   /** Smallest forecast for the webKeepRenew request. */
   webKeepRenewMinP: number;
+  /** Renew also when the nation would accept only because we threaten it
+   *  (the forecast's branch "threat": our home out-troops it by the
+   *  Impossible nation's own test, so it cannot attack us now, and its
+   *  lapse is our strike's opening). Off: no renew then. On in the
+   *  package's v6 screens: the threat renews of Kazakhstan (Europe g22,
+   *  UE struck it 2 ticks after the lapse; −9.4 points at minute 20) and
+   *  Tunica (Mississippi g10, −9.9) cost UE's strikes. */
+  webKeepRenewThreat: boolean;
   /** Gold for the friendship of a strong bordering ally whose asked
    *  extension would still be refused (forecast below webKeepGiftMinP; the
    *  strength tests or the extension trap, not treachery): webKeepGiftLead
@@ -1046,6 +1054,32 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  at 5471: a 1k remnant of Russia's attack on Alaska ended at 5488, and
    *  Alaska land-attacked us at its decision at 5504. Off. */
   strikeFloorReplicaSteady: boolean;
+  /** With strikeFloorReplica (review of WP7b, F1, F2, F5): keep a nation's
+   *  land line unless its replica line rests on its own choice of another
+   *  player that the strike leaves alone (StrikeController.firmExit). The
+   *  replica reads one decision, but a lowered home stays low for several,
+   *  and most of its exits rest on something that ends within one or two:
+   *  a send cap bound by a third nation's troops (they drop when it
+   *  launches), an attack on the nation (its retaliation cancels it), its
+   *  tribes (it attacks all of them at once), a victim (it dies), our
+   *  target (the strike takes it), or a player it can reach only by boat
+   *  (the replica sizes that send as a land attack). R1 screen, quick@20:
+   *  of 13 lowered launches, 4 of the 9 resting on another nation's state
+   *  were followed by that nation's attack on us within 34-139 ticks (The
+   *  Box g9 3361 and 5300, Alps g2 8447, Bering Strait g3 5471); the 3
+   *  that pass this guard were not. Implies strikeFloorReplicaSteady's
+   *  guard. Off. */
+  strikeFloorReplicaFirm: boolean;
+  /** With strikeFloorReplica (review of WP7b, F4): the floor is at least
+   *  min(A1's floor, the troops at its next decision of every unallied
+   *  nation that does not border us but can boat us: within 150 tiles,
+   *  water counted, and both on an ocean shore; StrikeController.boatLine).
+   *  A nation's random boat skips a player with more troops than its own
+   *  and never sends under 20% of our home, so A1's floor, which ignores
+   *  boats, kept them out only while it held our home above their troops.
+   *  R1 screen, quick@20 Europe g6 at 11227: home 4.35M to 1.65M, and
+   *  Kazakhstan (2.69M, over the Caspian) landed 446k at 11252. Off. */
+  strikeFloorReplicaBoats: boolean;
 
   // ── Package B3 NUKES AND SAMs (H8; spec §2.9, §5.1 item 5; chapter 13
   //    §2.11, §5.10; lib/NukeModel.ts, EconomyController) ──────────────
@@ -1333,6 +1367,9 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Cap on bombs in one denial candidate (its steps' amounts summed),
    *  besides our ready-slot and gold limits. */
   searchNukeMaxBombs: number;
+  /** Ticks after building a silo before the combined silo+launch candidate
+   *  fires its MIRV/bomb (a new silo is ready at intent + 102; OwnNukes). */
+  searchNukeSiloReady: number;
 
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
   // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
@@ -1593,6 +1630,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   webKeepGap: 600,
   webKeepRenew: true,
   webKeepRenewMinP: 0.25,
+  webKeepRenewThreat: true,
   webKeepGift: false,
   webKeepGiftLead: 120,
   webKeepGiftShare: 0.9,
@@ -1688,6 +1726,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   strikeFloorReplicaUnseen: false,
   strikeFlowFloorMin: false,
   strikeFloorReplicaSteady: false,
+  strikeFloorReplicaFirm: false,
+  strikeFloorReplicaBoats: false,
 
   // Package B3 NUKES AND SAMs.
   nukeModel: false,
@@ -1782,6 +1822,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchNukeCapRatio: 1.1,
   searchNukeSiloGold: 5_000_000,
   searchNukeMaxBombs: 8,
+  searchNukeSiloReady: 110,
 
   // Package WP8 GOLD.
   goldPolicy: "exposure",

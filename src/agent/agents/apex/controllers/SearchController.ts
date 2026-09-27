@@ -93,6 +93,21 @@ function finite(x: number): number | null {
   return Number.isFinite(x) ? Math.round(x) : null;
 }
 
+/** The trigger's own plan (the budget's "focus" level): a T1 search's
+ *  lapse of its ally, an attack trigger's (T4, T5) alliance request to the
+ *  attacker; none for the other triggers. */
+export function focusOf(fired: Fired): ((c: Candidate) => boolean) | undefined {
+  const id = fired.nation;
+  if (id === undefined) return undefined;
+  if (fired.name === "end") {
+    return (c) => c.kind === "lapse" && c.target === id;
+  }
+  if (fired.name === "attack" || fired.name === "foresight") {
+    return (c) => c.kind === "ally" && c.target === id;
+  }
+  return undefined;
+}
+
 /** Throws for a Search option no run can mean (parseApexOptions checks
  *  only the types). */
 export function validateSearchOptions(o: ApexOptions): void {
@@ -436,9 +451,12 @@ export class SearchController implements LiveSearch {
       ctx.log(`search-none ${t} ${fired.name} ${why}`);
       return { ran: false, none: true };
     }
+    // The trigger's own plan, kept when nothing else fits: a T1 search's
+    // lapse of its ally, an attack trigger's alliance request.
+    const focus = focusOf(fired);
     if (this.budget.capped && pre.length > 0) {
-      if (degrade(pre, cm, room() - first).kept.length === 0) {
-        return this.refuse(ctx, fired, first + cheapest(pre, cm), why);
+      if (degrade(pre, cm, room() - first, focus).kept.length === 0) {
+        return this.refuse(ctx, fired, first + cheapest(pre, cm, focus), why);
       }
     }
 
@@ -509,7 +527,7 @@ export class SearchController implements LiveSearch {
     let cands = all;
     let level = 0;
     if (this.budget.capped && all.length > 0) {
-      const d = degrade(all, cm, room() - base.cost());
+      const d = degrade(all, cm, room() - base.cost(), focus);
       if (d.kept.length === 0) {
         // Nothing fits after the base's first round: a refusal (the base's
         // checks still hold: it is what live plays).
@@ -517,7 +535,7 @@ export class SearchController implements LiveSearch {
         this.budget.charge(te);
         this.stats.te += te;
         this.addChecks(t, base.snaps, base.h);
-        return this.refuse(ctx, fired, te + cheapest(all, cm), why, te);
+        return this.refuse(ctx, fired, te + cheapest(all, cm, focus), why, te);
       }
       level = d.level;
       cands = d.kept;

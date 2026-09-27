@@ -15,14 +15,16 @@
  *   send, the gated look) are not in it: Rounds buys them.
  * - The degrade order is fixed and deterministic: all plans; drop the
  *   shares below 1; drop breaks; keep only lapse, keep and defensive plans;
- *   skip. The same input always gives the same level and the same plans in
- *   the same order.
+ *   keep only the trigger's own plan (focus, when it has one); skip. The
+ *   same input always gives the same level and the same plans in the same
+ *   order.
  * - The cap is R·(t − searchFrom) + slack (4,500 by default); R ≤ 0 has
  *   none; affordableAt is the first tick the room reaches a need.
  */
 import { SUITES } from "../../../src/agent/arena/Suites";
 import {
   BUDGET_SLACK,
+  cheapest,
   CostModel,
   degrade,
   DEGRADE,
@@ -163,6 +165,30 @@ describe("search budget", () => {
     for (const room of [full, whole - 1, noBreak - 1, 0]) {
       expect(degrade(SET, MODEL, room)).toEqual(degrade(SET, MODEL, room));
     }
+  });
+
+  test("the last level before skipping keeps the trigger's own plan (focus)", () => {
+    const set = [...SET, cand("lapse:W:1", { lastSend: 452 })];
+    const focus = (c: Candidate) => c.kind === "lapse" && c.target === "Z";
+    const defensive = restCost(
+      set.filter((c) => c.defensive),
+      MODEL,
+    );
+    const own = restCost(
+      set.filter((c) => c.name === "lapse:Z:1"),
+      MODEL,
+    );
+    expect(own).toBeLessThan(defensive);
+    const d = degrade(set, MODEL, defensive - 1, focus);
+    expect([DEGRADE[d.level], d.kept.map((c) => c.name)]).toEqual([
+      "focus",
+      ["lapse:Z:1"],
+    ]);
+    expect(DEGRADE[degrade(set, MODEL, own - 1, focus).level]).toBe("skip");
+    // Without a focus that level is empty and passed over.
+    expect(DEGRADE[degrade(set, MODEL, defensive - 1).level]).toBe("skip");
+    expect(cheapest(set, MODEL, focus)).toBe(own);
+    expect(cheapest(set, MODEL)).toBe(defensive);
   });
 
   test("an empty level is passed over: strikes only go from whole to skip", () => {

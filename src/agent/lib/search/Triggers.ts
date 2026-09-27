@@ -61,7 +61,8 @@ export interface Fired {
    *  closes (the web asks its extension from then on). */
   term?: string;
   closes?: number;
-  /** T4, T5: the attack's nation, and T5's ticks to its attack. */
+  /** T1: the expiring ally; T4, T5: the attack's nation (and T5's ticks
+   *  to its attack, `in`). */
   nation?: PlayerID;
   in?: number;
 }
@@ -198,6 +199,7 @@ export class Triggers {
         low: false,
         term,
         closes: n.expiresAt - p.extendLead,
+        nation: n.id,
       };
     }
     const gap = t - this.lastTry >= p.minGap;

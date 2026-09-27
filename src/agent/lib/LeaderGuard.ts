@@ -607,6 +607,9 @@ export interface MirvDanger {
   /** The threat whose rule names us with the earliest `at` (ties: more
    *  gold, then smallID), or null: who, and when. */
   first: MirvThreat | null;
+  /** The silo owner with the most gold, whatever it aims at (ties: the
+   *  lower smallID), or null. */
+  richest: MirvThreat | null;
 }
 
 /**
@@ -664,7 +667,9 @@ export function mirvDanger(
     }
   }
   let first: MirvThreat | null = null;
+  let richest: MirvThreat | null = null;
   for (const t of threats) {
+    if (richest === null || t.gold > richest.gold) richest = t;
     if (t.rule === null) continue;
     if (
       first === null ||
@@ -674,7 +679,7 @@ export function mirvDanger(
       first = t;
     }
   }
-  return { lines, threats, first };
+  return { lines, threats, first, richest };
 }
 
 /** Whether the game is one these lines model (FFA). */

@@ -869,13 +869,16 @@ describe("apex window strikes (§5.2, package A1)", () => {
   // ── Package WP7b R1 FLOOR (tests/agent/apex/StrikeReplicaFloor.test.ts
   //    has the bisection) ─────────────────────────────────────────────────
 
-  test("strikeFloorReplica: a W1 strike that B's land line blocks goes when B's list would pick the target first", async () => {
+  test("strikeFloorReplica: a W1 strike that B's land line blocks goes when B's list would pick the target first; strikeFloorReplicaFirm keeps B's land line, since the strike takes that pick", async () => {
     // T (the target, under its reserve) over B, both right of us. B
     // borders us and T and holds 0.9 of its cap: its land line is above our
     // home, so without the replica no strike on T goes. B's strategy list
     // picks T (very weak) before us at any home of ours from 0.35 of our
-    // cap up: with it, the floor is 0.35 of our cap.
-    for (const replica of [false, true]) {
+    // cap up: with the replica, the floor is 0.35 of our cap. But the
+    // strike conquers T (under its reserve: a kill), and then B's list
+    // picks us at that home (review of WP7b, F2): firmExit reads "target"
+    // (B borders T) and B keeps its land line, so no strike goes.
+    for (const variant of ["A1", "R1", "firm"] as const) {
       const f = await field({ width: 120, height: 40 });
       const { game, me, config } = f;
       own(me, rect(game, 0, 0, 30, 40));
@@ -896,12 +899,15 @@ describe("apex window strikes (§5.2, package A1)", () => {
       const p = r.nm.params(T.id());
       sc.rate = p.rate;
       sc.phase = p.phase;
-      const o = parseApexOptions({ strikeFloorReplica: replica });
+      const o = parseApexOptions({
+        strikeFloorReplica: variant !== "A1",
+        strikeFloorReplicaFirm: variant === "firm",
+      });
       const home = Math.round(0.95 * config.maxTroops(me));
       const land = B.troops() / r.nm.sendCapSafe();
       expect(land).toBeGreaterThan(home);
       const launch = untilLaunch(sc, r, o, 0.08, 3 * sc.rate);
-      if (!replica) {
+      if (variant !== "R1") {
         expect(launch).toBeNull();
         expect(strikeMemory(r.s).stats.skips.budget ?? 0).toBeGreaterThan(0);
         continue;
@@ -913,13 +919,14 @@ describe("apex window strikes (§5.2, package A1)", () => {
       expect(intent.troops).toBeLessThanOrEqual(
         home - 0.35 * config.maxTroops(me),
       );
-      // The launch line: the replica's floor, and the land line it lowered.
+      // The launch line: the replica's floor, the land line it lowered, and
+      // the nation whose line set the floor.
       const line = r.logs.find((l) => l.includes("wstrike NATIONT1"));
       expect(line).toBeDefined();
       const k = (x: number) => `${Math.round(x / 1000)}k`;
       expect(line).toContain(` det=${k(0.35 * config.maxTroops(me))}`);
-      expect(line).toMatch(/ land=\d+k$/);
-      const logged = Number(/ land=(\d+)k$/.exec(line!)![1]) * 1000;
+      expect(line).toMatch(/ land=\d+k bind=NATIONB1$/);
+      const logged = Number(/ land=(\d+)k /.exec(line!)![1]) * 1000;
       expect(logged).toBeGreaterThan(home);
     }
   });

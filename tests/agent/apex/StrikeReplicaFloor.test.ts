@@ -1,10 +1,14 @@
 import {
+  boatLine,
   deterrenceFloor,
+  firmExit,
+  FloorWhy,
   REMNANT_SHARE,
   REPLICA_STEPS,
   replicaLine,
   strikeBudget,
   transientExit,
+  VICTIM_SHARE,
 } from "../../../src/agent/agents/apex/controllers/StrikeController";
 import {
   APEX_DEFAULTS,
@@ -14,11 +18,20 @@ import {
 import type { View } from "../../../src/agent/agents/apex/policy";
 import { createModels } from "../../../src/agent/lib/Models";
 import { NationModel } from "../../../src/agent/lib/NationModel";
+import { buildRaceGrid, ownerGrid } from "../../../src/agent/lib/RaceField";
 import { createPurse, HomeFloors } from "../../../src/agent/lib/Scheduler";
 import { scanWorld } from "../../../src/agent/lib/WorldModel";
 import { AttackExecution } from "../../../src/core/execution/AttackExecution";
 import { Player, PlayerInfo, PlayerType } from "../../../src/core/game/Game";
-import { addTribe, field, Field, GAME_ID, own, rect } from "./Field";
+import {
+  addTribe,
+  field,
+  Field,
+  GAME_ID,
+  own,
+  rect,
+  Terrain,
+} from "./Field";
 
 // Package WP7b R1 FLOOR (docs/14-m4-plan.md §2.7 item 7b, §3 WP7): the
 // strike floor's replica line (StrikeController.replicaLine), ported from
@@ -40,6 +53,10 @@ import { addTribe, field, Field, GAME_ID, own, rect } from "./Field";
 
 const R1: ApexOptions = parseApexOptions({ strikeFloorReplica: true });
 const UE: ApexOptions = parseApexOptions({});
+const FIRM: ApexOptions = parseApexOptions({
+  strikeFloorReplica: true,
+  strikeFloorReplicaFirm: true,
+});
 
 interface World {
   f: Field;
@@ -100,6 +117,8 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(APEX_DEFAULTS.strikeFloorReplicaUnseen).toBe(false);
     expect(APEX_DEFAULTS.strikeFlowFloorMin).toBe(false);
     expect(APEX_DEFAULTS.strikeFloorReplicaSteady).toBe(false);
+    expect(APEX_DEFAULTS.strikeFloorReplicaFirm).toBe(false);
+    expect(APEX_DEFAULTS.strikeFloorReplicaBoats).toBe(false);
     expect(REPLICA_STEPS).toBe(8);
   });
 
@@ -143,6 +162,11 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     // replica line with R1, its land line without.
     expect(deterrenceFloor(w.v(R1), A.id(), [])).toBe(line);
     expect(deterrenceFloor(w.v(UE), A.id(), [])).toBeCloseTo(land, 6);
+    // Its pick above A's troops is A, our target: strikeFloorReplicaFirm
+    // keeps B's land line (the strike takes A).
+    const why: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(w.v(FIRM), A.id(), [], why)).toBeCloseTo(land, 6);
+    expect(why).toEqual({ bind: B.id(), kept: [`${B.id()}:target`] });
     // strikeBudget spends the difference: home − floor, under the purse.
     const floors: HomeFloors = {
       cap,
@@ -243,6 +267,11 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
           strikeFlowFloor: 0,
           strikeFloorReplicaUnseen: true,
           strikeFlowFloorMin: true,
+        }),
+        parseApexOptions({
+          strikeFloorReplicaSteady: true,
+          strikeFloorReplicaFirm: true,
+          strikeFloorReplicaBoats: true,
         }),
       ]) {
         expect(deterrenceFloor(w.v(o), A.id(), [])).toBe(landOf(B));
@@ -463,4 +492,387 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     // It read nothing: still no state for B.
     expect(fresh.get(w.B.id())).toBeUndefined();
   });
+
+  // ── Review of WP7b: strikeFloorReplicaFirm (F1, F2, F5) and
+  //    strikeFloorReplicaBoats (F4) ──────────────────────────────────────
+
+  test("strikeFloorReplicaFirm keeps a line that rests on B's own choice of a steady land neighbour, and B's land line when that neighbour is our target", async () => {
+    const { f, P } = await scene(COLUMNS);
+    const { NATIONB1: B, NATIONC1: C, NATIOND1: D } = P;
+    const { config, me } = f;
+    B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+    C.setTroops(Math.round(0.8 * B.troops()));
+    D.setTroops(Math.round(0.5 * config.maxTroops(D)));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const { nm, v } = look(f);
+    const cap = config.maxTroops(me);
+    const lo = 0.35 * cap;
+    const dB = nm.nextDecision(B.id(), f.game.ticks());
+    const land = (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe();
+    // B picks us below C's troops (juicy, then weakest) and C above them.
+    const line = replicaLine(v(R1), B.id(), dB, lo, land);
+    expect(line).toBeGreaterThan(lo);
+    expect(line).toBeLessThan(land);
+    expect(Math.abs(line - C.troops())).toBeLessThanOrEqual(
+      (land - lo) / 2 ** REPLICA_STEPS,
+    );
+    expect(nm.wouldTargetUs(B.id(), line)).toBeNull();
+    // A strike on D: C borders B by land, is not the target and nobody's
+    // victim; nothing attacks B and it borders no tribe. The line holds.
+    expect(firmExit(v(FIRM), B, dB, line, D.id())).toBeNull();
+    const why: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(v(FIRM), D.id(), [], why)).toBe(line);
+    expect(why).toEqual({ bind: B.id(), kept: [] });
+    expect(deterrenceFloor(v(R1), D.id(), [])).toBe(line);
+    // A strike on C: B's pick is the target, which the strike takes.
+    expect(firmExit(v(FIRM), B, dB, line, C.id())).toBe("target");
+    expect(deterrenceFloor(v(R1), C.id(), [])).toBe(line);
+    expect(deterrenceFloor(v(FIRM), C.id(), [])).toBeCloseTo(land, 6);
+  });
+
+  test("strikeFloorReplicaFirm: a line that rests on a third nation's troops (B's send cap) keeps B's land line; once that nation launches, B can attack us there and picks us", async () => {
+    // Review of WP7b F1 (its scratch Wp7bThirdParty): X the target, B
+    // under it, C right of both; C holds 1.1x B's troops.
+    const { f, P } = await scene({
+      width: 120,
+      height: 40,
+      us: [0, 0, 40, 40],
+      nations: [
+        ["NATIONX1", [40, 0, 80, 20]],
+        ["NATIONB1", [40, 20, 80, 40]],
+        ["NATIONC1", [80, 0, 120, 40]],
+      ],
+    });
+    const { NATIONX1: X, NATIONB1: B, NATIONC1: C } = P;
+    const { config, me } = f;
+    me.setTroops(Math.round(0.9 * config.maxTroops(me)));
+    B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+    X.setTroops(Math.round(0.5 * config.maxTroops(X)));
+    C.setTroops(Math.round(1.1 * B.troops()));
+    const a = look(f);
+    const cap = config.maxTroops(me);
+    const lo = 0.35 * cap;
+    const d = a.nm.nextDecision(B.id(), f.game.ticks());
+    const land = (a.nm.troopsAt(B.id(), d) + 1) / a.nm.sendCapSafe();
+    expect(land).toBeGreaterThan(lo);
+    // T_B − ⌈0.9·T_C⌉ is under 20% of any home from lo up: "cannot".
+    expect(a.nm.canLandAttackUs(B.id(), lo, d)).toBe(false);
+    expect(deterrenceFloor(a.v(R1), X.id(), [])).toBe(lo);
+    expect(firmExit(a.v(FIRM), B, d, lo, X.id())).toBe("cannot");
+    const why: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(a.v(FIRM), X.id(), [], why)).toBeCloseTo(land, 6);
+    expect(deterrenceFloor(a.v(UE), X.id(), [])).toBeCloseTo(land, 6);
+    expect(why.kept).toEqual([`${B.id()}:cannot`]);
+    // C launches elsewhere and its home drops: at lo B can attack us, and
+    // its list picks us.
+    C.setTroops(Math.round(0.8 * C.troops()));
+    const b = look(f);
+    const d2 = b.nm.nextDecision(B.id(), f.game.ticks());
+    expect(b.nm.canLandAttackUs(B.id(), lo, d2)).toBe(true);
+    expect(b.nm.wouldTargetUs(B.id(), lo)).not.toBeNull();
+  });
+
+  test("strikeFloorReplicaFirm: B borders the target (the strike takes its pick), is attacked by another nation, borders a tribe, or has a victim for an enemy: B keeps its land line", async () => {
+    // "target" (review F2, its scratch Wp7bTarget, the Strikes.test.ts
+    // e2e scene): T, under its reserve, over B. B's veryWeak picks T at any
+    // home of ours; once the strike takes T, it picks us at lo.
+    {
+      const { f, P } = await scene({
+        width: 120,
+        height: 40,
+        us: [0, 0, 30, 40],
+        nations: [
+          ["NATIONT1", [30, 0, 120, 20]],
+          ["NATIONB1", [30, 20, 120, 40]],
+        ],
+      });
+      const { NATIONT1: T, NATIONB1: B } = P;
+      const { config, me, game } = f;
+      B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+      T.setTroops(Math.round(0.08 * config.maxTroops(T)));
+      me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+      const a = look(f);
+      const lo = 0.35 * config.maxTroops(me);
+      const dB = a.nm.nextDecision(B.id(), game.ticks());
+      const land = (a.nm.troopsAt(B.id(), dB) + 1) / a.nm.sendCapSafe();
+      expect(land).toBeGreaterThan(me.troops());
+      expect(deterrenceFloor(a.v(R1), T.id())).toBe(lo);
+      expect(firmExit(a.v(FIRM), B, dB, lo, T.id())).toBe("target");
+      expect(deterrenceFloor(a.v(FIRM), T.id())).toBeCloseTo(land, 6);
+      own(me, rect(game, 30, 0, 120, 20));
+      game.executeNextTick();
+      expect(T.isAlive()).toBe(false);
+      const b = look(f);
+      const dB2 = b.nm.nextDecision(B.id(), game.ticks());
+      expect(b.nm.canLandAttackUs(B.id(), lo, dB2)).toBe(true);
+      expect(b.nm.wouldTargetUs(B.id(), lo)).not.toBeNull();
+    }
+    // Us | B | C | D, the strike on D; C holds 0.8 of B's troops (as in the
+    // first test, where B's line held).
+    const base = async () => {
+      const { f, P } = await scene(COLUMNS);
+      const { config, me } = f;
+      P.NATIONB1.setTroops(Math.round(0.9 * config.maxTroops(P.NATIONB1)));
+      P.NATIONC1.setTroops(Math.round(0.8 * P.NATIONB1.troops()));
+      P.NATIOND1.setTroops(Math.round(0.5 * config.maxTroops(P.NATIOND1)));
+      me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+      return { f, P };
+    };
+    const check = (f: Field, P: Record<string, Player>, reason: string) => {
+      const { nm, v } = look(f);
+      const B = P.NATIONB1;
+      const D = P.NATIOND1;
+      const dB = nm.nextDecision(B.id(), f.game.ticks());
+      const land = (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe();
+      const r1 = deterrenceFloor(v(R1), D.id(), []);
+      expect(r1).toBeLessThan(land);
+      expect(firmExit(v(FIRM), B, dB, r1, D.id())).toBe(reason);
+      const why: FloorWhy = { bind: null, kept: [] };
+      expect(deterrenceFloor(v(FIRM), D.id(), [], why)).toBeCloseTo(land, 6);
+      expect(why.kept).toEqual([`${B.id()}:${reason}`]);
+    };
+    // "attacked": C attacks B with a fifth of B's troops (no remnant): the
+    // replica has B answer C at any home.
+    {
+      const { f, P } = await base();
+      const { NATIONB1: B, NATIONC1: C } = P;
+      const sent = Math.round(0.2 * B.troops());
+      C.setTroops(C.troops() + sent);
+      f.game.addExecution(new AttackExecution(sent, C, B.id()));
+      f.game.executeNextTick();
+      const { nm, v } = look(f);
+      expect(transientExit(v(R1), B, nm.refresh(B.id(), "full"))).toBeNull();
+      check(f, P, "attacked");
+    }
+    // "tribes": a tribe cut out of B's corner.
+    {
+      const { f, P } = await base();
+      addTribe(f, "TRIBE001", rect(f.game, 56, 36, 60, 40), 500, false);
+      check(f, P, "tribes");
+    }
+    // "victim": D attacks C with more than half of C's troops.
+    {
+      const { f, P } = await base();
+      const { NATIONC1: C, NATIOND1: D } = P;
+      C.setTroops(Math.round(0.3 * f.config.maxTroops(C)));
+      const sent = Math.round(1.2 * VICTIM_SHARE * C.troops());
+      D.setTroops(D.troops() + sent);
+      f.game.addExecution(new AttackExecution(sent, D, C.id()));
+      f.game.executeNextTick();
+      let inc = 0;
+      for (const a of C.incomingAttacks()) inc += a.troops();
+      expect(inc).toBeGreaterThan(VICTIM_SHARE * C.troops());
+      check(f, P, "victim");
+    }
+  });
+
+  test("strikeFloorReplicaFirm: a pick off B's land border (an enemy over a river, a Hostile relation, an ally's target) keeps B's land line", async () => {
+    // "overWater" (review F5): C across a 3-tile river from B, in B's
+    // nearby() (shore reach up to 4 water tiles) but no land border: a send
+    // there is a boat of T/5 that can fail.
+    {
+      const { f, P } = await scene({
+        width: 123,
+        height: 40,
+        terrain: (x) => (x >= 60 && x < 63 ? "water" : "plains"),
+        us: [0, 0, 30, 40],
+        nations: [
+          ["NATIONB1", [30, 0, 60, 40]],
+          ["NATIONC1", [63, 0, 93, 40]],
+          ["NATIOND1", [93, 0, 123, 40]],
+        ],
+      });
+      const { NATIONB1: B, NATIONC1: C, NATIOND1: D } = P;
+      const { config, me } = f;
+      B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+      C.setTroops(Math.round(0.8 * B.troops()));
+      me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+      const { nm, v } = look(f);
+      const dB = nm.nextDecision(B.id(), f.game.ticks());
+      const land = (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe();
+      expect(nm.nearbyOf(B.id())).toContain(C.smallID());
+      expect(B.sharesBorderWith(C)).toBe(false);
+      // The replica sends B's troops to C by land: the line is C's troops.
+      const r1 = deterrenceFloor(v(R1), D.id(), []);
+      expect(r1).toBeLessThan(land);
+      expect(Math.abs(r1 - C.troops())).toBeLessThanOrEqual(
+        (land - 0.35 * config.maxTroops(me)) / 2 ** REPLICA_STEPS,
+      );
+      expect(firmExit(v(FIRM), B, dB, r1, D.id())).toBe("overWater");
+      expect(deterrenceFloor(v(FIRM), D.id(), [])).toBeCloseTo(land, 6);
+    }
+    // "hated" and "assist": picks at any distance. Us | B | C | D.
+    const { f, P } = await scene(COLUMNS);
+    const { NATIONB1: B, NATIONC1: C, NATIOND1: D } = P;
+    const { config, me } = f;
+    B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+    C.setTroops(Math.round(0.8 * B.troops()));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const lo = 0.35 * config.maxTroops(me);
+    const at = () => {
+      const { nm, v } = look(f);
+      return { v, dB: nm.nextDecision(B.id(), f.game.ticks()) };
+    };
+    {
+      const { v, dB } = at();
+      expect(firmExit(v(FIRM), B, dB, lo, null)).toBeNull();
+    }
+    // B hates D (not its neighbour).
+    B.updateRelation(D, -100);
+    {
+      const { v, dB } = at();
+      expect(firmExit(v(FIRM), B, dB, lo, null)).toBe("hated");
+      // Our target: "target".
+      expect(firmExit(v(FIRM), B, dB, lo, D.id())).toBe("target");
+    }
+    B.updateRelation(D, 100);
+    // B allied with C, whose target is D.
+    C.createAllianceRequest(B)!.accept();
+    C.target(D);
+    {
+      const { v, dB } = at();
+      expect(firmExit(v(FIRM), B, dB, lo, null)).toBe("assist");
+    }
+  });
+
+  test("strikeFloorReplicaBoats: a lowered floor is at least the troops of an unallied nation that can boat us, up to A1's floor", async () => {
+    // Land band (y < 40): us | B | W; sea (40 <= y < 60); K below it. B's
+    // veryWeak picks W at every home: R1's floor is lo. K (over the sea,
+    // within 150 tiles, on the ocean shore as we are) can boat us.
+    const sea = (x: number, y: number): Terrain =>
+      y >= 40 && y < 60 ? "water" : "plains";
+    const { f, P } = await scene({
+      width: 80,
+      height: 100,
+      terrain: sea,
+      us: [0, 0, 40, 40],
+      nations: [
+        ["NATIONB1", [40, 0, 70, 40]],
+        ["NATIONW1", [70, 0, 80, 40]],
+        ["NATIONK1", [0, 60, 80, 100]],
+      ],
+    });
+    const { NATIONB1: B, NATIONW1: W, NATIONK1: K } = P;
+    const { config, me } = f;
+    B.setTroops(Math.round(0.9 * config.maxTroops(B)));
+    W.setTroops(Math.round(0.05 * config.maxTroops(W)));
+    me.setTroops(Math.round(0.95 * config.maxTroops(me)));
+    const lo = 0.35 * config.maxTroops(me);
+    const BOATS = parseApexOptions({
+      strikeFloorReplica: true,
+      strikeFloorReplicaBoats: true,
+    });
+    const at = (grids: boolean) => {
+      const { nm, v } = look(f, grids);
+      const dB = nm.nextDecision(B.id(), f.game.ticks());
+      return { v, land: (nm.troopsAt(B.id(), dB) + 1) / nm.sendCapSafe() };
+    };
+    let { v, land } = at(true);
+    expect(land).toBeGreaterThan(lo);
+    K.setTroops(Math.round((lo + land) / 2));
+    ({ v, land } = at(true));
+    expect(deterrenceFloor(v(R1), null)).toBe(lo);
+    expect(deterrenceFloor(v(UE), null)).toBeCloseTo(land, 6);
+    // K and W (on the shore, within reach) can boat us; B borders us.
+    expect(boatLine(v(BOATS), 0)).toBe(K.troops());
+    const why: FloorWhy = { bind: null, kept: [] };
+    expect(deterrenceFloor(v(BOATS), null, undefined, why)).toBe(K.troops());
+    expect(why.bind).toBe("boats");
+    // Never above A1's floor.
+    K.setTroops(Math.round(2 * land));
+    ({ v, land } = at(true));
+    expect(deterrenceFloor(v(BOATS), null)).toBeCloseTo(land, 6);
+    // An ally of ours does not count; without the grids, reach is unknown:
+    // A1's floor.
+    K.setTroops(Math.round((lo + land) / 2));
+    ({ v, land } = at(false));
+    expect(boatLine(v(BOATS), 0)).toBe(Infinity);
+    expect(deterrenceFloor(v(BOATS), null)).toBeCloseTo(land, 6);
+    me.createAllianceRequest(K)!.accept();
+    ({ v, land } = at(true));
+    expect(boatLine(v(BOATS), 0)).toBe(W.troops());
+    expect(deterrenceFloor(v(BOATS), null)).toBe(lo);
+    // Off: R1's floor.
+    expect(deterrenceFloor(v(R1), null)).toBe(lo);
+  });
+
+  test("boatLine: no ocean shore of ours, no boats", async () => {
+    const { f, P } = await scene(COLUMNS);
+    const { nm, v } = look(f, true);
+    void nm;
+    expect(P.NATIONB1.isAlive()).toBe(true);
+    expect(boatLine(v(R1), 0)).toBe(0);
+  });
 });
+
+type Box = [number, number, number, number];
+
+/** Us | B | C | D, 30 columns each, 40 high: B borders us and C, C borders
+ *  B and D. */
+const COLUMNS: {
+  width: number;
+  height: number;
+  us: Box;
+  nations: [string, Box][];
+} = {
+  width: 120,
+  height: 40,
+  us: [0, 0, 30, 40],
+  nations: [
+    ["NATIONB1", [30, 0, 60, 40]],
+    ["NATIONC1", [60, 0, 90, 40]],
+    ["NATIOND1", [90, 0, 120, 40]],
+  ],
+};
+
+/** Us and nations on rectangles of land, past the nations' 50-tick
+ *  immunity. */
+async function scene(o: {
+  width: number;
+  height: number;
+  terrain?: (x: number, y: number) => Terrain;
+  us: Box;
+  nations: [string, Box][];
+}): Promise<{ f: Field; P: Record<string, Player> }> {
+  const f = await field({
+    width: o.width,
+    height: o.height,
+    terrain: o.terrain,
+  });
+  own(f.me, rect(f.game, ...o.us));
+  const P: Record<string, Player> = {};
+  for (const [id, box] of o.nations) {
+    const n = f.game.addPlayer(new PlayerInfo(id, PlayerType.Nation, null, id));
+    own(n, rect(f.game, ...box));
+    P[id] = n;
+  }
+  for (let i = 0; i < 60; i++) f.game.executeNextTick();
+  return { f, P };
+}
+
+/** A fresh model and scan at the current tick; with `grids`, the race and
+ *  owner grids too (boatLine). */
+function look(f: Field, grids = false) {
+  const { game, me } = f;
+  const models = createModels(game);
+  const nm = new NationModel(game, me, GAME_ID, models);
+  const tick = game.ticks();
+  nm.observe(tick);
+  const wm = scanWorld(game, me, null);
+  const race = grids ? buildRaceGrid(game, APEX_DEFAULTS) : null;
+  const owners = race !== null ? ownerGrid(game, race, 2) : null;
+  return {
+    nm,
+    v: (o: ApexOptions) => ({
+      o,
+      wm,
+      nm,
+      game,
+      me,
+      tick,
+      models,
+      race,
+      owners,
+    }),
+  };
+}

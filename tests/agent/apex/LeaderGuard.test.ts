@@ -551,6 +551,8 @@ describe(
         at: nm.nextDecision(Z.id(), t1 + 1),
         rule: "land",
       });
+      // Both hold 25M or more: the richest is the first of the two.
+      expect(d.richest?.id).toBe(Z.id());
       // Below 40% (119 of 130 columns: 23,800 tiles): nobody aims at us.
       for (let x = 0; x < 11; x++) {
         for (let y = 0; y < 200; y++) US.relinquish(w.game.ref(x, y));

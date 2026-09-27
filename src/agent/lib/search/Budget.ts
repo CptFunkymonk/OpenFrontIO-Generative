@@ -21,12 +21,13 @@ import { roundUp } from "./Rounds";
 // round's whole stepwise look, and the base to the longest of them. A search
 // whose price exceeds what it may spend degrades, in order: drop the plans
 // sized by a share below 1 of the purse; drop breaks; keep only lapse, keep
-// and defensive plans; skip. The looks only a rollout reveals (a target
-// strong at a later send, the danger-gated break look) are bought as they
-// come from what is left (Rounds' `afford`): a plan the budget cannot look
-// further at is dropped, never judged short. Every decision here is a
-// function of the candidate list, the table and the ticks, so it is
-// deterministic.
+// and defensive plans; keep only the trigger's own plan (a T1 search's
+// lapse of its ally, an attack trigger's alliance request); skip. The looks
+// only a rollout reveals (a target strong at a later send, the danger-gated
+// break look) are bought as they come from what is left (Rounds'
+// `afford`): a plan the budget cannot look further at is dropped, never
+// judged short. Every decision here is a function of the candidate list,
+// the table and the ticks, so it is deterministic.
 
 /** Live-tick equivalents granted at searchFrom (the first searches), the
  *  searchSlack default: the first search's whole break look (about 2,900
@@ -102,28 +103,39 @@ export const DEGRADE = [
   "whole",
   "nobreak",
   "defensive",
+  "focus",
   "skip",
 ] as const;
 
-const KEEP: readonly ((c: Candidate) => boolean)[] = [
-  () => true,
-  (c) => c.frac === undefined || c.frac >= 1,
-  (c) => (c.frac === undefined || c.frac >= 1) && !c.isBreak,
-  (c) => c.defensive,
-];
+/** The levels' filters; `focus` is the trigger's own plan (a T1 search's
+ *  lapse of its ally, an attack trigger's alliance request), if any. */
+function keeps(
+  focus?: (c: Candidate) => boolean,
+): ((c: Candidate) => boolean)[] {
+  return [
+    () => true,
+    (c) => c.frac === undefined || c.frac >= 1,
+    (c) => (c.frac === undefined || c.frac >= 1) && !c.isBreak,
+    (c) => c.defensive,
+    (c) => focus !== undefined && focus(c),
+  ];
+}
 
 /**
  * The first degrade level whose candidates' restCost fits in `room`, the
- * candidates it keeps (in order) and that cost. Level 4 ("skip") keeps
- * none. An empty level is passed over: a search needs a plan.
+ * candidates it keeps (in order) and that cost. The last ("skip") keeps
+ * none. An empty level is passed over: a search needs a plan. `focus`:
+ * the trigger's own plan, the last level kept before skipping.
  */
 export function degrade(
   cands: readonly Candidate[],
   m: CostModel,
   room: number,
+  focus?: (c: Candidate) => boolean,
 ): { level: number; kept: Candidate[]; cost: number } {
-  for (let level = 0; level < KEEP.length; level++) {
-    const kept = cands.filter(KEEP[level]);
+  const levels = keeps(focus);
+  for (let level = 0; level < levels.length; level++) {
+    const kept = cands.filter(levels[level]);
     if (kept.length === 0) continue;
     const cost = restCost(kept, m);
     if (cost <= room) return { level, kept, cost };
@@ -133,9 +145,13 @@ export function degrade(
 
 /** The restCost of the cheapest non-empty degrade level (what a refused
  *  search would have needed at least); Infinity for no candidate. */
-export function cheapest(cands: readonly Candidate[], m: CostModel): number {
+export function cheapest(
+  cands: readonly Candidate[],
+  m: CostModel,
+  focus?: (c: Candidate) => boolean,
+): number {
   let least = Infinity;
-  for (const keep of KEEP) {
+  for (const keep of keeps(focus)) {
     const kept = cands.filter(keep);
     if (kept.length > 0) least = Math.min(least, restCost(kept, m));
   }

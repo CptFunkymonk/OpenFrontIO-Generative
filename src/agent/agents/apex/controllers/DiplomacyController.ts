@@ -52,10 +52,14 @@ import { inStall } from "./ExpansionController";
 //                          every strong bordering ally (maxTroops ≥
 //                          webKeepCapRatio × ours, or troops ≥
 //                          webKeepTroopRatio × our cap) is asked to extend,
-//                          kept or not, at the lead; the earlier of two
-//                          strong expiries within webKeepGap is asked
-//                          sooner (planStrong, keepAskTicks); one that
-//                          lapses gets a fresh request (o.webKeepRenew).
+//                          kept or not, at the lead, the earlier of two
+//                          strong asks less than webKeepGap apart sooner
+//                          (o.webKeepAsk; planStrong, keepAskTicks); one
+//                          that lapses gets a fresh request (o.webKeepRenew,
+//                          renewStrong; not one we out-troop without
+//                          o.webKeepRenewThreat); one still refusing its asked
+//                          extension gets gold for Friendly
+//                          (o.webKeepGift, keepGifts).
 //
 // The recall (§3.3.2) is the DefenseController's; both take the dedupe key
 // `ally:<id>`, so no nation gets two requests in a tick. Slots: requests from
@@ -668,8 +672,9 @@ export class DiplomacyController implements Controller {
    * non-bot neighbour of the nation is its friend) [PIN NationAlliance
    * "the extension counts us as its bordering friend"]. Sent while our
    * alliances and pending requests are below A_max (a request at A_max is
-   * refused) and the forecast is at least webKeepRenewMinP; one attempt
-   * per lapse (the web's own requests retry after the 300-tick cooldown).
+   * refused) and the forecast is at least webKeepRenewMinP, and not only
+   * because we threaten it without o.webKeepRenewThreat; one attempt per
+   * lapse (the web's own requests retry after the 300-tick cooldown).
    */
   private renewStrong(v: View, s: ApexState, mem: DiplomacyMemory): void {
     const { o, me, nm, game, tick: t } = v;
@@ -728,6 +733,13 @@ export class DiplomacyController implements Controller {
       if (f.p < o.webKeepRenewMinP) {
         v.log?.(
           `${t} dip keep-renew ${N.name()}: p=${f.p.toFixed(2)} ${f.branch} (not sent)`,
+        );
+        continue;
+      }
+      if (!o.webKeepRenewThreat && f.branch === "threat") {
+        // We out-troop it: no danger now, and a target for the strikes.
+        v.log?.(
+          `${t} dip keep-renew ${N.name()}: p=${f.p.toFixed(2)} threat, we out-troop it (not sent)`,
         );
         continue;
       }

@@ -370,6 +370,70 @@ function denialFor(sv: SearchView, N: Player, ready: number): Candidate | null {
   };
 }
 
+/**
+ * A combined plan for when we own no silo: build one at a safe interior tile
+ * now, then launch at the silo-ready tick (intent + searchNukeSiloReady, past
+ * the 102-tick build). `kind` "mirv" aims a MIRV at N's centre; "hydro" a
+ * hydrogen bomb at N's nearest finished silo. The base policy would build no
+ * silo (WP9), so without this the standalone silo candidate is never chosen
+ * (it pays off only past the round-2 horizon); the delayed launch puts the
+ * payoff — the crippled nation and the land the base then takes — inside the
+ * judged (strong) horizon, so the value comparison can choose it. Null if we
+ * cannot afford the silo plus the launch.
+ */
+function siloThenLaunch(
+  sv: SearchView,
+  N: Player,
+  kind: "mirv" | "hydro",
+): Candidate | null {
+  const { game, me, o, t } = sv;
+  const config = game.config();
+  const gold = me.gold();
+  const siloCost = config.unitInfo(UnitType.MissileSilo).cost(game, me);
+  const siloAim = centerTile(game, me);
+  if (siloAim === null) return null;
+  const ready = Math.max(1, Math.floor(o.searchNukeSiloReady));
+  const launchAt = t + ready;
+  let launch: DirectiveStep;
+  let cost: bigint;
+  if (kind === "mirv") {
+    if (config.isUnitDisabled(UnitType.MIRV)) return null;
+    const aim = centerTile(game, N);
+    if (aim === null) return null;
+    cost = mirvPrice(game, me);
+    launch = buildStep(UnitType.MIRV, aim, `silomirv:${N.id()}`, launchAt);
+  } else {
+    if (config.isUnitDisabled(UnitType.HydrogenBomb)) return null;
+    const silos = finishedSilos(N);
+    if (silos.length === 0) return null;
+    cost = config.unitInfo(UnitType.HydrogenBomb).cost(game, me);
+    const s = silos[0];
+    // A fresh level-1 silo has one slot, so one bomb (the rollout judges
+    // whether a covering SAM downs it).
+    launch = buildStep(
+      UnitType.HydrogenBomb,
+      s.tile(),
+      `silohydro:${N.id()}`,
+      launchAt,
+    );
+  }
+  if (gold < siloCost + cost) return null;
+  return {
+    name: `silo${kind}:${N.id()}`,
+    kind,
+    target: N.id(),
+    steps: [
+      buildStep(UnitType.MissileSilo, siloAim, `silo:${N.id()}`, t),
+      launch,
+    ],
+    lastSend: ready,
+    isBreak: false,
+    strongCheck: true,
+    strong: N.troops() >= o.searchStrongShare * me.troops(),
+    defensive: false,
+  };
+}
+
 export const NUKE: CandidateGenerator = {
   name: "nuke",
   phase: "r1",
@@ -377,9 +441,6 @@ export const NUKE: CandidateGenerator = {
   generate(sv: SearchView, _base: BaseView): Candidate[] {
     const { game, me, o, t, kinds } = sv;
     if (!o.searchNukes) return [];
-    if (game.config().isUnitDisabled(UnitType.MIRV) && !kinds.has("atom")) {
-      // Nothing to do with MIRVs disabled unless bombs are still wanted.
-    }
     const out: Candidate[] = [];
     const ready = readySlots(me);
     const haveSilo = anySilo(me);
@@ -425,6 +486,26 @@ export const NUKE: CandidateGenerator = {
           out.push(c);
           made++;
         }
+      }
+    }
+
+    // silo+launch — when we own no silo (the base policy builds none), build
+    // one now and launch at the silo-ready tick, for the most dangerous
+    // nation: crush it (mirv) or deny its silo (hydro).
+    if (
+      o.searchNukeSilo &&
+      kinds.has("silo") &&
+      !haveSilo &&
+      ranked.length > 0
+    ) {
+      const N = ranked[0].N;
+      if (o.searchNukeMirv && kinds.has("mirv")) {
+        const c = siloThenLaunch(sv, N, "mirv");
+        if (c !== null) out.push(c);
+      }
+      if (o.searchNukeDeny && kinds.has("hydro") && ranked[0].canMirvUs) {
+        const c = siloThenLaunch(sv, N, "hydro");
+        if (c !== null) out.push(c);
       }
     }
 

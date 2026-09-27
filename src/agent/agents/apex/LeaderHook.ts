@@ -72,6 +72,14 @@ export interface LeaderMemory {
    *  the last read (every GOLD_EVERY ticks). */
   mirv: MirvLines | null;
   danger: LeaderDanger | null;
+  /** The silo owner with the most gold at the last read, whatever it aims
+   *  at (rule null), with its time to the price. */
+  richest: {
+    id: PlayerID;
+    gold: number;
+    price: number;
+    eta: number | null;
+  } | null;
   /** Silo owners at the last read. */
   siloOwners: number;
   mirvAt: number;
@@ -100,6 +108,7 @@ function newMemory(): LeaderMemory {
     lines: [],
     mirv: null,
     danger: null,
+    richest: null,
     siloOwners: 0,
     mirvAt: NEVER,
     loggedAt: NEVER,
@@ -148,8 +157,24 @@ export function leaderFloor(
     mem.mirvAt = tick;
     noteGold(mem.gold, game, tick, GOLD_EVERY, o.leaderGoldWindow);
     const d = mirvDanger(game, me, nm, mem.gold, tick);
-    mem.mirv = d.lines;
+    // Finite for JSON: with MIRVs disabled the city line is Infinity.
+    const finite = (x: number) =>
+      Number.isFinite(x) ? x : Number.MAX_SAFE_INTEGER;
+    mem.mirv = {
+      ...d.lines,
+      cityLine: finite(d.lines.cityLine),
+      cityRoom: finite(d.lines.cityRoom),
+    };
     mem.siloOwners = d.threats.length;
+    mem.richest =
+      d.richest === null
+        ? null
+        : {
+            id: d.richest.id,
+            gold: d.richest.gold,
+            price: d.richest.price,
+            eta: Number.isFinite(d.richest.eta) ? d.richest.eta : null,
+          };
     mem.danger =
       d.first === null || d.first.rule === null
         ? null
@@ -201,6 +226,12 @@ export function leaderText(
       ? ""
       : ` danger ${name(d.id)}:${d.rule} gold=${M(d.gold)}/${M(d.price)} ` +
         `eta=${d.eta ?? "never"} at=${d.at ?? "never"}`;
+  const r = mem.richest;
+  const rich =
+    r === null
+      ? ""
+      : ` richest ${name(r.id)} gold=${M(r.gold)}/${M(r.price)} ` +
+        `eta=${r.eta ?? "never"}`;
   return (
     `${v.tick} leader floor=${M(mem.floor)} by=${name(mem.by)} ` +
     `home=${M(v.me.troops())} cap=${M(cap)}` +
@@ -209,7 +240,8 @@ export function leaderText(
       : "") +
     ` [${lines}]` +
     mirv +
-    danger
+    danger +
+    rich
   );
 }
 

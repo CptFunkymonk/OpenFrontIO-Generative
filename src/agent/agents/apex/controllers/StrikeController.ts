@@ -3,10 +3,12 @@ import {
   Player,
   PlayerID,
   PlayerType,
+  Relation,
   UnitType,
 } from "../../../../core/game/Game";
 import type { TileRef } from "../../../../core/game/GameMap";
 import type { NationModel, NationState } from "../../../lib/NationModel";
+import { OwnerGrid, reachCells } from "../../../lib/RaceField";
 import { Prio } from "../../../lib/Scheduler";
 import {
   conquestStack,
@@ -26,6 +28,7 @@ import type { NeighborInfo } from "../../../lib/WorldModel";
 import type { ApexOptions } from "../options";
 import type { Controller, View } from "../policy";
 import type { ApexState } from "../state";
+import { shoreOwners } from "./DiplomacyController";
 import { BORDER_JITTER, incomingFrom, inStall } from "./ExpansionController";
 
 // Strikes on nations (spec §3.5 in M2, §5.2 in M4).
@@ -145,7 +148,10 @@ export function strikeStack(
 //   nations bordering the target, which the conquest makes ours. With
 //   o.strikeFloorReplica (package WP7b, off) an unallied bordering
 //   nation's land line is lowered to its replica line (replicaLine), never
-//   below o.strikeFlowFloor·cap.
+//   below o.strikeFlowFloor·cap; with o.strikeFloorReplicaFirm only where
+//   that line rests on the nation's own choice (firmExit), and with
+//   o.strikeFloorReplicaBoats never below the boats A1's floor kept out
+//   (boatLine).
 // - Value: tiles expected (all of them and gold/strikeGoldPerTile on a
 //   kill, else the stack's worth at the loss per tile) per troop spent (on
 //   a kill the tiles' losses and the answer's cancel, the rest comes home;
@@ -368,11 +374,20 @@ export function windowInput(
  * prototype read every nation through the replica, which drops the unseen
  * ones to lo (o.strikeFloorReplicaUnseen), and kept the floor itself at
  * least lo (o.strikeFlowFloorMin): see those options.
+ *
+ * Review of WP7b: with o.strikeFloorReplicaFirm a line below the land line
+ * holds only where firmExit finds nothing it rests on that ends within a
+ * decision or two (it keeps the land line otherwise); with
+ * o.strikeFloorReplicaBoats the floor is at least min(A1's floor,
+ * boatLine). `why` (logs and tests only) gets the nation whose line set
+ * the floor and the nations firmExit kept at their land lines.
  */
 export function deterrenceFloor(
-  v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models">,
+  v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models"> &
+    Partial<Pick<View, "owners" | "race">>,
   except: PlayerID | null,
   near?: readonly Player[],
+  why?: FloorWhy,
 ): number {
   if (!v.o.strikeDeterrence) return 0;
   const safe = v.nm.sendCapSafe();
@@ -388,7 +403,29 @@ export function deterrenceFloor(
   // o.strikeFloorReplicaSteady: not for a nation whose "another player
   // first" may rest on something about to end (transientExit).
   const steady = replica && v.o.strikeFloorReplicaSteady;
+  // o.strikeFloorReplicaFirm: a lowered line only on the nation's own
+  // choice of a player the strike leaves alone (firmExit).
+  const firm = replica && v.o.strikeFloorReplicaFirm;
   let floor = 0;
+  // A1's floor, the land lines alone (o.strikeFloorReplicaBoats).
+  let landFloor = 0;
+  let bind: FloorWhy["bind"] = null;
+  const raise = (line: number, id: PlayerID) => {
+    if (line > floor) {
+      floor = line;
+      bind = id;
+    }
+  };
+  // The line of an unallied nation with land line `land` (firmExit's
+  // verdict on a lowered one).
+  const lineOf = (N: Player, d: number, land: number, read: boolean) => {
+    const line = read ? replicaLine(v, N.id(), d, lo, land) : land;
+    if (!firm || line >= land) return line;
+    const r = firmExit(v, N, d, line, except);
+    if (r === null) return line;
+    why?.kept.push(`${N.id()}:${r}`);
+    return land;
+  };
   const seen = new Set<PlayerID>();
   for (const info of v.wm.nations) {
     if (info.type !== PlayerType.Nation || info.id === except) continue;
@@ -399,36 +436,231 @@ export function deterrenceFloor(
     const d = v.nm.nextDecision(info.id, v.tick + horizon);
     if (v.me.isFriendly(N)) {
       const T = horizon > 0 ? v.nm.troopsAt(info.id, d) : N.troops();
-      floor = Math.max(floor, BETRAY_SHARE * T);
+      raise(BETRAY_SHARE * T, info.id);
+      landFloor = Math.max(landFloor, BETRAY_SHARE * T);
       continue;
     }
     const g = v.nm.gates(info.id, d);
     if (g === "locked" || g === "belowReserve") continue;
     const land = (v.nm.troopsAt(info.id, d) + 1) / safe;
+    landFloor = Math.max(landFloor, land);
     const st = v.nm.get(info.id);
     const read =
       (unseen || (replica && st?.sharesBorderWithUs === true)) &&
       !(steady && st !== undefined && transientExit(v, N, st) !== null);
-    floor = Math.max(floor, read ? replicaLine(v, info.id, d, lo, land) : land);
+    raise(lineOf(N, d, land, read), info.id);
   }
-  if (!v.o.strikeDetNearTarget || except === null) {
-    return Math.max(floor, least);
-  }
-  for (const N of near ?? targetNeighbours(v, except)) {
-    const id = N.id();
-    if (seen.has(id)) continue;
-    const d = v.nm.nextDecision(id, v.tick + horizon);
-    if (v.me.isFriendly(N)) {
-      const T = horizon > 0 ? v.nm.troopsAt(id, d) : N.troops();
-      floor = Math.max(floor, BETRAY_SHARE * T);
-      continue;
+  if (v.o.strikeDetNearTarget && except !== null) {
+    for (const N of near ?? targetNeighbours(v, except)) {
+      const id = N.id();
+      if (seen.has(id)) continue;
+      const d = v.nm.nextDecision(id, v.tick + horizon);
+      if (v.me.isFriendly(N)) {
+        const T = horizon > 0 ? v.nm.troopsAt(id, d) : N.troops();
+        raise(BETRAY_SHARE * T, id);
+        landFloor = Math.max(landFloor, BETRAY_SHARE * T);
+        continue;
+      }
+      const T = v.nm.troopsAt(id, d);
+      if (T < v.nm.params(id).reserve * v.models.cap(N)) continue;
+      const land = (T + 1) / safe;
+      landFloor = Math.max(landFloor, land);
+      raise(lineOf(N, d, land, unseen), id);
     }
-    const T = v.nm.troopsAt(id, d);
-    if (T < v.nm.params(id).reserve * v.models.cap(N)) continue;
-    const land = (T + 1) / safe;
-    floor = Math.max(floor, unseen ? replicaLine(v, id, d, lo, land) : land);
   }
+  // o.strikeFloorReplicaBoats: no lower than the boats A1's floor kept out.
+  if (replica && v.o.strikeFloorReplicaBoats && floor < landFloor) {
+    const boats = Math.min(landFloor, boatLine(v, horizon));
+    if (boats > floor) {
+      floor = boats;
+      bind = "boats";
+    }
+  }
+  if (why !== undefined) why.bind = bind;
   return Math.max(floor, least);
+}
+
+/** deterrenceFloor's account (logs and tests only). */
+export interface FloorWhy {
+  /** The nation whose line set the floor ("boats": boatLine), or null. */
+  bind: PlayerID | "boats" | null;
+  /** The nations firmExit kept at their land lines, as "id:reason". */
+  kept: string[];
+}
+
+/** firmExit: an enemy of the nation attacked by more than this share of
+ *  its troops is its victim step's pick (AiAttackBehavior.ts:636-653). */
+export const VICTIM_SHARE = 0.5;
+
+/** What a lowered replica line may rest on (firmExit). */
+export type FirmReason =
+  | "cannot"
+  | "attacked"
+  | "tribes"
+  | "target"
+  | "victim"
+  | "hated"
+  | "assist"
+  | "overWater";
+
+/**
+ * Package WP7b (o.strikeFloorReplicaFirm; review of WP7b, F1, F2, F5): why
+ * nation N's replica line `line`, below its land line, may not hold past
+ * its decision d, or null. The replica reads one decision, but the strike
+ * keeps our home low for several (regrowth), so its "another player first"
+ * must rest on N's own choice among players the strike leaves alone.
+ * NationModel does not say which step ended its list, so every other exit
+ * is ruled out from N's state:
+ * - "cannot": at `line` N cannot land-attack us at all. Below the land
+ *   line that is its send cap bound by a third player's troops
+ *   (T − ⌈0.9·max⌉, AiAttackBehavior.ts:986-1032), which drop the moment
+ *   that player launches, or its reserve. quick@20 The Box g9: Nuke
+ *   Thrower's 6.49M bound Train Trader's cap at 3361; Train Trader
+ *   attacked us with 1.13M at 3500;
+ * - "attacked": a non-friendly player but us or a tribe attacks N. Its
+ *   retaliate step answers that attack first, the answer cancels it, and
+ *   any attack lifts N's send cap. Bering Strait g3 at 5471, a 1k remnant;
+ * - "tribes": N borders a tribe. Its bots step attacks up to 100 tribes in
+ *   one decision (AiAttackBehavior.ts:511, 533): gone within one or two;
+ * - "target": N borders the target, or the target is its hated pick or an
+ *   ally's target: the strike takes its land, and on a kill the target.
+ *   The Box g9 at 10961 (King of the Corner's juicy pick was the target);
+ * - "victim": an enemy of N but us is attacked by more than VICTIM_SHARE
+ *   of its troops: its victim step, until the victim dies. Alps g2 at
+ *   8447: Lucerne's victim was Bergamo; it attacked us with 1.74M at 8513;
+ * - "hated", "assist": its most hostile relations and its allies' targets,
+ *   picks at any distance, off its land border;
+ * - "overWater": an enemy of N but us in its nearby() shares no land
+ *   border with it. A send there is a boat of T/5 that can fail
+ *   (AiAttackBehavior.ts:822-830, 1117-1147), which the replica sizes as a
+ *   land attack (NationModel.wouldTargetUs). Europe g6 at 11227.
+ * Left: N's preference (veryWeak, traitor, juicy, weakest, betray) for a
+ * live land neighbour that is neither our target nor anyone's victim.
+ * Read-only.
+ */
+export function firmExit(
+  v: Pick<View, "nm" | "game" | "me">,
+  N: Player,
+  d: number,
+  line: number,
+  target: PlayerID | null,
+): FirmReason | null {
+  const id = N.id();
+  const me = v.me;
+  if (!v.nm.canLandAttackUs(id, line, d)) return "cannot";
+  for (const a of N.incomingAttacks()) {
+    const x = a.attacker();
+    if (x === me || x.type() === PlayerType.Bot || N.isFriendly(x)) continue;
+    return "attacked";
+  }
+  // Its nearby() players at its last full refresh: the list's seats.
+  const enemies: Player[] = [];
+  for (const sid of v.nm.nearbyOf(id) ?? []) {
+    const p = v.game.playerBySmallID(sid);
+    if (!p.isPlayer()) continue;
+    const X = p as Player;
+    if (X === me || !X.isAlive()) continue;
+    if (X.id() === target) return "target";
+    if (N.isFriendly(X)) continue;
+    if (X.type() === PlayerType.Bot) return "tribes";
+    let inc = 0;
+    for (const a of X.incomingAttacks()) inc += a.troops();
+    if (inc > VICTIM_SHARE * X.troops()) return "victim";
+    enemies.push(X);
+  }
+  // Picks at any distance: hated (its Hostile relations, most hostile
+  // first) and assist (its allies' targets).
+  const far: { X: Player; why: FirmReason }[] = [];
+  for (const r of N.allRelationsSorted()) {
+    if (r.relation !== Relation.Hostile) break;
+    const X = r.player;
+    if (X === me || N.isFriendly(X)) continue;
+    if (X.id() === target) return "target";
+    far.push({ X, why: "hated" });
+  }
+  for (const A of N.allies()) {
+    for (const X of A.targets()) {
+      if (X === me || X === N || N.isFriendly(X)) continue;
+      if (X.id() === target) return "target";
+      far.push({ X, why: "assist" });
+    }
+  }
+  for (const f of far) {
+    if (!enemies.includes(f.X)) return f.why;
+  }
+  for (const X of enemies) {
+    if (!landBorder(N, X)) return "overWater";
+  }
+  return null;
+}
+
+/** Whether A and B share a land border (sharesBorderWith: symmetric, 4-
+ *  neighbours), scanning the smaller border. Read-only. */
+function landBorder(A: Player, B: Player): boolean {
+  return A.borderTiles().size <= B.borderTiles().size
+    ? A.sharesBorderWith(B)
+    : B.sharesBorderWith(A);
+}
+
+/** boatLine's reach: a nation's random boat lands within 150 tiles (x and
+ *  y) of one of its shore tiles (AiAttackBehavior.findRandomBoatTarget). */
+export const BOAT_REACH_TILES = 150;
+
+/** boatLine's ocean-shore owners and reach, per OwnerGrid (a new grid every
+ *  OWNER_GRID_EVERY ticks); `from` is the smallID the reach was read from. */
+const BOAT_GRIDS = new WeakMap<
+  OwnerGrid,
+  { from: number; shore: Set<number>; reach: Map<number, number> }
+>();
+
+/**
+ * Package WP7b (o.strikeFloorReplicaBoats; review of WP7b, F4): the most
+ * troops, at its decision o.strikeDetHorizon ticks ahead, of a live
+ * unallied nation that does not border us by land but can boat us: we and
+ * it own an ocean-shore block of the OwnerGrid (shoreOwners) and it lies
+ * within BOAT_REACH_TILES of our land, water counted (reachCells). Its
+ * random boat skips a target with more troops than its own and sends
+ * min(T/5, send cap), never under 20% of the target's troops while nothing
+ * attacks it (AiAttackBehavior.ts:159-207, 961-973): a home above its
+ * troops keeps that boat out. 0 when we own no ocean shore; Infinity
+ * without the grids (reach unknown). Read-only (troopsAt only on a nation
+ * the model has in full, so no refresh runs).
+ */
+export function boatLine(
+  v: Pick<View, "game" | "me" | "nm" | "tick" | "wm"> &
+    Partial<Pick<View, "owners" | "race">>,
+  horizon: number,
+): number {
+  const og = v.owners ?? null;
+  const race = v.race ?? null;
+  if (og === null || race === null) return Infinity;
+  const us = v.me.smallID();
+  let g = BOAT_GRIDS.get(og);
+  if (g === undefined || g.from !== us) {
+    g = {
+      from: us,
+      shore: shoreOwners(og, race, v.game),
+      reach: reachCells(og, race, us, Math.ceil(BOAT_REACH_TILES / race.cell)),
+    };
+    BOAT_GRIDS.set(og, g);
+  }
+  if (!g.shore.has(us)) return 0;
+  let most = 0;
+  for (const sid of g.reach.keys()) {
+    if (!g.shore.has(sid) || v.wm.neighbors.has(sid)) continue;
+    const p = v.game.playerBySmallID(sid);
+    if (!p.isPlayer()) continue;
+    const N = p as Player;
+    if (N.type() !== PlayerType.Nation || !N.isAlive()) continue;
+    if (v.me.isFriendly(N)) continue;
+    const id = N.id();
+    const T =
+      v.nm.get(id)?.full === true
+        ? v.nm.troopsAt(id, v.nm.nextDecision(id, v.tick + horizon))
+        : N.troops();
+    if (T > most) most = T;
+  }
+  return most;
 }
 
 /** Bisection steps of replicaLine: the line to (land − lo)/256. */
@@ -1070,6 +1302,9 @@ export class StrikeController implements Controller {
       const score = perTroop * (vulture ? VULTURE_BONUS : 1);
       if (best !== null && score <= best.score) continue;
       const k = (x: number) => `${Math.round(x / 1000)}k`;
+      // Package WP7b (logs): the nation whose line set det=, and the nations
+      // o.strikeFloorReplicaFirm kept at their land lines.
+      const floorWhy: FloorWhy = { bind: null, kept: [] };
       best = {
         info,
         N,
@@ -1092,7 +1327,7 @@ export class StrikeController implements Controller {
               (pocket ? " pocket" : "")
             : "") +
           (o.strikeDetNearTarget
-            ? ` det=${k(deterrenceFloor(v, info.id, near))}` +
+            ? ` det=${k(deterrenceFloor(v, info.id, near, floorWhy))}` +
               (near !== undefined ? ` near=${near.length}` : "")
             : "") +
           // Package WP7b: the land-line floor the replica replaced (logs).
@@ -1103,7 +1338,11 @@ export class StrikeController implements Controller {
                   info.id,
                   near,
                 ),
-              )}`
+              )}` +
+              (floorWhy.bind !== null ? ` bind=${floorWhy.bind}` : "") +
+              (floorWhy.kept.length > 0
+                ? ` kept=${floorWhy.kept.join(",")}`
+                : "")
             : ""),
       };
     }

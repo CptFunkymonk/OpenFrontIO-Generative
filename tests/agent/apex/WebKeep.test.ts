@@ -505,8 +505,13 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
     options: Record<string, unknown>,
     share: Record<string, number>,
     id: string,
+    usX0 = 40,
   ) {
-    const w = synth({ webKeepStrong: true, web: false, ...options }, share);
+    const w = synth(
+      { webKeepStrong: true, web: false, ...options },
+      share,
+      usX0,
+    );
     w.game.addExecution(new PlayerExecution(w.us));
     while (w.game.ticks() < 110) w.h.step();
     ally(w, id);
@@ -549,6 +554,31 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
     const high = lapse({ webKeepRenewMinP: 1.01 }, { [A]: 1.05 }, A);
     expect(high.requests).toEqual([]);
     expect(high.w.h.logs.some((l) => l.includes("(not sent)"))).toBe(true);
+  });
+
+  test("a strong ally that would accept only because we threaten it (we out-troop it) is renewed only with webKeepRenewThreat", () => {
+    // A 6,000 tiles against our 6,000 (its cap 1.25x ours), holding 0.3x
+    // our cap: our home out-troops it 3.3x.
+    const on = lapse({}, { [A]: 0.3 }, A, 60);
+    expect(on.requests.map((x) => x.tick)).toEqual([on.lapsedAt]);
+    expect(
+      on.w.h.logs.some((l) =>
+        l.includes("dip keep-renew nationaa p=1.00 threat"),
+      ),
+    ).toBe(true);
+    const off = lapse({ webKeepRenewThreat: false }, { [A]: 0.3 }, A, 60);
+    expect(off.requests).toEqual([]);
+    expect(diplomacyMemory(off.w.s).stats.keepRenews).toBeUndefined();
+    expect(
+      off.w.h.logs.some((l) =>
+        l.includes(
+          "dip keep-renew nationaa: p=1.00 threat, we out-troop it (not sent)",
+        ),
+      ),
+    ).toBe(true);
+    // One that out-troops us (1.05x our cap) is renewed either way.
+    const strong = lapse({ webKeepRenewThreat: false }, { [A]: 1.05 }, A);
+    expect(strong.requests.map((x) => x.tick)).toEqual([strong.lapsedAt]);
   });
 
   test("an alliance the ally breaks before its expiry is not renewed at that expiry", () => {
