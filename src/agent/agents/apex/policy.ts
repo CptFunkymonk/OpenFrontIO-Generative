@@ -47,6 +47,7 @@ import { NavalController, NavalMemos } from "./controllers/NavalController";
 import { SpawnController } from "./controllers/SpawnController";
 import { StrikeController } from "./controllers/StrikeController";
 import { homeFloors, NO_FLOORS } from "./HomeTarget";
+import { leaderRefloor } from "./LeaderHook";
 import { ApexOptions, BooleanOption } from "./options";
 import {
   ApexState,
@@ -796,6 +797,22 @@ export class ApexPolicy {
         );
       }
       s.nuke = nuke;
+    } else if (o.leaderGuard) {
+      // Package WP10b (review F1): a break of a plan adopted since the
+      // decision (the search acts at any tick) re-floors now.
+      rt.floors = leaderRefloor(
+        {
+          tick: t,
+          o,
+          me: env.me,
+          models: rt.models,
+          nm: rt.nm,
+          game: env.game,
+          log: env.log,
+        },
+        s,
+        rt.floors,
+      );
     }
     const purse = createPurse(homeAvailable(env.me, rt.floors), rt.floors);
     rt.scheduler.begin(t, env.budget(), purse);

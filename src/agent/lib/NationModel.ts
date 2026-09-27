@@ -662,6 +662,8 @@ interface Tracked {
   prevM: number;
   /** Smallest share of its cap kept after a free-land send (inference). */
   minExpand: number;
+  /** Package WP10b: tick of the full refresh that set `nearby`. */
+  nearbyAt: number;
 }
 
 /** The bits of a player the target and cap replicas read. */
@@ -1213,6 +1215,7 @@ export class NationModel {
         prevT: N.troops(),
         prevM: 0,
         minExpand: Number.POSITIVE_INFINITY,
+        nearbyAt: Number.NEGATIVE_INFINITY,
       };
       this.byId.set(id, tr);
     }
@@ -1265,6 +1268,7 @@ export class NationModel {
       if (x === me) usNearby = true;
     }
     tr.nearby = ids;
+    tr.nearbyAt = this.game.ticks();
     st.bordersFreeLand = tn;
     // sharesBorderWith is symmetric (4-neighbours both ways) and implies
     // nearby(); scan the smaller border.
@@ -1305,6 +1309,15 @@ export class NationModel {
   nearbyOf(n: PlayerID): readonly number[] | undefined {
     const tr = this.byId.get(n);
     return tr !== undefined && tr.st.full ? tr.nearby : undefined;
+  }
+
+  /** Package WP10b: the tick of the full refresh behind nearbyOf(n)
+   *  (−Infinity before one). Read only. */
+  nearbyAt(n: PlayerID): number {
+    const tr = this.byId.get(n);
+    return tr !== undefined && tr.st.full
+      ? tr.nearbyAt
+      : Number.NEGATIVE_INFINITY;
   }
 
   /** The tracked state after at least one full refresh (one lazily if none

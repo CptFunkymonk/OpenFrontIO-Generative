@@ -355,4 +355,98 @@ describe("search triggers", () => {
       [4200, "clock"],
     ]);
   });
+
+  // ── Package WP10n T8 (review F3, F8): the MIRV-threat trigger ─────────
+  describe("T8 MIRV threat", () => {
+    test("fires once per (nation, price) term, not held by minGap", () => {
+      const tr = new Triggers(P);
+      // A threat live from 2500 on; the term is stable, so it fires once.
+      const fires = drive(
+        tr,
+        2400,
+        3200,
+        (t) => (t >= 2500 ? { mirvThreatTerm: "N:25000000" } : {}),
+        () => "run",
+        true,
+      );
+      // The first search at 2400 is the floor (T7); T8 fires once at 2500 and
+      // then the term is used up (a chain follows the act via T2, not T8).
+      const nukes = fires.filter((f) => f[1] === "nuke");
+      expect(nukes).toEqual([[2500, "nuke", "threat"]]);
+    });
+
+    test("a new price after a MIRV launch re-arms the threat", () => {
+      const tr = new Triggers(P);
+      const fires = drive(
+        tr,
+        2400,
+        3200,
+        (t) => ({
+          mirvThreatTerm: t < 2800 ? "N:25000000" : "N:40000000",
+        }),
+        () => "run",
+        true,
+      );
+      const nukes = fires.filter((f) => f[1] === "nuke").map((f) => f[0]);
+      // Once at the first price, again once the price rose (a MIRV launched).
+      expect(nukes).toEqual([2400, 2800]);
+    });
+
+    test("a low-priority chance does not block the high-priority threat (F3)", () => {
+      const tr = new Triggers(P);
+      // chance is live throughout; a threat term opens only at 3150.
+      const fires = drive(
+        tr,
+        2400,
+        3300,
+        (t) => ({
+          mirvChance: true,
+          mirvThreatTerm: t >= 3150 ? "N:25000000" : undefined,
+        }),
+        () => "run",
+        true,
+      );
+      const threat = fires.find((f) => f[2] === "threat");
+      // The threat fires the moment its term opens, despite the chance clock.
+      expect(threat).toEqual([3150, "nuke", "threat"]);
+    });
+
+    test("a refused threat is retried at the budget's retry tick (F3)", () => {
+      const tr = new Triggers(P);
+      const fires = drive(
+        tr,
+        2400,
+        3200,
+        () => ({ mirvThreatTerm: "N:25000000" }),
+        (f, t) =>
+          f.name === "nuke" && f.why === "threat" && t < 2600
+            ? { retryAt: 2600 }
+            : "run",
+        true,
+      );
+      const nukes = fires.filter((f) => f[2] === "threat").map((f) => f[0]);
+      // Refused at 2400 (the floor tick), retried at 2600 (budget can pay),
+      // then the term is used up.
+      expect(nukes).toEqual([2400, 2600]);
+    });
+
+    test("once the threat term is used up, the other triggers run (F8)", () => {
+      const tr = new Triggers(P);
+      const fires = drive(
+        tr,
+        2400,
+        4000,
+        (t) => ({
+          mirvThreatTerm: "N:25000000",
+          inStall: t >= 2600,
+        }),
+        () => "run",
+        true,
+      );
+      // T8 fires once (2400), then the stall onset is searched — the threat
+      // no longer starves the other triggers.
+      expect(fires.some((f) => f[1] === "nuke")).toBe(true);
+      expect(fires.some((f) => f[1] === "stall")).toBe(true);
+    });
+  });
 });

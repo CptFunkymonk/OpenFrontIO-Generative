@@ -23,6 +23,10 @@ declare module "../../lib/Scheduler" {
     det?: number;
     detBy?: PlayerID | null;
     detTerms?: readonly DeterrenceTerm[];
+    /** o.leaderGuard (package WP10b): H without the leader floor, set
+     *  while that floor is above 0; the ExpansionController's stall test
+     *  reads it (troops held for a betrayal line are not idle work). */
+    Hbase?: number;
   }
 }
 
@@ -150,6 +154,7 @@ export function homeFloors(v: HomeTargetInputs, s: ApexState): HomeFloors {
     det: det.floor,
     detBy: det.by,
     detTerms: det.terms,
+    ...(lead > 0 ? { Hbase: H } : {}),
   };
 }
 

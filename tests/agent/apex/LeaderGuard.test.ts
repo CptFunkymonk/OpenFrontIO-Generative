@@ -13,6 +13,7 @@
  * their troops now.
  */
 import {
+  alliancesEndedBy,
   BETRAY_SAFE_SHARE,
   betrayalFloor,
   BetrayalLine,
@@ -29,6 +30,7 @@ import {
   noteGold,
   safeTotal,
 } from "../../../src/agent/lib/LeaderGuard";
+import type { AgentIntent } from "../../../src/agent/Agent";
 import { createModels } from "../../../src/agent/lib/Models";
 import { NationModel } from "../../../src/agent/lib/NationModel";
 import { Player, PlayerType, UnitType } from "../../../src/core/game/Game";
@@ -316,6 +318,203 @@ describe(
   },
 );
 
+describe(
+  "LeaderGuard: review round 2 (F1 our pending breaks, F3 stale lists, F5 the span)",
+  { timeout: 60_000 },
+  () => {
+    const brk = (id: string): AgentIntent => ({
+      type: "breakAlliance",
+      recipient: id,
+    });
+    const bomb = (w: World, unit: UnitType, x: number, y: number) =>
+      ({ type: "build_unit", unit, tile: w.game.ref(x, y) }) as AgentIntent;
+
+    test("alliancesEndedBy: a break with an ally, a MIRV at its tile, a bomb at its structure end it; a break with a traitor ally leaves no traitor mark", () => {
+      const { w } = setup("lg-end");
+      const { B, US, A2, Q } = w.p;
+      ally(A2, US);
+      const none = { traitor: false, leaving: [] };
+      expect(alliancesEndedBy(w.game, US, [brk(B.id())])).toEqual({
+        traitor: true,
+        leaving: [B.id()],
+      });
+      // Not allied: nothing ends.
+      expect(alliancesEndedBy(w.game, US, [brk(Q.id())])).toEqual(none);
+      // A MIRV breaks with the owner of its tile (MIRVExecution): B's
+      // land, not the tribe's or ours.
+      expect(
+        alliancesEndedBy(w.game, US, [bomb(w, UnitType.MIRV, 10, 30)]),
+      ).toEqual({ traitor: true, leaving: [B.id()] });
+      expect(
+        alliancesEndedBy(w.game, US, [bomb(w, UnitType.MIRV, 50, 55)]),
+      ).toEqual(none);
+      expect(
+        alliancesEndedBy(w.game, US, [bomb(w, UnitType.MIRV, 50, 10)]),
+      ).toEqual(none);
+      // An atom (outer radius 30) at Q's land, 31 tiles from ours and
+      // A2's: nothing; 14 tiles from a City of A2's: A2.
+      expect(
+        alliancesEndedBy(w.game, US, [bomb(w, UnitType.AtomBomb, 110, 30)]),
+      ).toEqual(none);
+      structureAt(w, A2, UnitType.City, 60, 40);
+      expect(
+        alliancesEndedBy(w.game, US, [bomb(w, UnitType.AtomBomb, 60, 26)]),
+      ).toEqual({ traitor: true, leaving: [A2.id()] });
+      expect(
+        alliancesEndedBy(w.game, US, [
+          brk(B.id()),
+          bomb(w, UnitType.AtomBomb, 60, 26),
+        ]),
+      ).toEqual({ traitor: true, leaving: [A2.id(), B.id()].sort() });
+      // Breaking with a traitor marks us none (GameImpl.breakAlliance).
+      B.markTraitor();
+      expect(alliancesEndedBy(w.game, US, [brk(B.id())])).toEqual({
+        traitor: false,
+        leaving: [B.id()],
+      });
+    });
+
+    test("traitorSoon and leaving give the lines the break will give: rule (b) for the ally left, B's other allies out of rule (a)'s sum", () => {
+      const { w, nm } = setup("lg-soon");
+      const { B, US, A2 } = w.p;
+      ally(A2, US);
+      nm.refresh(A2.id(), "full");
+      const at = { game: w.game, me: US, nm, tick: w.game.ticks() };
+      expect(
+        betrayalLines(at, EXACT_BETRAYAL)
+          .map((l) => l.id)
+          .sort(),
+      ).toEqual([A2.id(), B.id()].sort());
+      const soon = betrayalLines(
+        { ...at, traitorSoon: true, leaving: [A2.id()] },
+        EXACT_BETRAYAL,
+      );
+      expect(soon.map((l) => l.id)).toEqual([B.id()]);
+      const T = B.troops();
+      // B's ally A2 no longer counts (we are a traitor): the tribe alone.
+      expect(soon[0]).toMatchObject({
+        rule: "traitor",
+        home: Math.ceil(T * 1.2),
+        others: 30_000,
+        total: safeTotal(T, 30_000, 0.33),
+      });
+      // The real break (BreakAllianceExecution, the turn after the send).
+      send(w, "US", { type: "breakAlliance", recipient: A2.id() });
+      tick(w, 2);
+      expect(US.isTraitor()).toBe(true);
+      expect(US.isAlliedWith(A2)).toBe(false);
+      const after = betrayalLines(
+        { game: w.game, me: US, nm, tick: w.game.ticks() },
+        EXACT_BETRAYAL,
+      );
+      const rules = (ls: BetrayalLine[]) =>
+        ls.map(({ id, rule, T, others, total, home, base, alone }) => ({
+          id,
+          rule,
+          T,
+          others,
+          total,
+          home,
+          base,
+          alone,
+        }));
+      expect(rules(after)).toEqual(rules(soon));
+    });
+
+    test("F3: a refresh from before the ally's previous decision is stale, and the lines read Z.nearby() now (a border lost, a border gained)", () => {
+      const { w, nm } = setup("lg-stale");
+      const { B, US } = w.p;
+      const id = B.id();
+      const lines = () =>
+        betrayalLines(
+          { game: w.game, me: US, nm, tick: w.game.ticks() },
+          EXACT_BETRAYAL,
+        );
+      const pastDecision = () => {
+        const d = nm.nextDecision(id, w.game.ticks() + 1);
+        tick(w, d - w.game.ticks() + 1);
+        const prev = nm.nextDecision(id, w.game.ticks() + 1) - nm.params(id).rate;
+        expect(nm.nearbyAt(id)).toBeLessThan(prev);
+      };
+      // We leave B's border: a strip of free land between us.
+      for (let x = 20; x < 25; x++) {
+        for (let y = 0; y < 30; y++) US.relinquish(w.game.ref(x, y));
+      }
+      expect(B.nearby().includes(US)).toBe(false);
+      // The refresh of this tick is fresh: its list still has us.
+      expect(nm.nearbyAt(id)).toBe(w.game.ticks());
+      expect(lines().map((l) => [l.id, l.fresh])).toEqual([[id, true]]);
+      // Past B's next decision it is stale: B.nearby() now, no line.
+      pastDecision();
+      expect(lines()).toEqual([]);
+      // Back at its border, with a fresh refresh that has us not: none;
+      // stale, B.nearby() has us again: the line.
+      nm.refresh(id, "full");
+      for (let x = 20; x < 25; x++) {
+        for (let y = 0; y < 30; y++) US.conquer(w.game.ref(x, y));
+      }
+      expect(lines()).toEqual([]);
+      pastDecision();
+      expect(lines().map((l) => [l.id, l.fresh])).toEqual([[id, false]]);
+    });
+
+    test("F3: with a stale list, a \"locked\" gate (read from the same refresh) skips the ally only while it borders free land now", () => {
+      const f = setup("lg-lock", 20_000, 30_000, true);
+      const { B, US } = f.w.p;
+      const id = B.id();
+      const gated = { ...EXACT_BETRAYAL, gates: true };
+      const lines = () =>
+        betrayalLines(
+          { game: f.w.game, me: US, nm: f.nm, tick: f.w.game.ticks() },
+          gated,
+        );
+      // Fresh, next to free land: locked, left out.
+      expect(lines()).toEqual([]);
+      // B takes the free land; past its next decision the list is stale.
+      for (let x = 0; x < 3; x++) {
+        for (let y = 0; y < 60; y++) B.conquer(f.w.game.ref(x, y));
+      }
+      const d = f.nm.nextDecision(id, f.w.game.ticks() + 1);
+      tick(f.w, d - f.w.game.ticks() + 1);
+      // The model still says locked (its refresh saw free land) ...
+      const d1 = f.nm.nextDecision(id, f.w.game.ticks() + 1);
+      expect(f.nm.gates(id, d1)).toBe("locked");
+      // ... but B.nearby() holds none now: the line is kept.
+      expect(lines().map((l) => [l.id, l.fresh, l.gate])).toEqual([
+        [id, false, "locked"],
+      ]);
+    });
+
+    test("F5: with a span, T is the larger of the next decision's and the first at or after tick + span", () => {
+      const { w, nm } = setup("lg-span");
+      const { B, US } = w.p;
+      B.setTroops(Math.floor(w.config.maxTroops(B) / 2));
+      const id = B.id();
+      const t = w.game.ticks();
+      const d = nm.nextDecision(id, t + 1);
+      const one = lineOf(w, nm);
+      expect(one).toMatchObject({ d, d2: d, T: nm.troopsAt(id, d) });
+      // tick + span = d + 1: the decision after d.
+      const span = d - t + 1;
+      const [l] = betrayalLines(
+        { game: w.game, me: US, nm, tick: t, span },
+        EXACT_BETRAYAL,
+      );
+      const d2 = d + nm.params(id).rate;
+      expect(nm.nextDecision(id, t + span)).toBe(d2);
+      expect(l).toMatchObject({ d, d2, T: nm.troopsAt(id, d2) });
+      expect(l.T).toBeGreaterThan(one.T);
+      expect(l.total).toBe(safeTotal(nm.troopsAt(id, d2), 50_000, 0.33));
+      // A span that ends before d changes nothing.
+      const [same] = betrayalLines(
+        { game: w.game, me: US, nm, tick: t, span: d - t },
+        EXACT_BETRAYAL,
+      );
+      expect(same).toMatchObject({ d, d2: d, T: one.T });
+    });
+  },
+);
+
 describe("LeaderGuard: betrayalFloor and levelsFor", () => {
   const line = (
     id: string,
@@ -326,7 +525,9 @@ describe("LeaderGuard: betrayalFloor and levelsFor", () => {
     id,
     smallID: 0,
     d: 0,
+    d2: 0,
     gate: "open",
+    fresh: true,
     T: 0,
     others: 0,
     alone: false,
@@ -360,6 +561,39 @@ describe("LeaderGuard: betrayalFloor and levelsFor", () => {
     expect(betrayalFloor([], 3_000_000, { maxShare: 0.8 })).toEqual({
       floor: 0,
       by: null,
+      capShort: 0,
+      shortBy: null,
+    });
+  });
+
+  test("review F4: a line above maxShare x cap that home holds now stays the floor and still asks for cap; one home is under drops out", () => {
+    const lines = [line("a", 3_500_000, 3_500_000, "alone")];
+    // cap 4M: max 3.2M; 3.5M / 0.8 - 4M = 375k of cap asked either way.
+    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_600_000)).toEqual({
+      floor: 3_500_000,
+      by: "a",
+      capShort: 375_000,
+      shortBy: "a",
+    });
+    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_500_000).floor).toBe(3_500_000);
+    expect(betrayalFloor(lines, 4_000_000, { maxShare: 0.8 }, 3_499_999)).toEqual({
+      floor: 0,
+      by: null,
+      capShort: 375_000,
+      shortBy: "a",
+    });
+    // A traitor's line: held while home holds it, else its base; it asks
+    // for no cap (it lasts only while we are a traitor).
+    const t = [line("b", 3_500_000, 500_000, "traitor")];
+    expect(betrayalFloor(t, 4_000_000, { maxShare: 0.8 }, 3_600_000)).toEqual({
+      floor: 3_500_000,
+      by: "b",
+      capShort: 0,
+      shortBy: null,
+    });
+    expect(betrayalFloor(t, 4_000_000, { maxShare: 0.8 }, 3_400_000)).toEqual({
+      floor: 500_000,
+      by: "b",
       capShort: 0,
       shortBy: null,
     });

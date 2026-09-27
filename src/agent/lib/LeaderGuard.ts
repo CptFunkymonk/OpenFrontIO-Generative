@@ -1,4 +1,5 @@
 import { findJuiciestTarget } from "../../core/execution/nation/NationUtils";
+import { listNukeBreakAlliance } from "../../core/execution/Util";
 import {
   Difficulty,
   Game,
@@ -8,6 +9,7 @@ import {
   PlayerType,
   UnitType,
 } from "../../core/game/Game";
+import type { AgentIntent } from "../Agent";
 import { steamrollLine } from "./GoldPolicy";
 import { Models } from "./Models";
 import { Gate, NationModel } from "./NationModel";
@@ -30,8 +32,19 @@ import { Gate, NationModel } from "./NationModel";
 //   (b) not Easy: we are a traitor and our home < 1.2 T_Z;
 //   (c) not Easy: we are Z's only bordering player and 3 x our home < T_Z.
 // So each rule is a line our troops must hold: (a) on home + attacks, the
-// others on home alone. The line that matters is the one at Z's next
-// decision, with T_Z its troops then (NationModel.troopsAt: its regrowth).
+// others on home alone. The line that matters is the one at the first
+// decision of Z that sees a send: the floors hold until they are computed
+// again (`span` ticks on, the policy's thinkEvery), and a send in that time
+// is first seen at Z's next decision after it, so T_Z is its troops at the
+// later of its next decision and its first at or after tick + span
+// (NationModel.troopsAt: its regrowth).
+//
+// Our own breaks (review F1): an act of ours due before the floors are
+// computed again that ends an alliance (a breakAlliance of the search's
+// directive, or its MIRV or bomb at an ally) makes us a traitor a tick or
+// two later, before the next recompute: alliancesEndedBy reads what it will
+// end, and betrayalLines counts us a traitor then (rule b; rule a's sum
+// drops Z's other allies) and drops the allies it leaves.
 //
 // The MIRV lines [PIN NationMirvTargeting] (NationMIRVBehavior.ts, NMB): at
 // each decision a nation with a silo (any state) and gold >= the MIRV's
@@ -84,12 +97,14 @@ export interface BetrayalParams {
    *  takes land); 1, today's attacks count in full, as the nation counts
    *  them now. */
   ourOut: number;
-  /** A home floor above this share of our cap is not holdable: it is left
-   *  out of the floor and counted in capShort instead. */
+  /** A home floor above this share of our cap is not holdable unless home
+   *  holds it now: it is counted in capShort, and left out of the floor
+   *  when home is under it. */
   maxShare: number;
-  /** Leave out an ally whose gate at its next decision is "locked"
-   *  (NationModel.gates: it sends at free land, or at a tribe holding
-   *  structures, and returns before its strategy list). */
+  /** Leave out an ally whose gate is "locked" at the decisions the line is
+   *  for (NationModel.gates: it sends at free land, or at a tribe holding
+   *  structures, and returns before its strategy list); with a stale
+   *  refresh (see borderingOf), only while it borders free land now. */
   gates: boolean;
 }
 
@@ -102,16 +117,22 @@ export const EXACT_BETRAYAL: BetrayalParams = Object.freeze({
   gates: false,
 });
 
-/** One bordering ally's line at its next decision. Plain data. */
+/** One bordering ally's line at its next decisions. Plain data. */
 export interface BetrayalLine {
   id: PlayerID;
   smallID: number;
-  /** Z's next decision the line is for. */
+  /** Z's next decision after the tick. */
   d: number;
+  /** Z's first decision at or after tick + span (d with span 1): a send
+   *  before the floors are computed again is first seen at d or here. */
+  d2: number;
   /** nm.gates(Z, d). */
   gate: Gate;
-  /** The troops the line is read against: troopsAt(Z, d) + allyOut x the
-   *  troops of Z's attacks. */
+  /** Its bordering players came from NationModel's list (a full refresh
+   *  at or after Z's previous decision), not from Z.nearby() now. */
+  fresh: boolean;
+  /** The troops the line is read against: the larger of troopsAt(Z, d)
+   *  and troopsAt(Z, d2), + allyOut x the troops of Z's attacks. */
   T: number;
   /** Rule (a)'s others: the troops and attack troops of Z's bordering
    *  players other than us that isSafeToBetray counts (-1 when rule (a)
@@ -142,6 +163,15 @@ export interface BetrayalInputs {
   me: Player;
   nm: NationModel;
   tick: number;
+  /** Ticks until the floor is computed again (review F5; the policy's
+   *  thinkEvery): each line is for Z's decisions up to its first at or
+   *  after tick + span. Default 1: the next decision only. */
+  span?: number;
+  /** Count us a traitor (review F1): an act of ours due before the next
+   *  recompute breaks with an ally that is none (alliancesEndedBy). */
+  traitorSoon?: boolean;
+  /** Allies whose alliance that act ends: no line (we break first). */
+  leaving?: readonly PlayerID[];
 }
 
 /** The troops of a player's attacks (Player.outgoingAttacks, as NAB :485-
@@ -165,32 +195,54 @@ export function safeTotal(T: number, others: number, share: number): number {
   return n;
 }
 
+/** Z's bordering players, and where they came from. */
+interface Bordering {
+  near: Player[];
+  /** From NationModel's list (see borderingOf). */
+  fresh: boolean;
+  /** Z.nearby() now holds free land (read only when not fresh). */
+  free: boolean;
+}
+
 /** The bordering players of Z as its maybeAttack sees them: the players in
  *  Z.nearby() (land 4-adjacent to its border, and across a strip of water
  *  up to 4 tiles wide, PlayerImpl.ts:626-650; AiAttackBehavior.ts:104-133
  *  adds the same owners again), from NationModel's last full refresh of Z
- *  when there is one. */
-function borderingOf(game: Game, nm: NationModel, Z: Player): Player[] {
-  const ids = nm.nearbyOf(Z.id());
+ *  when that came at or after Z's decision before `d`, else from
+ *  Z.nearby() now (review F3: an ally outside the policy's refresh list
+ *  keeps its last list for good; a getter, whose memo is its own). */
+function borderingOf(
+  game: Game,
+  nm: NationModel,
+  Z: Player,
+  d: number,
+): Bordering {
+  const id = Z.id();
+  const ids = nm.nearbyOf(id);
   const out: Player[] = [];
-  if (ids !== undefined) {
+  if (ids !== undefined && nm.nearbyAt(id) >= d - nm.params(id).rate) {
     for (const sid of ids) {
       const x = game.playerBySmallID(sid);
       if (x.isPlayer() && x.isAlive()) out.push(x as Player);
     }
-    return out;
+    return { near: out, fresh: true, free: false };
   }
+  let free = false;
   for (const x of Z.nearby()) {
-    if (x.isPlayer() && x.isAlive()) out.push(x as Player);
+    if (!x.isPlayer()) free = true;
+    else if (x.isAlive()) out.push(x as Player);
   }
-  return out;
+  return { near: out, fresh: false, free };
 }
 
 /**
  * The betrayal line of every living nation allied with us that has us
- * among its bordering players, at its next decision after `tick`, in
- * smallID order (deterministic). With p.gates, an ally whose gate there is
- * "locked" is left out. Rules by difficulty as in maybeBetray.
+ * among its bordering players, for its decisions from the next after
+ * `tick` to its first at or after tick + span, in smallID order
+ * (deterministic). With p.gates, an ally whose gate is "locked" at both is
+ * left out (with a stale list, only while it borders free land now). Rules
+ * by difficulty as in maybeBetray; with traitorSoon we count as a traitor,
+ * and the allies in `leaving` have no line.
  */
 export function betrayalLines(
   x: BetrayalInputs,
@@ -205,21 +257,36 @@ export function betrayalLines(
   const weakRule =
     difficulty === Difficulty.Medium ||
     (easy && me.type() !== PlayerType.Human);
-  const traitor = me.isTraitor();
+  const traitor = me.isTraitor() || x.traitorSoon === true;
+  const span = Math.max(1, x.span ?? 1);
+  const leaving = new Set(x.leaving ?? []);
   const ours = attackTroops(me);
   const out: BetrayalLine[] = [];
   const allies = me
     .allies()
-    .filter((Z) => Z.type() === PlayerType.Nation && Z.isAlive())
+    .filter(
+      (Z) => Z.type() === PlayerType.Nation && Z.isAlive() && !leaving.has(Z.id()),
+    )
     .sort((a, b) => a.smallID() - b.smallID());
   for (const Z of allies) {
-    const near = borderingOf(game, nm, Z);
-    if (!near.includes(me)) continue;
     const id = Z.id();
     const d = nm.nextDecision(id, tick + 1);
+    const b = borderingOf(game, nm, Z, d);
+    const near = b.near;
+    if (!near.includes(me)) continue;
+    const d2 = span > 1 ? Math.max(d, nm.nextDecision(id, tick + span)) : d;
     const gate = nm.gates(id, d);
-    if (p.gates && gate === "locked") continue;
-    const T = nm.troopsAt(id, d) + p.allyOut * attackTroops(Z);
+    if (
+      p.gates &&
+      gate === "locked" &&
+      (b.fresh || b.free) &&
+      (d2 === d || nm.gates(id, d2) === "locked")
+    ) {
+      continue;
+    }
+    const T =
+      Math.max(nm.troopsAt(id, d), nm.troopsAt(id, d2)) +
+      p.allyOut * attackTroops(Z);
     // Z's borderingFriends and borderingEnemies (isFriendly, as
     // AiAttackBehavior.ts:128-133 splits them; sorted by troops, ascending
     // and stable, :125-127).
@@ -269,7 +336,9 @@ export function betrayalLines(
       id,
       smallID: Z.smallID(),
       d,
+      d2,
       gate,
+      fresh: b.fresh,
       T,
       others: hard ? others : -1,
       alone,
@@ -285,7 +354,7 @@ export function betrayalLines(
 
 /** The floor the lines put on our home, and what they ask of our cap. */
 export interface BetrayalFloor {
-  /** The largest holdable line's home troops (0: none). */
+  /** The largest held line's home troops (0: none). */
   floor: number;
   /** The ally behind `floor`. */
   by: PlayerID | null;
@@ -297,37 +366,102 @@ export interface BetrayalFloor {
   shortBy: PlayerID | null;
 }
 
-/** Folds the lines into a home floor: lines above p.maxShare x cap are not
- *  holdable (holding them would freeze every spend and still not stop the
- *  betrayal), so they drop out of the floor and into capShort. */
+/** Folds the lines into a home floor. A line is held when it is at most
+ *  p.maxShare x cap or at most our home now (review F4: dropping a line
+ *  home holds would let a send cause the betrayal that holding avoids); a
+ *  line home is under and above maxShare x cap is not holdable (holding it
+ *  would freeze every spend and still not stop the betrayal) and drops out
+ *  of the floor, a traitor's line to the line that outlasts it. Every
+ *  lasting line above maxShare x cap counts in capShort, held or not. */
 export function betrayalFloor(
   lines: readonly BetrayalLine[],
   cap: number,
   p: Pick<BetrayalParams, "maxShare">,
+  home = 0,
 ): BetrayalFloor {
   const max = p.maxShare * cap;
+  const held = (h: number) => h <= max || h <= home;
   let floor = 0;
   let by: PlayerID | null = null;
   let capShort = 0;
   let shortBy: PlayerID | null = null;
   for (const l of lines) {
-    // A traitor's line above the cap drops to the lines that outlast it.
-    const h = l.home <= max ? l.home : l.base;
-    if (h <= max) {
-      if (h > floor) {
-        floor = h;
-        by = l.id;
-      }
-      continue;
+    const h = held(l.home) ? l.home : l.base;
+    if (held(h) && h > floor) {
+      floor = h;
+      by = l.id;
     }
-    if (!(p.maxShare > 0)) continue;
-    const short = h / p.maxShare - cap;
+    if (l.base <= max || !(p.maxShare > 0)) continue;
+    const short = l.base / p.maxShare - cap;
     if (short > capShort) {
       capShort = short;
       shortBy = l.id;
     }
   }
   return { floor, by, capShort, shortBy };
+}
+
+/** What our pending acts do to our alliances (alliancesEndedBy). */
+export interface PendingBreaks {
+  /** One ends an alliance with an ally that is no traitor (nor
+   *  disconnected): GameImpl.breakAlliance marks us a traitor for
+   *  Config.traitorDuration ticks. */
+  traitor: boolean;
+  /** The allies whose alliance they end, sorted. */
+  leaving: PlayerID[];
+}
+
+/**
+ * The alliances these intents of ours would end if they went through, read
+ * from the game now (review F1):
+ * - breakAlliance with an ally (BreakAllianceExecution, in the turn after
+ *   the send);
+ * - a MIRV at a tile an ally owns (MIRVExecution breaks with the target
+ *   when the MIRV spawns);
+ * - an atom or hydrogen bomb whose blast holds a structure of an ally or
+ *   more than nukeAllianceBreakThreshold of its weighted tiles (NukeExecution
+ *   .maybeBreakAlliances: Util.listNukeBreakAlliance, a read).
+ */
+export function alliancesEndedBy(
+  game: Game,
+  me: Player,
+  intents: readonly AgentIntent[],
+): PendingBreaks {
+  const ended = new Map<PlayerID, Player>();
+  const end = (p: Player) => {
+    if (p !== me && me.isAlliedWith(p)) ended.set(p.id(), p);
+  };
+  const config = game.config();
+  for (const i of intents) {
+    if (i.type === "breakAlliance") {
+      if (game.hasPlayer(i.recipient)) end(game.player(i.recipient));
+      continue;
+    }
+    if (i.type !== "build_unit" || !game.isValidRef(i.tile)) continue;
+    if (i.unit === UnitType.MIRV) {
+      const o = game.owner(i.tile);
+      if (o.isPlayer()) end(o as Player);
+    } else if (
+      i.unit === UnitType.AtomBomb ||
+      i.unit === UnitType.HydrogenBomb
+    ) {
+      const hit = listNukeBreakAlliance({
+        game,
+        targetTile: i.tile,
+        magnitude: config.nukeMagnitudes(i.unit),
+        threshold: config.nukeAllianceBreakThreshold(),
+      });
+      for (const sid of [...hit].sort((a, b) => a - b)) {
+        const p = game.playerBySmallID(sid);
+        if (p.isPlayer()) end(p as Player);
+      }
+    }
+  }
+  let traitor = false;
+  for (const p of ended.values()) {
+    if (!p.isTraitor() && !p.isDisconnected()) traitor = true;
+  }
+  return { traitor, leaving: [...ended.keys()].sort() };
 }
 
 /** The City levels to add so that our cap, cities under construction

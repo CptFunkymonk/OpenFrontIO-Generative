@@ -1069,8 +1069,9 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  (the replica sizes that send as a land attack). R1 screen, quick@20:
    *  of 13 lowered launches, 4 of the 9 resting on another nation's state
    *  were followed by that nation's attack on us within 34-139 ticks (The
-   *  Box g9 3361 and 5300, Alps g2 8447, Bering Strait g3 5471); the 3
-   *  that pass this guard were not. Implies strikeFloorReplicaSteady's
+   *  Box g9 3361 and 5300, Alps g2 8447, Bering Strait g3 5471). A
+   *  preference that passes this guard can still turn within a decision
+   *  or two (strikeFloorReplicaRegrow). Implies strikeFloorReplicaSteady's
    *  guard. Off. */
   strikeFloorReplicaFirm: boolean;
   /** With strikeFloorReplica (review of WP7b, F4): the floor is at least
@@ -1081,7 +1082,8 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  and never sends under 20% of our home, so A1's floor, which ignores
    *  boats, kept them out only while it held our home above their troops.
    *  R1 screen, quick@20 Europe g6 at 11227: home 4.35M to 1.65M, and
-   *  Kazakhstan (2.69M, over the Caspian) landed 446k at 11252. Off. */
+   *  Kazakhstan (2.69M, no land border with us) landed 446k at 11252.
+   *  Off. */
   strikeFloorReplicaBoats: boolean;
   /** With strikeFloorReplica: trust the replica for a nation's next
    *  decision d only. A lowered line is at least the home from which ours
@@ -1340,6 +1342,52 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  act3 did), not only the plan's +50, +150, +300, +600 and the judged
    *  horizon (§2.2): about twice the search-check lines. */
   searchCheckAll: boolean;
+
+  // Package WP3, the candidate generators (lib/search/cands/keep.ts,
+  // defend.ts, boat.ts, rank.ts; docs/14-m4-plan.md §2.4, §2.5 round 2b,
+  // §3 WP3), registered in lib/search/Registry.ts. Each is off until an
+  // A/B adopts it; with all of them off the search is WP2's exactly.
+  /** keep:Z (keep.ts): at an alliance end (a bordering ally expiring
+   *  within searchLapseLead ticks), ask its extension at the expiry −
+   *  extendLead and, if the alliance lapses anyway, a fresh alliance
+   *  request the tick after the expiry. For strong allies (see
+   *  searchKeepMinShare) outside the web's keep list (s.web.allySet), which
+   *  the web lets lapse unasked. */
+  searchKeep: boolean;
+  /** An ally is strong for keep plans when its troops are at least this
+   *  share of our home troops, or its cap at least 1.1 × ours (no home
+   *  deters it once the alliance ends); 0: every bordering ally. */
+  searchKeepMinShare: number;
+  /** keep:Z+gift (with searchKeep or searchDefend): the keep plan with a
+   *  gold gift first, worth DiplomacyController.friendPoints: it holds the
+   *  ally Friendly (then it accepts 67% of the time at each decision) to 60
+   *  ticks past the expiry. Made for a strong ally, kept by the web or
+   *  not, whose extension forecast is below searchKeepGiftP. */
+  searchKeepGift: boolean;
+  /** keep:Z+gift only while the NationModel's extension forecast is below
+   *  this. */
+  searchKeepGiftP: number;
+  /** The most of our gold a keep gift may take. */
+  searchKeepGiftShare: number;
+  /** Round 2b (defend.ts; §2.5): when the base rollout, by its longest
+   *  horizon, shows a nation attacking us (or a loss of over 10% of our
+   *  tiles), plans for each attacker, judged at that horizon: keep:N (and
+   *  keep:N+gift) for an ally at the search, ally:N:2b (clear its foe mark,
+   *  stop our embargo on it, then ask the alliance now) for the others. */
+  searchDefend: boolean;
+  /** boat:N:f (boat.ts): while no nation borders us, send share f
+   *  (searchFracs) of purse.available("strike") by boat to the shore tile
+   *  of a nation across water nearest our coast on the voyage field, the
+   *  route and landing clear of hostile warships; trigger T6 asks it. */
+  searchBoat: boolean;
+  /** The longest voyage (tiles, on the voyage field) a boat plan takes. */
+  searchBoatMaxVoyage: number;
+  /** rank.ts: the prior that picks the searchK nations given strike and
+   *  break plans: "contact" (as WP2's core: by contact), "prey" (the
+   *  predator's kill cost per tile, lowest first), "yield" (A1's
+   *  strikeYield per troop of the strike purse, highest first), "killsim"
+   *  (a 600-tick conquest simulation's tiles per troop, highest first). */
+  searchRank: string;
 
   // Package WP10n NUKES: our own MIRV and bomb candidates for the search,
   // and the MIRV-threat trigger T8 (lib/search/cands/nuke.ts,
@@ -1841,6 +1889,17 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   searchMinGap: 300,
   searchBreakFoe: false,
   searchCheckAll: false,
+
+  // Package WP3, the candidate generators (off).
+  searchKeep: false,
+  searchKeepMinShare: 0.9,
+  searchKeepGift: true,
+  searchKeepGiftP: 0.5,
+  searchKeepGiftShare: 0.9,
+  searchDefend: false,
+  searchBoat: false,
+  searchBoatMaxVoyage: 1500,
+  searchRank: "contact",
 
   // Package WP10n NUKES (off).
   searchNukes: false,

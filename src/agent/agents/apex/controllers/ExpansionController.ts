@@ -938,7 +938,8 @@ class AllocatorRun {
     const home = Math.min(v.wm.home, Math.ceil(cap));
     const full = home > o.stallFrac * cap;
     const idle =
-      home > v.purse.floors.H &&
+      // Package WP10b: H without the leader floor (o.leaderGuard).
+      home > (v.purse.floors.Hbase ?? v.purse.floors.H) &&
       !this.worked &&
       v.wm.boatsInFlight === 0 &&
       !(o.tn && v.wm.freeFrontier > 0);

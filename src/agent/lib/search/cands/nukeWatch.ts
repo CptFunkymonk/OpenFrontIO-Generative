@@ -7,7 +7,6 @@ import {
 } from "../../../../core/game/Game";
 import type { TileRef } from "../../../../core/game/GameMap";
 import { ParabolaUniversalPathFinder } from "../../../../core/pathfinding/PathFinder.Parabola";
-import type { ApexOptions } from "../../../agents/apex/options";
 
 // Package WP10n round 2 (review findings F2, F3, F4): the live, stateful
 // side of the nuke candidates — the observed income of each nation (so the
@@ -134,10 +133,9 @@ export function flightTiles(
   dst: TileRef,
   nukeSpeed: number,
 ): TileRef[] {
-  const finder = new ParabolaUniversalPathFinder(
-    game.map(),
-    { increment: nukeSpeed },
-  );
+  const finder = new ParabolaUniversalPathFinder(game.map(), {
+    increment: nukeSpeed,
+  });
   return finder.findPath(src, dst) ?? [dst];
 }
 

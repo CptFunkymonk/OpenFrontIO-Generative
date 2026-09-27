@@ -50,6 +50,7 @@ import {
   columns,
   idOf,
   pastImmunity,
+  samAt,
   setGold,
   siloAt,
   world,
@@ -123,7 +124,8 @@ describe("WP10n nuke candidates", () => {
     const mirv = cands.find((c) => c.name === `mirv:${idOf("ALLY")}`)!;
     expect(mirv.kind).toBe("mirv");
     expect(mirv.target).toBe(idOf("ALLY"));
-    expect(mirv.steps).toHaveLength(1);
+    // Review F1: the MIRV plan carries its own follow-up conquest — the build,
+    // a foe mark on N, then one attack per searchFracs share (2 shares here).
     const mstep = mirv.steps[0].p!.intent;
     expect(mstep.type).toBe("build_unit");
     expect((mstep as { unit: string }).unit).toBe(UnitType.MIRV);
@@ -131,14 +133,34 @@ describe("WP10n nuke candidates", () => {
     const aim = (mstep as { tile: number }).tile;
     expect(w.game.hasOwner(aim)).toBe(true);
     expect(w.game.owner(aim)).toBe(w.p.ALLY);
-    // A hydrogen denial (we can pay 5M) at the ally's finished silo.
+    // A foe mark on N so the web does not re-ally the nation we MIRVed.
+    const foe = mirv.steps.find((s) => s.foe !== undefined);
+    expect(foe?.foe?.id).toBe(idOf("ALLY"));
+    // Attack steps on N (one per share), the last past the warhead landing,
+    // and lastSend points at it so the horizon covers the conquest.
+    const atks = mirv.steps.filter((s) => s.p?.intent.type === "attack");
+    expect(atks.length).toBe(2);
+    for (const a of atks) {
+      expect((a.p!.intent as { targetID: string }).targetID).toBe(idOf("ALLY"));
+      expect(a.at).toBeGreaterThan(3000);
+    }
+    expect(mirv.lastSend).toBeGreaterThan(0);
+    expect(mirv.defensive).toBe(true);
+    // A hydrogen denial (we can pay 5M) at the ally's finished silo, and an
+    // atom variant too (review F4: both are offered, the rollout picks).
     const deny = cands.find((c) => c.name === `hydro:${idOf("ALLY")}`);
     expect(deny).toBeDefined();
     expect(deny!.kind).toBe("hydro");
+    expect(deny!.defensive).toBe(true);
     const dstep = deny!.steps[0].p!.intent as { unit: string; tile: number };
     expect(dstep.unit).toBe(UnitType.HydrogenBomb);
     expect(dstep.tile).toBe(allySilo.tile());
-    // No silo candidate: we already own a silo.
+    // The ally has no SAM here, so a single bomb suffices (amount 1).
+    expect((dstep as { amount?: number }).amount).toBeUndefined();
+    expect(cands.some((c) => c.name === `atom:${idOf("ALLY")}`)).toBe(true);
+    // The alliance-preserving price-denial MIRV at a tribe (there is no tribe
+    // here, so it is absent; covered by its own test below).
+    // No standalone silo candidate (review F5: removed).
     expect(names).not.toContain("silo");
   });
 
@@ -150,7 +172,8 @@ describe("WP10n nuke candidates", () => {
     setGold(w.p.ALLY, 30_000_000n);
     const cands = NUKE.generate(view(w, "US", opts()), NO_BASE);
     const names = cands.map((c) => c.name);
-    expect(names).toContain("silo");
+    // No standalone silo candidate (review F5): only the combined plans.
+    expect(names).not.toContain("silo");
     // No same-tick mirv/denial: they need a finished silo of ours now.
     expect(names).not.toContain(`mirv:${idOf("ALLY")}`);
     expect(names).not.toContain(`hydro:${idOf("ALLY")}`);
@@ -159,26 +182,30 @@ describe("WP10n nuke candidates", () => {
     const combo = cands.find((c) => c.name === `silomirv:${idOf("ALLY")}`)!;
     expect(combo).toBeDefined();
     expect(combo.kind).toBe("mirv");
-    expect(combo.steps).toHaveLength(2);
-    const [siloStep, mirvStep] = combo.steps;
+    // silo build, MIRV launch, a foe mark, then the follow-up attacks (F1).
+    const siloStep = combo.steps[0];
+    const mirvStep = combo.steps[1];
     expect((siloStep.p!.intent as { unit: string }).unit).toBe(
       UnitType.MissileSilo,
     );
     expect(siloStep.at).toBe(3000);
+    expect(w.game.owner((siloStep.p!.intent as { tile: number }).tile)).toBe(
+      w.p.US,
+    );
     expect((mirvStep.p!.intent as { unit: string }).unit).toBe(UnitType.MIRV);
     // The launch is scheduled after the silo is ready (searchNukeSiloReady).
     expect(mirvStep.at).toBe(3000 + 110);
-    expect(combo.lastSend).toBe(110);
+    // Its conquest fires after the launch, so lastSend is past the silo-ready
+    // tick (review F1).
+    expect(combo.lastSend).toBeGreaterThan(110);
+    expect(combo.steps.some((s) => s.foe?.id === idOf("ALLY"))).toBe(true);
+    expect(combo.steps.some((s) => s.p?.intent.type === "attack")).toBe(true);
     expect(combo.strongCheck).toBe(true);
     const hy = cands.find((c) => c.name === `silohydro:${idOf("ALLY")}`)!;
     expect(hy).toBeDefined();
     const hstep = hy.steps[1].p!.intent as { unit: string; tile: number };
     expect(hstep.unit).toBe(UnitType.HydrogenBomb);
     expect(hstep.tile).toBe(allySilo.tile());
-    const silo = cands.find((c) => c.name === "silo")!;
-    const step = silo.steps[0].p!.intent as { unit: string; tile: number };
-    expect(step.unit).toBe(UnitType.MissileSilo);
-    expect(w.game.owner(step.tile)).toBe(w.p.US);
   });
 
   test("atom denial when we cannot pay a hydrogen bomb", () => {
@@ -231,6 +258,102 @@ describe("WP10n nuke candidates", () => {
     expect(
       names.some((n) => n.startsWith("mirv:") || n.startsWith("hydro:")),
     ).toBe(false);
+  });
+
+  // ── Review F4: a denial salvo is sized for the target's own SAM ───────
+  test("denial against a silo the target's own SAM covers is sized to 2", () => {
+    const w = leaderWorld();
+    ally(w.p.US, w.p.ALLY);
+    // A level-2 silo of ours (two ready slots), so a 2-bomb salvo is possible.
+    siloAt(w, w.p.US, 40, 60, 2);
+    const allySilo = siloAt(w, w.p.ALLY, 120, 60);
+    // The ally's own level-1 SAM sits on its silo, so the launch (which breaks
+    // our alliance) leaves the SAM hostile and covering the aim: need = 2.
+    samAt(w, w.p.ALLY, 120, 60, 1);
+    setGold(w.p.US, 60_000_000n);
+    setGold(w.p.ALLY, 30_000_000n);
+    const cands = NUKE.generate(view(w, "US", opts()), NO_BASE);
+    const deny = cands.find((c) => c.name === `hydro:${idOf("ALLY")}`)!;
+    expect(deny).toBeDefined();
+    const step = deny.steps[0].p!.intent as {
+      unit: string;
+      tile: number;
+      amount?: number;
+    };
+    expect(step.unit).toBe(UnitType.HydrogenBomb);
+    expect(step.tile).toBe(allySilo.tile());
+    // Two bombs beat a level-1 SAM (review F4; SiloStrike pin).
+    expect(step.amount).toBe(2);
+  });
+
+  test("a salvo we cannot fully cover is dropped, not sent partial", () => {
+    const w = leaderWorld();
+    ally(w.p.US, w.p.ALLY);
+    // Only one ready slot, but the SAM needs a 2-bomb salvo: a partial salvo
+    // would be shot down, so no denial candidate is offered (review F4).
+    siloAt(w, w.p.US, 40, 60, 1);
+    siloAt(w, w.p.ALLY, 120, 60);
+    samAt(w, w.p.ALLY, 120, 60, 1);
+    setGold(w.p.US, 60_000_000n);
+    setGold(w.p.ALLY, 30_000_000n);
+    const names = NUKE.generate(view(w, "US", opts()), NO_BASE).map(
+      (c) => c.name,
+    );
+    expect(names).not.toContain(`hydro:${idOf("ALLY")}`);
+    expect(names).not.toContain(`atom:${idOf("ALLY")}`);
+    // The MIRV candidate does not need to cover the SAM, so it still appears.
+    expect(names).toContain(`mirv:${idOf("ALLY")}`);
+  });
+
+  // ── Review F7: an alliance-preserving price-denial MIRV at a tribe ────
+  test("price-denial MIRV (mirvx) aims at a tribe, breaking no alliance", () => {
+    // us | gap | ally (dangerous, allied) | tribe | free.
+    const w = world(
+      220,
+      120,
+      {
+        US: PlayerType.Human,
+        ALLY: PlayerType.Nation,
+        TRIBE: PlayerType.Bot,
+      },
+      columns([
+        ["US", 80],
+        [null, 10],
+        ["ALLY", 55],
+        [null, 5],
+        ["TRIBE", 20],
+        [null, 50],
+      ]),
+    );
+    pastImmunity(w);
+    ally(w.p.US, w.p.ALLY);
+    siloAt(w, w.p.US, 40, 60);
+    siloAt(w, w.p.ALLY, 120, 60);
+    setGold(w.p.US, 60_000_000n); // enough for a MIRV
+    setGold(w.p.ALLY, 30_000_000n); // a live MIRV threat
+    const cands = NUKE.generate(view(w, "US", opts()), NO_BASE);
+    const mirvx = cands.find((c) => c.name === "mirvx")!;
+    expect(mirvx).toBeDefined();
+    expect(mirvx.target).toBeNull();
+    expect(mirvx.defensive).toBe(true);
+    const step = mirvx.steps[0].p!.intent as { unit: string; tile: number };
+    expect(step.unit).toBe(UnitType.MIRV);
+    // It aims at a tile the tribe owns (an owned tile is required; a tribe's
+    // counts and breaks no nation alliance).
+    expect(w.game.owner(step.tile)).toBe(w.p.TRIBE);
+  });
+
+  test("no tribe: no price-denial MIRV", () => {
+    const w = leaderWorld();
+    ally(w.p.US, w.p.ALLY);
+    siloAt(w, w.p.US, 40, 60);
+    siloAt(w, w.p.ALLY, 120, 60);
+    setGold(w.p.US, 60_000_000n);
+    setGold(w.p.ALLY, 30_000_000n);
+    const names = NUKE.generate(view(w, "US", opts()), NO_BASE).map(
+      (c) => c.name,
+    );
+    expect(names).not.toContain("mirvx");
   });
 });
 
@@ -492,7 +615,13 @@ describe("WP10n: the search prefers a pre-empting nuke", () => {
     expect(res.chosen?.cand.name).toBe("hydro:IDALLY000");
   });
 
-  test("when the base does not collapse, a nuke with no gain keeps the base", () => {
+  // Note (review F10): this is a unit test of runRounds' choice rule — a
+  // candidate whose rollout does not beat the base by the margin keeps the
+  // base. It is NOT the claim that a nuke never gains when no land is taken:
+  // live, with the win-bar share on, a MIRV that only turns a rival's land to
+  // fallout DID gain (g26, +94,764). LeaderRollout.test.ts covers the real
+  // (share-on) case on a fork.
+  test("a candidate that does not beat the base by the margin keeps the base", () => {
     const base = new FakeRoll("base", [
       [0, 10_000, 3_000_000],
       [150, 10_000, 3_000_000],

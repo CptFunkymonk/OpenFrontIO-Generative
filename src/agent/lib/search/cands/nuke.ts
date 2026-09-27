@@ -137,11 +137,7 @@ export function nearCityLeader(game: Game, me: Player, lead: number): boolean {
 /** N's ticks until it can pay `price`: from the observed income the
  *  SearchView carries (review F2), or, without it, from the passive rate
  *  (goldAdditionRate) as a floor. */
-function ticksToPrice(
-  sv: SearchView,
-  N: Player,
-  price: bigint,
-): number {
+function ticksToPrice(sv: SearchView, N: Player, price: bigint): number {
   const gold = N.gold();
   if (gold >= price) return 0;
   let income = sv.nukeIncome?.(N.id()) ?? 0n;
@@ -463,7 +459,7 @@ function mirvAt(sv: SearchView, N: Player): Candidate | null {
  *  are never allied with tribes), but raises every nation's next MIRV by
  *  15M (OwnNukes). Null if no tribe owns a tile, or we cannot pay. */
 function priceDenialMirv(sv: SearchView): Candidate | null {
-  const { game, me, o, t } = sv;
+  const { game, me, t } = sv;
   if (game.config().isUnitDisabled(UnitType.MIRV)) return null;
   const home = centerTile(game, me);
   let best: { tile: TileRef; d: number } | null = null;
@@ -533,7 +529,12 @@ function siloThenLaunch(
     // A fresh level-1 silo has one slot: one bomb (the rollout judges
     // whether a covering SAM downs it).
     steps.push(
-      buildStep(UnitType.HydrogenBomb, silos[0].tile(), `silohydro:${N.id()}`, launchAt),
+      buildStep(
+        UnitType.HydrogenBomb,
+        silos[0].tile(),
+        `silohydro:${N.id()}`,
+        launchAt,
+      ),
     );
   }
   if (gold < siloCost + cost) return null;

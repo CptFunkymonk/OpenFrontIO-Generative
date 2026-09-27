@@ -5,8 +5,11 @@ import type { SearchHost } from "../../agents/apex/policy";
 import type { DirectiveStep } from "../../agents/apex/state";
 import type { HomeFloors } from "../Scheduler";
 import type { WorldModel } from "../WorldModel";
-import { CORE } from "./cands/core";
+import { BOAT } from "./cands/boat";
+import { DEFEND } from "./cands/defend";
+import { KEEP } from "./cands/keep";
 import { NUKE } from "./cands/nuke";
+import { RANKED_CORE } from "./cands/rank";
 import type { AttackSeen } from "./Runner";
 import type { DangerModel, Snap } from "./Value";
 
@@ -104,8 +107,17 @@ export interface CandidateGenerator {
   wantsNaval?(ctx: AgentContext, host: SearchHost): boolean;
 }
 
-/** Every generator, in candidate order. */
-export const GENERATORS: readonly CandidateGenerator[] = [CORE, NUKE];
+/** Every generator, in candidate order. Package WP3's (each off until its
+ *  option is set; off, it makes no plan and the core runs as it is):
+ *  RANKED_CORE is the core, its nations ordered by searchRank; KEEP
+ *  (searchKeep), BOAT (searchBoat) and round 2b's DEFEND (searchDefend). */
+export const GENERATORS: readonly CandidateGenerator[] = [
+  RANKED_CORE,
+  NUKE,
+  KEEP,
+  BOAT,
+  DEFEND,
+];
 
 /** Package WP4's danger terms (Danger.ts), once built: V subtracts
  *  λ·D when searchDangerNow or searchDangerCap is set. Null: the terms are
