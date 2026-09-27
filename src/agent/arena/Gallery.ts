@@ -74,6 +74,8 @@ export interface GallerySummary {
 export interface GalleryInput {
   dir: string;
   result: ArenaGameResult;
+  /** The commit the run was played on, if it recorded one ("+" if dirty). */
+  build?: string;
 }
 
 const pct = (share: number) => `${(share * 100).toFixed(1)}%`;
@@ -92,30 +94,38 @@ function canonical(value: unknown): string {
     .join(",")}}`;
 }
 
-const entrantKey = (s: SeatResult) => `${s.agent}${canonical(s.options ?? {})}`;
-
-const show = (v: unknown) =>
-  typeof v === "string" ? v : v === undefined ? "?" : canonical(v);
-
 /** The options a seat ran with, as far as its result records them. */
 const ranWith = (s: SeatResult): Record<string, unknown> => ({
   ...s.resolvedOptions,
   ...s.options,
 });
 
+/** What an entrant ran: its agent and every option it ran with, so the same
+ *  agent from two builds with different defaults stays two entrants. */
+const entrantKey = (s: SeatResult) => `${s.agent}${canonical(ranWith(s))}`;
+
+const show = (v: unknown) =>
+  typeof v === "string" ? v : v === undefined ? "?" : canonical(v);
+
 /**
  * Labels for each distinct entrant among `seats`, by `entrantKey`: the agent
  * when agents differ, then every option whose value differs among entrants of
- * the same agent. A lone entrant of its agent is labelled with its overrides,
- * or "defaults".
+ * the same agent (options only one build of the agent has are left out). A
+ * lone entrant of its agent is labelled with its overrides, or "defaults".
+ * Entrants whose labels would still be equal (the same agent from different
+ * builds) are told apart by the build they ran on.
  */
-function entrantLabels(seats: SeatResult[]): {
+function entrantLabels(seats: { seat: SeatResult; build?: string }[]): {
   labels: Map<string, string[]>;
   varied: string[];
 } {
   const entrants = new Map<string, SeatResult>();
-  for (const s of seats) {
-    if (!entrants.has(entrantKey(s))) entrants.set(entrantKey(s), s);
+  const builds = new Map<string, string | undefined>();
+  for (const { seat: s, build } of seats) {
+    if (!entrants.has(entrantKey(s))) {
+      entrants.set(entrantKey(s), s);
+      builds.set(entrantKey(s), build);
+    }
   }
   const all = [...entrants.values()];
   const agentsVary = new Set(all.map((s) => s.agent)).size > 1;
@@ -128,6 +138,10 @@ function entrantLabels(seats: SeatResult[]): {
     if (peers.length > 1) {
       const keys = [...new Set(peers.flatMap((p) => Object.keys(ranWith(p))))];
       for (const k of keys) {
+        // An option only some builds of the agent know is not a variable.
+        if (peers.some((p) => p.resolvedOptions && !(k in ranWith(p)))) {
+          continue;
+        }
         if (new Set(peers.map((p) => canonical(ranWith(p)[k]))).size < 2) {
           continue;
         }
@@ -145,6 +159,20 @@ function entrantLabels(seats: SeatResult[]): {
       }
     }
     labels.set(key, parts.length > 0 ? parts : ["defaults"]);
+  }
+  // The same agent from builds whose shared options agree: name the build.
+  const byLabel = new Map<string, string[]>();
+  for (const [key, label] of labels) {
+    const l = label.join("\n");
+    byLabel.set(l, [...(byLabel.get(l) ?? []), key]);
+  }
+  for (const keys of byLabel.values()) {
+    if (keys.length < 2) continue;
+    keys.forEach((key, i) => {
+      const build = builds.get(key);
+      labels.get(key)!.push(`@${build ?? `run ${i + 1}`}`);
+    });
+    varied.add("build");
   }
   return { labels, varied: [...varied] };
 }
@@ -235,7 +263,9 @@ export function gallery(
   );
 
   const { labels, varied } = entrantLabels(
-    sorted.flatMap(({ result }) => result.seats),
+    sorted.flatMap(({ result, build }) =>
+      result.seats.map((seat) => ({ seat, build })),
+    ),
   );
   const entrantIndex = new Map<string, number>();
   const entrants: GalleryEntrant[] = [];
@@ -478,11 +508,21 @@ function readResults(dir: string): GalleryInput[] {
   if (!fs.existsSync(gamesDir)) {
     throw new Error(`${dir} has no games/ directory: not an arena results dir`);
   }
+  let build: string | undefined;
+  const summary = path.join(dir, "summary.json");
+  if (fs.existsSync(summary)) {
+    const { commit, dirty } = JSON.parse(fs.readFileSync(summary, "utf8")) as {
+      commit?: string | null;
+      dirty?: boolean | null;
+    };
+    if (commit) build = `${commit.slice(0, 7)}${dirty ? "+" : ""}`;
+  }
   return fs
     .readdirSync(gamesDir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => ({
       dir,
+      build,
       result: JSON.parse(
         fs.readFileSync(path.join(gamesDir, f), "utf8"),
       ) as ArenaGameResult,

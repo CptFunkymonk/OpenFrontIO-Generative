@@ -141,6 +141,66 @@ describe("gallery", () => {
     expect(g.rows.map((r) => r.entrant)).toEqual([0, 1, 2]);
   });
 
+  test("tells apart the same agent from builds with other defaults", () => {
+    // The same agent with no overrides, from two runs whose code had other
+    // defaults (a newer build also knows an option the older one lacks).
+    const older = seat(undefined, {
+      resolvedOptions: { ...DEFAULTS, expandTrigger: 0.35 },
+    });
+    const newer = seat(undefined, {
+      resolvedOptions: { ...DEFAULTS, expandTrigger: 0.3, strikes: true },
+    });
+    const g = gallery(
+      [
+        {
+          dir: "/runs/old",
+          build: "2c9ea80",
+          result: result("/runs/old", { seats: [older] }),
+        },
+        {
+          dir: "/runs/new",
+          build: "004de76",
+          result: result("/runs/new", { seats: [newer] }),
+        },
+      ],
+      "/runs",
+    );
+    expect(g.entrants).toHaveLength(2);
+    // The shared option that changed is named; the one only the newer build
+    // has is not a variable.
+    expect(g.entrants.map((e) => e.label)).toEqual([
+      ["expandTrigger 0.35 (default)"],
+      ["expandTrigger 0.3 (default)"],
+    ]);
+    // Identical shared options: the build tells them apart.
+    const same = gallery(
+      [
+        {
+          dir: "/runs/old",
+          build: "2c9ea80",
+          result: result("/runs/old", { seats: [seat()] }),
+        },
+        {
+          dir: "/runs/new",
+          build: "004de76",
+          result: result("/runs/new", {
+            seats: [
+              seat(undefined, {
+                resolvedOptions: { ...DEFAULTS, strikes: true },
+              }),
+            ],
+          }),
+        },
+      ],
+      "/runs",
+    );
+    expect(same.entrants.map((e) => e.label)).toEqual([
+      ["defaults", "@2c9ea80"],
+      ["defaults", "@004de76"],
+    ]);
+    expect(same.varied).toContain("build");
+  });
+
   test("leads with the agent's name when agents differ", () => {
     const dir = "/runs/a";
     const g = gallery(

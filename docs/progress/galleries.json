@@ -140,5 +140,61 @@
       "it survives much longer than the baseline (World out at 37 min vs 13, Europe 25 vs 7, Mena to the end vs 14) but is eaten in the end; on Bering Strait the other nation eats the far continent's tribes, which apex never boats to, and wins at 9.2 min",
       "M3/M4 work: strike nations in their windows, keep boating to food across water, hold deterrence floors"
     ]
+  },
+  {
+    "id": "2026-09-27-m2-signoff",
+    "date": "2026-09-27",
+    "commit": "5a90ba2+",
+    "title": "M2 sign-off: apex before and after strikes and spawn erasure",
+    "varied": ["agent", "build"],
+    "image": "2026-09-27-m2-signoff.jpg",
+    "seeds": ["showcase"],
+    "maps": [
+      "World",
+      "Europe",
+      "Alps",
+      "ArchipelagoSea",
+      "Bering Strait",
+      "Mena"
+    ],
+    "games": 18,
+    "entrants": [
+      {
+        "agent": "baseline",
+        "options": {},
+        "label": ["baseline"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 4,
+        "meanProgress": 0.09,
+        "meanPeakShare": 0.072
+      },
+      {
+        "agent": "apex",
+        "options": {},
+        "label": ["apex", "@2c9ea80"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 3,
+        "meanProgress": 0.127,
+        "meanPeakShare": 0.102
+      },
+      {
+        "agent": "apex",
+        "options": {},
+        "label": ["apex", "@004de76"],
+        "games": 6,
+        "wins": 0,
+        "eliminated": 1,
+        "meanProgress": 0.183,
+        "meanPeakShare": 0.147
+      }
+    ],
+    "notes": [
+      "the M2 champion (strikes + spawn erasure, 004de76) against the M2 build (2c9ea80) and the baseline, same six games",
+      "erasure shows at once: on World it takes the erased nation's northern Siberia (6.0% at minute 3 against the top nation's 4.5%), on Europe all of Russia (9.1% at minute 5); Bering is unchanged (the duel guard refuses to erase)",
+      "strikes keep it growing longer: World 9.4% at minute 10 (was 3.6%), Europe 13.4% at minute 10 against the top nation's 10.5%, ArchipelagoSea 14.9% at minute 15 against 12.8%; Alps survives to 23.0 min (was 7.3)",
+      "it still stalls at 10-15% and is eaten or out-grown between minutes 20 and 36: the midgame search of chapter 14 is next"
+    ]
   }
 ]
