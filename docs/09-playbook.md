@@ -27,14 +27,14 @@ Nothing accrues during the spawn phase. Spend the whole 20 seconds choosing.
 
 **Score a candidate on, in order:**
 
-| Weight | Criterion | Mechanic |
-|---|---|---|
-| Highest | Contiguous **unowned land** reachable in the first ~60 s | terra nullius is flat 16–24 troops/tile with zero defender loss (§02.7) |
-| High | **Coast on a large water component**, with a buildable shore tile within 20 manhattan | ports/trade/warships/boats all gate on it (§01.5) |
-| High | Low **border-to-area ratio** of the region you can plausibly claim | halving your border halves the rate you can be eaten (§02.5) |
-| Medium | Distance to the nearest human or nation `spawnTile` | manual picks have **no minimum distance** — proximity is a choice |
-| Medium | Mountain/highland on the likely invasion axis, plains on your expansion axis | terrain penalty is paid by the attacker (§01.2) |
-| Low | Map edge / impassable adjacency | exempts you from encirclement auto-annexation (§02.5) |
+| Weight  | Criterion                                                                             | Mechanic                                                                |
+| ------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Highest | Contiguous **unowned land** reachable in the first ~60 s                              | terra nullius is flat 16–24 troops/tile with zero defender loss (§02.7) |
+| High    | **Coast on a large water component**, with a buildable shore tile within 20 manhattan | ports/trade/warships/boats all gate on it (§01.5)                       |
+| High    | Low **border-to-area ratio** of the region you can plausibly claim                    | halving your border halves the rate you can be eaten (§02.5)            |
+| Medium  | Distance to the nearest human or nation `spawnTile`                                   | manual picks have **no minimum distance** — proximity is a choice       |
+| Medium  | Mountain/highland on the likely invasion axis, plains on your expansion axis          | terrain penalty is paid by the attacker (§01.2)                         |
+| Low     | Map edge / impassable adjacency                                                       | exempts you from encirclement auto-annexation (§02.5)                   |
 
 **Concrete heuristic:** click 4–5 tiles inland from a coastline that faces a large
 ocean, with a bay or peninsula behind you and open neutral land in front. That
@@ -60,9 +60,10 @@ The arithmetic: against terra nullius, attacker loss is a flat `mag/5` per tile 
 6,600 troops on plains.
 
 **Therefore:**
+
 - Attack neutral land **continuously**, in stacks of ~7,000–10,000. More than that
   buys nothing per attack (the cost clamps at 5) — it only buys more simultaneous
-  frontage, which *does* help, so run several attacks in parallel rather than one
+  frontage, which _does_ help, so run several attacks in parallel rather than one
   huge one.
 - Take **whatever is adjacent, regardless of terrain.** Once your stack is above
   the clamp, terrain no longer slows neutral expansion at all. Terrain only starts
@@ -98,6 +99,7 @@ at all yet.** 62,370/min against a 60,000/min baseline is not worth 125,000 gold
 Build cities and fight instead.
 
 **Then, in rough order:**
+
 1. Ports until the global trade fleet saturation knee (~330 world ships) flattens
    the curve. Upgrade existing ports as readily as building new ones — port levels
    are superlinear because the pity counter climbs `level` times faster (§03).
@@ -122,6 +124,7 @@ tilesYouCanTake   ≈ yourStack / attackerLoss_per_tile
 ```
 
 **Sanity checks before attacking:**
+
 - Is `tilesYouCanTake` worth the entire stack? **You will spend all of it.** PvP
   attacks burn out; they do not return troops on success.
 - Is the defender's **density** (`troops / tiles`) low? Density is their real
@@ -161,6 +164,7 @@ landing tile is taken free with no combat. But the beachhead starts with a
 ≤4-tile frontier, so it is glacial until it spreads.
 
 Use boats to:
+
 - Open a second front on a player whose land border you cannot widen.
 - Take an island or a disconnected landmass no one contests.
 - Land behind a defense post's 30-tile radius.
@@ -204,14 +208,14 @@ and never betray while you have an exposed border with a third party.
 
 Nation AI targets you by measurable thresholds. Stay outside them:
 
-| Threshold | Stay |
-|---|---|
-| `veryWeak`: `troops < maxTroops × 0.15` | **above 15% of your cap** |
-| `juicy`: `troops <= theirs × 0.75` | **above 75% of the strongest neighbour's troops** |
-| `victim`: incoming attacks `> your troops × 0.5` | do not let attacks pile up |
-| FFA nuke crown gap: Easy 40% / Med 30% / Hard 20% / **Imp 10%** land lead | below the gap, or accept nukes |
+| Threshold                                                                      | Stay                                                   |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `veryWeak`: `troops < maxTroops × 0.15`                                        | **above 15% of your cap**                              |
+| `juicy`: `troops <= theirs × 0.75`                                             | **above 75% of the strongest neighbour's troops**      |
+| `victim`: incoming attacks `> your troops × 0.5`                               | do not let attacks pile up                             |
+| FFA nuke crown gap: Easy 40% / Med 30% / Hard 20% / **Imp 10%** land lead      | below the gap, or accept nukes                         |
 | MIRV victory denial: Easy 75% / Med 65% / Hard 55% / **Imp 40%** of total land | **crossing 40% invites a MIRV in an Impossible lobby** |
-| MIRV steamroll: cities > 8–20 **and** ≥1.15–2× second place | do not lead cities by that margin |
+| MIRV steamroll: cities > 8–20 **and** ≥1.15–2× second place                    | do not lead cities by that margin                      |
 
 Conversely, **to freeze a Hard/Impossible nation**: park a large stack on its
 border (`troopSendCap` retains 75–90% of the strongest neighbour's troops), and
@@ -224,7 +228,7 @@ The bar is **80% of non-fallout land**, checked once per second, strict `>`.
 
 **Three levers:**
 
-1. **The denominator excludes fallout.** Nuking *neutral* land permanently removes
+1. **The denominator excludes fallout.** Nuking _neutral_ land permanently removes
    it from the win denominator (fallout never decays). If you hold the most
    remaining land, every neutral tile you irradiate moves the bar toward you. This
    is the most under-appreciated mechanic in the game.
@@ -235,6 +239,7 @@ The bar is **80% of non-fallout land**, checked once per second, strict `>`.
    `maxTimerValue` does the same, earlier.
 
 **Nuclear endgame:**
+
 - MIRV is **uninterceptable** and drives a target to 3% of max troops, map-wide,
   including every transport they own. It is the hard counter to a turtle. It costs
   25M and raises the global price by 15M for everyone.
@@ -308,8 +313,8 @@ Once per decision cycle (every ~10–20 ticks; you have 10 intents/s, 150/min):
 8. **Mutual attack annihilation** — attacking an incoming attacker cancels both
    stacks 1:1 before a tile moves.
 9. **Upgrade, don't build**: placing a structure within 15 tiles of your own same
-   type silently becomes an upgrade at the same ladder price — and city *levels*,
-   not city *count*, drive `maxTroops`.
+   type silently becomes an upgrade at the same ladder price — and city _levels_,
+   not city _count_, drive `maxTroops`.
 10. **Structures survive capture** (except defense posts), so taking a developed
     enemy tile hands you the city, port, factory, silo or SAM standing on it, at
     its current level.

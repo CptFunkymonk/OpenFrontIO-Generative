@@ -15,19 +15,19 @@ most importantly, **there is no population or worker system here**, and
 
 ## Read in this order
 
-| File | Subsystem |
-|---|---|
-| [`00-overview.md`](00-overview.md) | The model, the four resources, phases, time constants |
-| [`01-spawn-and-map.md`](01-spawn-and-map.md) | Tile encoding, terrain, map roster, pathfinding, water components, spawn selection |
-| [`02-territory-and-combat.md`](02-territory-and-combat.md) | The attack formula, borders, retreat, amphibious assault, defense posts |
-| [`03-economy.md`](03-economy.md) | Troops, `maxTroops`, gold, trade ships, trains, cost ladders, donations |
-| [`04-units-and-structures.md`](04-units-and-structures.md) | Complete buildable catalog, upgrades, capture, warships, veterancy, rail |
-| [`05-strategic-weapons.md`](05-strategic-weapons.md) | Nukes, fallout, MIRV, SAM interception |
-| [`06-diplomacy-and-ai.md`](06-diplomacy-and-ai.md) | Alliances, betrayal, relations, embargoes, teams, the AI decision tree |
-| [`07-action-api.md`](07-action-api.md) | Every intent schema, tick ordering, observation stream, netcode, win conditions |
-| [`08-running-headless.md`](08-running-headless.md) | Verified recipes for driving the sim without a browser |
-| [`09-playbook.md`](09-playbook.md) | **[DERIVED]** Spawn to victory, decision loop, exploits |
-| [`99-quirks-and-traps.md`](99-quirks-and-traps.md) | Dead code, wrong comments, fork divergences, traps |
+| File                                                       | Subsystem                                                                          |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| [`00-overview.md`](00-overview.md)                         | The model, the four resources, phases, time constants                              |
+| [`01-spawn-and-map.md`](01-spawn-and-map.md)               | Tile encoding, terrain, map roster, pathfinding, water components, spawn selection |
+| [`02-territory-and-combat.md`](02-territory-and-combat.md) | The attack formula, borders, retreat, amphibious assault, defense posts            |
+| [`03-economy.md`](03-economy.md)                           | Troops, `maxTroops`, gold, trade ships, trains, cost ladders, donations            |
+| [`04-units-and-structures.md`](04-units-and-structures.md) | Complete buildable catalog, upgrades, capture, warships, veterancy, rail           |
+| [`05-strategic-weapons.md`](05-strategic-weapons.md)       | Nukes, fallout, MIRV, SAM interception                                             |
+| [`06-diplomacy-and-ai.md`](06-diplomacy-and-ai.md)         | Alliances, betrayal, relations, embargoes, teams, the AI decision tree             |
+| [`07-action-api.md`](07-action-api.md)                     | Every intent schema, tick ordering, observation stream, netcode, win conditions    |
+| [`08-running-headless.md`](08-running-headless.md)         | Verified recipes for driving the sim without a browser                             |
+| [`09-playbook.md`](09-playbook.md)                         | **[DERIVED]** Spawn to victory, decision loop, exploits                            |
+| [`99-quirks-and-traps.md`](99-quirks-and-traps.md)         | Dead code, wrong comments, fork divergences, traps                                 |
 
 ## Conventions
 
@@ -41,7 +41,7 @@ most importantly, **there is no population or worker system here**, and
 ## Single-file build
 
 ```bash
-node docs/agent/build.mjs          # writes docs/AGENT_GUIDE.md
+node docs/agent/build.mjs # writes docs/AGENT_GUIDE.md
 ```
 
 The concatenated build is for loading the whole reference into one context
@@ -75,28 +75,28 @@ OpenFront is a **deterministic lockstep territorial RTS**. The server runs **no
 simulation at all**. It batches intents into numbered turns and broadcasts them;
 every client runs an identical `GameImpl` and arrives at identical state.
 
-| Fact | Value | Source |
-|---|---|---|
-| Tick length | **100 ms** → 10 ticks/s | `Config.ts:367` |
-| Turn ↔ tick | 1:1. Turn *N* executes as tick *N* | `GameRunner.ts:200` |
-| Fog of war | **None.** Zero hits for `fog` in `src/`. Every client holds full state | — |
-| Wire format | zbin positional binary, no version byte | `ZbinWire.ts:1-20` |
-| Version gate | client `gitCommit` must equal the server's, **or be the literal `"desktop"`**, or join is refused | `Worker.ts:535-558` |
-| Intent budget | **10/s, 150/min, ≤2 KB each, ≤5 MB per game** | `ClientMsgRateLimiter.ts:4-12` |
+| Fact          | Value                                                                                             | Source                         |
+| ------------- | ------------------------------------------------------------------------------------------------- | ------------------------------ |
+| Tick length   | **100 ms** → 10 ticks/s                                                                           | `Config.ts:367`                |
+| Turn ↔ tick   | 1:1. Turn _N_ executes as tick _N_                                                                | `GameRunner.ts:200`            |
+| Fog of war    | **None.** Zero hits for `fog` in `src/`. Every client holds full state                            | —                              |
+| Wire format   | zbin positional binary, no version byte                                                           | `ZbinWire.ts:1-20`             |
+| Version gate  | client `gitCommit` must equal the server's, **or be the literal `"desktop"`**, or join is refused | `Worker.ts:535-558`            |
+| Intent budget | **10/s, 150/min, ≤2 KB each, ≤5 MB per game**                                                     | `ClientMsgRateLimiter.ts:4-12` |
 
 You win by **holding 80% of non-fallout land** (or leading when a timer expires).
 Everything else is instrumental to that.
 
 ## 0.2 The four resources
 
-There are only four quantities you manage. Note what is *absent*.
+There are only four quantities you manage. Note what is _absent_.
 
-| Quantity | Type | Grows by | Spent on |
-|---|---|---|---|
-| **Territory** (tiles) | int | attacking | raises `maxTroops`; hosts structures; **is the win condition** |
-| **Troops** | bigint | passive logistic regrowth | attacks, boats, donations |
-| **Gold** | bigint | flat 100/tick + trade + trains + conquest | structures, warships, nukes |
-| **Relations** | float per-pair, [-100,100] | diplomacy events | AI behaviour only |
+| Quantity              | Type                       | Grows by                                  | Spent on                                                       |
+| --------------------- | -------------------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| **Territory** (tiles) | int                        | attacking                                 | raises `maxTroops`; hosts structures; **is the win condition** |
+| **Troops**            | bigint                     | passive logistic regrowth                 | attacks, boats, donations                                      |
+| **Gold**              | bigint                     | flat 100/tick + trade + trains + conquest | structures, warships, nukes                                    |
+| **Relations**         | float per-pair, [-100,100] | diplomacy events                          | AI behaviour only                                              |
 
 > **There is no population and no worker/troop split in this fork.** `maxPopulation`,
 > `populationIncreaseRate`, `targetTroopRatio` and `troopAdjustmentRate` do not exist
@@ -136,49 +136,49 @@ but not income, except the one-shot gold drop when you finish a player.
 
 ## 0.4 Phases of a game
 
-| Phase | Ticks | What is possible |
-|---|---|---|
+| Phase           | Ticks                                                 | What is possible                                                                                                                            |
+| --------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Spawn phase** | 0 → 100 (SP) / 150 (random spawn) / **200** (default) | Only `spawn` intents. **No gold accrues, no troops grow** — `PlayerExecution.activeDuringSpawnPhase()` is `false` (`PlayerExecution.ts:44`) |
-| **Immunity** | +50 ticks after spawn phase | Humans cannot attack you; **Nations and Bots can** (`PlayerImpl.ts:1917-1926`). No nukes buildable (`PlayerImpl.ts:1627`) |
-| **Land grab** | ~200 → ~1,500 | Terra nullius is nearly free. Troops refill in ~500 ticks. Gold accumulates toward the first 125,000 structure |
-| **Economy** | ~1,250 onward | First Port (if coastal) multiplies income ~13×. Cities begin to matter |
-| **Attrition** | mid | PvP attacks burn stacks completely. Defense posts, warships, first nukes |
-| **Endgame** | to 80% land, or timer | MIRVs, doomsday clock (if enabled), hard finish at 170 min |
+| **Immunity**    | +50 ticks after spawn phase                           | Humans cannot attack you; **Nations and Bots can** (`PlayerImpl.ts:1917-1926`). No nukes buildable (`PlayerImpl.ts:1627`)                   |
+| **Land grab**   | ~200 → ~1,500                                         | Terra nullius is nearly free. Troops refill in ~500 ticks. Gold accumulates toward the first 125,000 structure                              |
+| **Economy**     | ~1,250 onward                                         | First Port (if coastal) multiplies income ~13×. Cities begin to matter                                                                      |
+| **Attrition**   | mid                                                   | PvP attacks burn stacks completely. Defense posts, warships, first nukes                                                                    |
+| **Endgame**     | to 80% land, or timer                                 | MIRVs, doomsday clock (if enabled), hard finish at 170 min                                                                                  |
 
 ## 0.5 Time constants worth memorising
 
-| Thing | Ticks | Seconds |
-|---|---|---|
-| Tick | 1 | 0.1 |
-| Spawn immunity | 50 | 5 |
-| Spawn phase (default) | 200 | 20 |
-| Emoji cooldown / display | 50 | 5 |
-| Donation cooldown (per recipient) | 100 | 10 |
-| Retreat delay before the 25% tax | 20 | 2 |
-| Target duration / cooldown | 100 / 150 | 10 / 15 |
-| Traitor duration | 300 | 30 |
-| Delete-unit cooldown & mark delay | 300 | 30 |
-| Alliance request expiry | 200 | 20 |
-| Alliance request cooldown | 300 | 30 |
-| Silo & SAM reload | 90 | 9 |
-| Alliance duration (default) | 3,000 | 300 (5 min) |
-| Temporary embargo | 3,000 | 300 |
-| Hard game end | 102,000 | 10,200 (170 min) |
+| Thing                             | Ticks     | Seconds          |
+| --------------------------------- | --------- | ---------------- |
+| Tick                              | 1         | 0.1              |
+| Spawn immunity                    | 50        | 5                |
+| Spawn phase (default)             | 200       | 20               |
+| Emoji cooldown / display          | 50        | 5                |
+| Donation cooldown (per recipient) | 100       | 10               |
+| Retreat delay before the 25% tax  | 20        | 2                |
+| Target duration / cooldown        | 100 / 150 | 10 / 15          |
+| Traitor duration                  | 300       | 30               |
+| Delete-unit cooldown & mark delay | 300       | 30               |
+| Alliance request expiry           | 200       | 20               |
+| Alliance request cooldown         | 300       | 30               |
+| Silo & SAM reload                 | 90        | 9                |
+| Alliance duration (default)       | 3,000     | 300 (5 min)      |
+| Temporary embargo                 | 3,000     | 300              |
+| Hard game end                     | 102,000   | 10,200 (170 min) |
 
 ## 0.6 What this guide covers
 
-| File | Subsystem |
-|---|---|
-| `01-spawn-and-map.md` | Tile encoding, terrain, map roster, pathfinding, spawn selection |
-| `02-territory-and-combat.md` | Attack math, borders, retreat, amphibious assault, defense posts |
-| `03-economy.md` | Troops, gold, trade ships, trains, cost ladders, donations |
-| `04-units-and-structures.md` | Complete buildable catalog, upgrades, veterancy, warships |
-| `05-strategic-weapons.md` | Nukes, fallout, MIRV, SAM interception |
-| `06-diplomacy-and-ai.md` | Alliances, betrayal, relations, embargoes, teams, the AI's decision tree |
-| `07-action-api.md` | Every intent schema, tick ordering, observation stream, netcode, win conditions |
-| `08-running-headless.md` | Verified recipes for driving the sim without a browser |
-| `09-playbook.md` | **[DERIVED]** Opening to endgame, exploits, decision heuristics |
-| `99-quirks-and-traps.md` | Dead code, bugs, fork divergences, things that will mislead you |
+| File                         | Subsystem                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `01-spawn-and-map.md`        | Tile encoding, terrain, map roster, pathfinding, spawn selection                |
+| `02-territory-and-combat.md` | Attack math, borders, retreat, amphibious assault, defense posts                |
+| `03-economy.md`              | Troops, gold, trade ships, trains, cost ladders, donations                      |
+| `04-units-and-structures.md` | Complete buildable catalog, upgrades, veterancy, warships                       |
+| `05-strategic-weapons.md`    | Nukes, fallout, MIRV, SAM interception                                          |
+| `06-diplomacy-and-ai.md`     | Alliances, betrayal, relations, embargoes, teams, the AI's decision tree        |
+| `07-action-api.md`           | Every intent schema, tick ordering, observation stream, netcode, win conditions |
+| `08-running-headless.md`     | Verified recipes for driving the sim without a browser                          |
+| `09-playbook.md`             | **[DERIVED]** Opening to endgame, exploits, decision heuristics                 |
+| `99-quirks-and-traps.md`     | Dead code, bugs, fork divergences, things that will mislead you                 |
 
 ---
 
@@ -191,39 +191,40 @@ but not income, except the one-shot gold drop when you finish a player.
 `TileRef = number` — a raw grid index (`GameMap.ts:5`). There are no x/y lookup
 tables; the arithmetic is deliberate (`GameMap.ts:119-123`).
 
-| Operation | Formula | Source |
-|---|---|---|
-| `ref(x, y)` | `y * width + x` (throws on bad coords) | `GameMap.ts:167-172` |
-| `x(ref)` | `ref % width` | `GameMap.ts:180-182` |
-| `y(ref)` | `(ref / width) \| 0` | `GameMap.ts:184-186` |
-| `isValidRef(ref)` | integer, `0 <= ref < width*height` | `GameMap.ts:174-176` |
+| Operation         | Formula                                | Source               |
+| ----------------- | -------------------------------------- | -------------------- |
+| `ref(x, y)`       | `y * width + x` (throws on bad coords) | `GameMap.ts:167-172` |
+| `x(ref)`          | `ref % width`                          | `GameMap.ts:180-182` |
+| `y(ref)`          | `(ref / width) \| 0`                   | `GameMap.ts:184-186` |
+| `isValidRef(ref)` | integer, `0 <= ref < width*height`     | `GameMap.ts:174-176` |
 
 Two parallel buffers, each `width*height` (`GameMap.ts:114-115`):
 
 **`terrain: Uint8Array`** — from the map file, mutable only by water nukes:
 
-| Bits | Mask | Meaning |
-|---|---|---|
-| 7 | `0x80` | `IS_LAND_BIT` |
-| 6 | `0x40` | `SHORELINE_BIT` |
-| 5 | `0x20` | `OCEAN_BIT` |
-| 0–4 | `0x1F` | `MAGNITUDE_MASK` (0–31) |
+| Bits | Mask   | Meaning                 |
+| ---- | ------ | ----------------------- |
+| 7    | `0x80` | `IS_LAND_BIT`           |
+| 6    | `0x40` | `SHORELINE_BIT`         |
+| 5    | `0x20` | `OCEAN_BIT`             |
+| 0–4  | `0x1F` | `MAGNITUDE_MASK` (0–31) |
 
 `GameMap.ts:127-130`. `IMPASSABLE_MAGNITUDE = 31` (`:135`).
 
 **`state: Uint16Array`** — mutable game state:
 
-| Bits | Mask | Meaning |
-|---|---|---|
-| 0–11 | `0xFFF` | smallID of the owner; `0` = TerraNullius. **Max 4095 players** |
-| 13 | `0x2000` | `FALLOUT_BIT` |
-| 14 | `0x4000` | `DEFENSE_BONUS_BIT` — **dead, never set by the sim** |
+| Bits | Mask     | Meaning                                                        |
+| ---- | -------- | -------------------------------------------------------------- |
+| 0–11 | `0xFFF`  | smallID of the owner; `0` = TerraNullius. **Max 4095 players** |
+| 13   | `0x2000` | `FALLOUT_BIT`                                                  |
+| 14   | `0x4000` | `DEFENSE_BONUS_BIT` — **dead, never set by the sim**           |
 
 `GameMap.ts:140-143`, `296-326`.
 
 Derived predicates:
+
 - `isShore(ref)` = `isLand && isShoreline` (`GameMap.ts:387-389`). The shoreline bit is set on **both
-  sides** of a coast — land tiles next to water *and* water tiles next to land
+  sides** of a coast — land tiles next to water _and_ water tiles next to land
   (`map_generator.go:312-352`). Impassable tiles never get it.
 - `isOceanShore(ref)` = land tile with a 4-neighbour whose **ocean bit** is set
   (`GameMap.ts:226-236`).
@@ -237,15 +238,16 @@ Derived predicates:
 ```
 enum TerrainType { Plains, Highland, Mountain, Ocean, Impassable }
 ```
+
 `Game.ts:365-371`. Derivation — `terrainType`, `GameMap.ts:397-407`:
 
-| Condition | Type |
-|---|---|
-| land, magnitude ≥ 31 | `Impassable` |
-| land, magnitude < 10 | `Plains` |
-| land, magnitude < 20 | `Highland` |
-| land, magnitude ≥ 20 | `Mountain` |
-| not land | `Ocean` (**including lakes** — ocean-vs-lake is the separate `OCEAN_BIT`) |
+| Condition            | Type                                                                      |
+| -------------------- | ------------------------------------------------------------------------- |
+| land, magnitude ≥ 31 | `Impassable`                                                              |
+| land, magnitude < 10 | `Plains`                                                                  |
+| land, magnitude < 20 | `Highland`                                                                |
+| land, magnitude ≥ 20 | `Mountain`                                                                |
+| not land             | `Ocean` (**including lakes** — ocean-vs-lake is the separate `OCEAN_BIT`) |
 
 Magnitude means elevation on land (0–30 from the PNG blue channel) and
 **distance to the nearest land** on water (`ceil(manhattan/2)`, capped 31;
@@ -255,19 +257,19 @@ shoreline water = 0) — `map_generator.go:156-161, 355-402`.
 
 `terrainAttackBase` (`Config.ts:172-188`) — **verified against source**:
 
-| Terrain | `mag` (drives attacker losses) | `tileCost` (drives slowness) |
-|---|---|---|
-| Plains | 80 | 16.5 |
-| Highland | 100 | 20 |
-| Mountain | 120 | 25 |
-| Impassable | **throws** | — |
+| Terrain    | `mag` (drives attacker losses) | `tileCost` (drives slowness) |
+| ---------- | ------------------------------ | ---------------------------- |
+| Plains     | 80                             | 16.5                         |
+| Highland   | 100                            | 20                           |
+| Mountain   | 120                            | 25                           |
+| Impassable | **throws**                     | —                            |
 
-Attacking *into* mountain costs 1.5× the troops of plains and is ~1.5× slower.
+Attacking _into_ mountain costs 1.5× the troops of plains and is ~1.5× slower.
 The penalty is paid by the attacker, always.
 
 ### What impassable terrain blocks
 
-Cannot be conquered, attacked, nuke-*targeted*, included in a blast, flooded by
+Cannot be conquered, attacked, nuke-_targeted_, included in a blast, flooded by
 water nukes, crossed by rail, or built on. Not counted in `numLandTiles`. Acts as
 the map edge for the encirclement check.
 
@@ -283,9 +285,9 @@ and land counts live only in `resources/maps/<folder>/manifest.json`.
 
 **`GameMapSize`** (`Game.ts:151-154`):
 
-| | game map | pathfinding minimap |
-|---|---|---|
-| `Normal` | `map.bin` (W×H) | `map4x.bin` (W/2 × H/2) |
+|           | game map                | pathfinding minimap      |
+| --------- | ----------------------- | ------------------------ |
+| `Normal`  | `map.bin` (W×H)         | `map4x.bin` (W/2 × H/2)  |
 | `Compact` | `map4x.bin` (W/2 × H/2) | `map16x.bin` (W/4 × H/4) |
 
 `TerrainMapLoader.ts:95-106`. **The minimap is always exactly half the game map's
@@ -298,14 +300,14 @@ the **same** 52-tile start, so players are ~4× more densely packed.
 
 ### Notable maps
 
-| Category | Maps |
-|---|---|
-| **All land — no boats, ports, trade or warships possible** | `Alps` (2000×1836, 3,672,000 land, 100%), `TheBox` (2048², 4,194,304, 100%) |
-| Smallest | `Onion` 512×512, 210,555 land |
-| Most water-dominated | `ArchipelagoSea` 6%, `Hawaii` 6%, `Japan` 8%, `Sol` 8%, `Caribbean` 10% |
-| Extreme aspect | `MississippiRiver` 400×4200, `Passage` 6000×400, `AmazonRiver` 5536×276 |
-| Most nations | `GiantWorldMap` 107, `WorldInverted` 93, `Dyslexdria` 82, `Russia` 82 |
-| Common | `World` 2000×1000 / 651,569 land / 72 nations; `Europe` 2904×1672 / 2,345,907 / 52 |
+| Category                                                   | Maps                                                                               |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **All land — no boats, ports, trade or warships possible** | `Alps` (2000×1836, 3,672,000 land, 100%), `TheBox` (2048², 4,194,304, 100%)        |
+| Smallest                                                   | `Onion` 512×512, 210,555 land                                                      |
+| Most water-dominated                                       | `ArchipelagoSea` 6%, `Hawaii` 6%, `Japan` 8%, `Sol` 8%, `Caribbean` 10%            |
+| Extreme aspect                                             | `MississippiRiver` 400×4200, `Passage` 6000×400, `AmazonRiver` 5536×276            |
+| Most nations                                               | `GiantWorldMap` 107, `WorldInverted` 93, `Dyslexdria` 82, `Russia` 82              |
+| Common                                                     | `World` 2000×1000 / 651,569 land / 72 nations; `Europe` 2904×1672 / 2,345,907 / 52 |
 
 21 maps define `teamGameSpawnAreas`, keyed by team count as a string
 (`GameImpl.ts:1069-1081`). `Alps` forces water nukes at 75%, `ArchipelagoSea` and
@@ -313,22 +315,22 @@ the **same** 52-tile start, so players are ~4× more densely packed.
 
 ## 1.4 Pathfinding and unit speeds
 
-| Domain | Algorithm | Map used |
-|---|---|---|
-| Water (boats, trade, warships) | HPA* over 32×32 clusters, flat `AStarWater` fallback | **minimap** |
-| Rail / trains | generic A* + `RailAdapter` | **minimap** |
-| Air (shells, SAM missiles) | seeded random 4-dir greedy walk, **no obstacle awareness** | full map |
-| Nukes / MIRV | cubic Bézier arc, no map awareness | full map |
+| Domain                         | Algorithm                                                  | Map used    |
+| ------------------------------ | ---------------------------------------------------------- | ----------- |
+| Water (boats, trade, warships) | HPA\* over 32×32 clusters, flat `AStarWater` fallback      | **minimap** |
+| Rail / trains                  | generic A\* + `RailAdapter`                                | **minimap** |
+| Air (shells, SAM missiles)     | seeded random 4-dir greedy walk, **no obstacle awareness** | full map    |
+| Nukes / MIRV                   | cubic Bézier arc, no map awareness                         | full map    |
 
 `PathFinder.ts:168-205`.
 
 **Water cost** (`AStar.Water.ts:5-15`), `BASE_COST = 100`:
 
-| Water magnitude | penalty |
-|---|---|
+| Water magnitude                  | penalty                       |
+| -------------------------------- | ----------------------------- |
 | `< 3` (within ~5 tiles of shore) | **+1000** (11× a normal step) |
-| `3..10` | 0 — the sweet spot |
-| `> 10` (deep) | +100 |
+| `3..10`                          | 0 — the sweet spot            |
+| `> 10` (deep)                    | +100                          |
 
 Ships hug the 3–10 magnitude band, i.e. **6–20 tiles offshore**. Heuristics are
 weighted (5× for `AStarWater`) and therefore **inadmissible** — paths are fast,
@@ -336,18 +338,18 @@ not optimal.
 
 ### Speeds, tiles per tick
 
-| Unit | Speed | Source |
-|---|---|---|
-| Transport ship (boat) | **1** | `TransportShipExecution.ts:38` |
-| Trade ship | **1** | `TradeShipExecution.ts:145-168` |
-| Warship patrolling/retreating | **1** | `WarshipExecution.ts:745-755` |
-| Warship hunting a trade ship | **2**, captures at manhattan ≤ 5 | `WarshipExecution.ts:681-691` |
-| Train | **2** rail tiles | `TrainExecution.ts:34` |
-| Shell | **3** | `ShellExecution.ts:67` |
-| SAM missile | **12** | `Config.ts:1172-1174` |
-| Atom / Hydrogen bomb | **10** arc units | `Config.ts:1123` |
-| MIRV carrier | **15** | `Config.ts:1125` |
-| MIRV warhead | **22** (+0..4 by index) | `Config.ts:1127` |
+| Unit                          | Speed                            | Source                          |
+| ----------------------------- | -------------------------------- | ------------------------------- |
+| Transport ship (boat)         | **1**                            | `TransportShipExecution.ts:38`  |
+| Trade ship                    | **1**                            | `TradeShipExecution.ts:145-168` |
+| Warship patrolling/retreating | **1**                            | `WarshipExecution.ts:745-755`   |
+| Warship hunting a trade ship  | **2**, captures at manhattan ≤ 5 | `WarshipExecution.ts:681-691`   |
+| Train                         | **2** rail tiles                 | `TrainExecution.ts:34`          |
+| Shell                         | **3**                            | `ShellExecution.ts:67`          |
+| SAM missile                   | **12**                           | `Config.ts:1172-1174`           |
+| Atom / Hydrogen bomb          | **10** arc units                 | `Config.ts:1123`                |
+| MIRV carrier                  | **15**                           | `Config.ts:1125`                |
+| MIRV warhead                  | **22** (+0..4 by index)          | `Config.ts:1127`                |
 
 Caveats: a ship "step" is a path node from the upscaled minimap path, so diagonal
 steps give ≈1.41 tiles/tick Euclidean. Nuke speed is along the **arc**, whose
@@ -378,35 +380,35 @@ bit, which is a static "part of the largest water body" flag.
 
 **What components gate:**
 
-| Mechanic | Rule |
-|---|---|
-| Warship construction | your port must share the target water tile's component |
-| Warship move order | **silently skipped** if the ship is in a different component |
-| Warship docking/retreat | ports in the same component only |
-| Trade partners | ports sharing a component with this port's water neighbours |
-| Transport launch | your shore tiles filtered to the destination's component |
-| Transport target | target shore must be on a component adjacent to your shoreline, `maxDist = 50` |
-| AI port siting | ocean, or a lake component ≥ **3,000** full-map tiles (except on Easy) |
+| Mechanic                | Rule                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| Warship construction    | your port must share the target water tile's component                         |
+| Warship move order      | **silently skipped** if the ship is in a different component                   |
+| Warship docking/retreat | ports in the same component only                                               |
+| Trade partners          | ports sharing a component with this port's water neighbours                    |
+| Transport launch        | your shore tiles filtered to the destination's component                       |
+| Transport target        | target shore must be on a component adjacent to your shoreline, `maxDist = 50` |
+| AI port siting          | ocean, or a lake component ≥ **3,000** full-map tiles (except on Easy)         |
 
 A spawn on a lake-only coast gets a port that can only trade with players on the
 **same lake**.
 
 ## 1.6 The spawn phase
 
-| Setting | Value | Source |
-|---|---|---|
-| Spawn phase, singleplayer | 100 ticks | `Config.ts:856-859` |
-| Spawn phase, random spawn | 150 ticks | `Config.ts:860-862` |
-| Spawn phase, otherwise | **200 ticks** | `Config.ts:863` |
-| `minDistanceBetweenPlayers()` | **30** (manhattan) | `Config.ts:823-825` |
-| `MAX_SPAWN_TRIES` | 1,000 | `SpawnExecution.ts:38` |
-| `RELAX_MIN_DIST_AT` | 750 — after try 750 the distance check is dropped | `SpawnExecution.ts:39` |
-| Spawn immunity | 50 ticks | `Config.ts:189` |
+| Setting                       | Value                                             | Source                 |
+| ----------------------------- | ------------------------------------------------- | ---------------------- |
+| Spawn phase, singleplayer     | 100 ticks                                         | `Config.ts:856-859`    |
+| Spawn phase, random spawn     | 150 ticks                                         | `Config.ts:860-862`    |
+| Spawn phase, otherwise        | **200 ticks**                                     | `Config.ts:863`        |
+| `minDistanceBetweenPlayers()` | **30** (manhattan)                                | `Config.ts:823-825`    |
+| `MAX_SPAWN_TRIES`             | 1,000                                             | `SpawnExecution.ts:38` |
+| `RELAX_MIN_DIST_AT`           | 750 — after try 750 the distance check is dropped | `SpawnExecution.ts:39` |
+| Spawn immunity                | 50 ticks                                          | `Config.ts:189`        |
 
 ## 1.7 The starting territory: exactly 52 tiles
 
 `getSpawnTiles(gm, tile, requireAllValid)` (**`src/core/execution/Util.ts:130-159`**
-— note: *execution*/Util.ts, not `src/core/Util.ts`) BFS-floods
+— note: _execution_/Util.ts, not `src/core/Util.ts`) BFS-floods
 `euclDistFN(tile, 4, center=true)`, which shifts the circle centre to
 `(x-0.5, y-0.5)` and tests `dx² + dy² <= 16` (`GameMap.ts:715-735`).
 
@@ -415,6 +417,7 @@ widths top to bottom `4, 6, 8, 8, 8, 8, 6, 4`. **The disc is biased up-and-left
 of the clicked tile by half a tile.**
 
 Two modes:
+
 - `requireAllValid = true` → `null` if **any** of the 52 is owned, non-land or
   impassable. Used by the random-spawn search.
 - `requireAllValid = false` → the valid subset, possibly fewer than 52. Used for
@@ -429,6 +432,7 @@ Client-side gating before the intent is sent: `isLand && !hasOwner &&
 inSpawnPhase && !isRandomSpawn` (`ClientGameRunner.ts:1216-1224`).
 
 Server-side gates on the intent path (`SpawnExecution.ts:60-94`):
+
 - invalid `TileRef` → no-op
 - the intent must have been **queued during** the spawn phase (captured in
   `init()`). An intent sent on the last spawn tick still lands; later ones do not.
@@ -444,7 +448,7 @@ manhattan 30; then require **all 52 tiles** valid.
 
 Because of that last requirement the **disc itself** contains no water, no
 impassable terrain and nobody else's land. It does **not** follow that the spawn
-is inland: nothing constrains the tiles *outside* the disc, and the disc's outer
+is inland: nothing constrains the tiles _outside_ the disc, and the disc's outer
 ring is 4-adjacent to them, so a disc-edge tile beside water is a shore tile and a
 Port can be built on it at once. Measured: **5 of 500** valid random-spawn discs
 on Iceland (Normal) contained an `isShore` tile. Coastal random spawns are rare,
@@ -452,11 +456,11 @@ not impossible. If all 1,000 tries fail the player is simply not placed.
 
 ### Who gets spawned
 
-| Population | Trigger |
-|---|---|
-| Humans | **only when `isRandomSpawn()`** are spawns pre-created (`PlayerSpawner.ts:13-23`) |
-| Nations | one `NationExecution` each when `spawnNations()` |
-| Bots (tribes) | `TribeSpawner.spawnTribes(bots())` when `bots() > 0` |
+| Population    | Trigger                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| Humans        | **only when `isRandomSpawn()`** are spawns pre-created (`PlayerSpawner.ts:13-23`) |
+| Nations       | one `NationExecution` each when `spawnNations()`                                  |
+| Bots (tribes) | `TribeSpawner.spawnTribes(bots())` when `bots() > 0`                              |
 
 > With random spawn **off**, a human who never sends a spawn intent is never
 > placed. There is no end-of-phase fallback anywhere.
@@ -512,7 +516,7 @@ encircled**. The cost is that coastline is a second attack surface: enemy boats
 land on any shore tile reachable within 50 tiles of their target.
 
 **7. Terrain does not affect economy at all.** Gold is flat; troop growth depends
-only on tile *count*. **Land quantity beats land quality for economy; land quality
+only on tile _count_. **Land quantity beats land quality for economy; land quality
 only buys defence.**
 
 **8. Nations avoid mountains 50% of the time**, so mountain-adjacent spawns tend
@@ -534,15 +538,15 @@ This is the core loop. Every number here was verified directly against
 
 ### Inputs
 
-| Field | Source |
-|---|---|
-| `terrain` | terrain of the tile being taken |
-| `attackTroops` | the **live, decreasing** stack (`AttackExecution.ts:332`) |
-| `attacker` | `{type, numTiles}` |
-| `defender` | `null` for TerraNullius, else `{type, numTiles, troops, isTraitor, isDisconnectedTeammate}` |
-| `defenderHasDefensePost` | boolean — any active defender post within **30** |
-| `falloutRatio` | `numTilesWithFallout / numLandTiles` — a **global** ratio, not local |
-| `borderSize` | `attack.borderSize() + rand(0..4)`, **computed once per tick** |
+| Field                    | Source                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `terrain`                | terrain of the tile being taken                                                             |
+| `attackTroops`           | the **live, decreasing** stack (`AttackExecution.ts:332`)                                   |
+| `attacker`               | `{type, numTiles}`                                                                          |
+| `defender`               | `null` for TerraNullius, else `{type, numTiles, troops, isTraitor, isDisconnectedTeammate}` |
+| `defenderHasDefensePost` | boolean — any active defender post within **30**                                            |
+| `falloutRatio`           | `numTilesWithFallout / numLandTiles` — a **global** ratio, not local                        |
+| `borderSize`             | `attack.borderSize() + rand(0..4)`, **computed once per tick**                              |
 
 ### Modifier order (`Config.ts:882-920`)
 
@@ -600,43 +604,43 @@ tickFraction = speedCost * tileCost
   attackers and dies **25% faster**.
 - `attackerTroopLoss` is **per tile**, not per tick.
 - `attackTroops` fed into the formula is the live count, so losses and speed both
-  worsen *within* a single tick as the stack burns down.
+  worsen _within_ a single tick as the stack burns down.
 
 ### Golden values (pinned in `tests/__snapshots__/AttackLogicGolden.test.ts.snap`)
 
 Baseline: Plains, attacker 20k tiles, defender 20k tiles / 100k troops, attack
 100k troops, `borderSize` 100.
 
-| Case | atk loss/tile | def loss/tile | `tickFraction` |
-|---|---|---|---|
-| baseline | 38.56 | 5 | 0.01928 (≈52 tiles/tick) |
-| defender has a defense post | 192.79 (5×) | 5 | 0.05783 (3×) |
-| defender is a traitor | 19.28 (0.5×) | 5 | 0.01542 (0.8×) |
-| human/nation attacks a Bot | 26.99 (0.7×) | 5 | unchanged |
-| **bot attacks human** | 38.56 | 5 | unchanged — **no bot-attacker penalty** |
-| **bot attacks bot** | 38.56 | 5 | unchanged — the 0.7× does NOT apply |
-| disconnected teammate | **0** | 5 | unchanged |
-| fallout 10% (f = 4.8) | 185.08 | 5 | 0.09252 |
-| fallout 100% (f = 3) | 115.67 | 5 | 0.05783 |
-| Mountain + post + fallout 0.5 + traitor | 578.36 | 5 | 0.28037 |
+| Case                                    | atk loss/tile | def loss/tile | `tickFraction`                          |
+| --------------------------------------- | ------------- | ------------- | --------------------------------------- |
+| baseline                                | 38.56         | 5             | 0.01928 (≈52 tiles/tick)                |
+| defender has a defense post             | 192.79 (5×)   | 5             | 0.05783 (3×)                            |
+| defender is a traitor                   | 19.28 (0.5×)  | 5             | 0.01542 (0.8×)                          |
+| human/nation attacks a Bot              | 26.99 (0.7×)  | 5             | unchanged                               |
+| **bot attacks human**                   | 38.56         | 5             | unchanged — **no bot-attacker penalty** |
+| **bot attacks bot**                     | 38.56         | 5             | unchanged — the 0.7× does NOT apply     |
+| disconnected teammate                   | **0**         | 5             | unchanged                               |
+| fallout 10% (f = 4.8)                   | 185.08        | 5             | 0.09252                                 |
+| fallout 100% (f = 3)                    | 115.67        | 5             | 0.05783                                 |
+| Mountain + post + fallout 0.5 + traitor | 578.36        | 5             | 0.28037                                 |
 
 ### End-to-end scenarios (`tests/__snapshots__/AttackScenarios.test.ts.snap`)
 
 100×100 plains map, two ~5,000-tile rectangles, no troop regen:
 
-| Scenario | ticks | tiles taken | atk loss/tile |
-|---|---|---|---|
-| 50k vs 50k, attack 10k | 24 | 125 | 80 |
-| 50k vs 50k, attack 50k (all-in) | 43 | 805 | 62.1 |
-| 200k vs 20k, attack 40k | 30 | 1,184 | 33.8 |
-| 20k vs 200k, attack 4k | 27 | 41 | 97.6 |
-| vs bot defender, attack 10k | 34 | 178 | 56.2 |
-| vs traitor defender, attack 10k | 39 | 249 | 40.2 |
-| one defense post at the border, attack 10k | 13 | 39 | 256.4 |
-| three posts covering the whole border, attack 10k | 11 | 25 | 400 |
-| **vs terra nullius, attack 2k (human)** | 25 | 125 | **16 flat** |
-| **vs terra nullius, attack 2k (bot)** | 50 | 250 | **8 flat** |
-| 400-tile turtle, 4M troops, under a post, attacked with 1M | 17 | 32 | 31,250 |
+| Scenario                                                   | ticks | tiles taken | atk loss/tile |
+| ---------------------------------------------------------- | ----- | ----------- | ------------- |
+| 50k vs 50k, attack 10k                                     | 24    | 125         | 80            |
+| 50k vs 50k, attack 50k (all-in)                            | 43    | 805         | 62.1          |
+| 200k vs 20k, attack 40k                                    | 30    | 1,184       | 33.8          |
+| 20k vs 200k, attack 4k                                     | 27    | 41          | 97.6          |
+| vs bot defender, attack 10k                                | 34    | 178         | 56.2          |
+| vs traitor defender, attack 10k                            | 39    | 249         | 40.2          |
+| one defense post at the border, attack 10k                 | 13    | 39          | 256.4         |
+| three posts covering the whole border, attack 10k          | 11    | 25          | 400           |
+| **vs terra nullius, attack 2k (human)**                    | 25    | 125         | **16 flat**   |
+| **vs terra nullius, attack 2k (bot)**                      | 50    | 250         | **8 flat**    |
+| 400-tile turtle, 4M troops, under a post, attacked with 1M | 17    | 32          | 31,250        |
 
 Note the pattern: **in PvP the attack always spends its entire stack** unless it
 runs out of frontier first.
@@ -705,21 +709,21 @@ heap entries cost nothing, so the loop can churn many duplicates in one tick.
 
 ## 2.4 How an attack ends
 
-| Situation | Outcome |
-|---|---|
-| `troops < 1` | `attack.delete()` — **every remaining troop is lost, nothing refunded** |
-| Frontier empties | `retreat(0)` — **100% of remaining troops returned, free** |
-| Alliance formed mid-attack | `retreat(0)` — free |
-| You cancel vs a player | 20 ticks frozen, then **25% of the remaining stack dies** |
-| You cancel vs TerraNullius | 20 ticks frozen, then **free** |
-| Defender drops below 100 tiles | `handleDeadDefender()` |
+| Situation                      | Outcome                                                                 |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `troops < 1`                   | `attack.delete()` — **every remaining troop is lost, nothing refunded** |
+| Frontier empties               | `retreat(0)` — **100% of remaining troops returned, free**              |
+| Alliance formed mid-attack     | `retreat(0)` — free                                                     |
+| You cancel vs a player         | 20 ticks frozen, then **25% of the remaining stack dies**               |
+| You cancel vs TerraNullius     | 20 ticks frozen, then **free**                                          |
+| Defender drops below 100 tiles | `handleDeadDefender()`                                                  |
 
 ### `handleDeadDefender()` (`:448-481`)
 
 Triggers when `target.numTilesOwned() < 100`. Calls `conquerPlayer` (gold
 transfer, kill stats), then up to 100 passes over the defender's remaining tiles:
 any tile bordering **you** is yours; otherwise any tile bordering a **third**
-non-friendly player is conquered by *that* player.
+non-friendly player is conquered by _that_ player.
 
 > Finishing a player instantly wipes their last <100 tiles and **partially gifts
 > them to your neighbours**. If a rival borders the corpse, you are feeding them.
@@ -748,12 +752,12 @@ priority     = (rand(0..6) + 10) * (1 - numOwnedByMe*0.5 + mag/2) + currentTick
 ```
 
 Consequences:
+
 - `+ currentTick` means earlier-discovered tiles win ties — the frontier is
   roughly FIFO across ticks.
 - The `(1 - numOwnedByMe*0.5 + mag/2)` factor shrinks as you surround a tile, so
   **concave pockets and salients are eaten first**, before the front advances. It
-  first reaches ≤0 at `numOwnedByMe = 3` on plains (`mag/2 = 0.5`, giving exactly
-  0) and is strictly negative only at 4; on mountain (`mag/2 = 1`) it is never
+  first reaches ≤0 at `numOwnedByMe = 3` on plains (`mag/2 = 0.5`, giving exactly 0) and is strictly negative only at 4; on mountain (`mag/2 = 1`) it is never
   negative. At `numOwnedByMe = 2` it is still +0.5 on plains.
 - Mountains get a larger positive multiplier than plains, so **the attack prefers
   flat land and routes around mountains**.
@@ -761,7 +765,7 @@ Consequences:
   every game**. It is variety, not unpredictability.
 
 > **Attack direction is not "toward the capital".** You choose where an attack
-> *starts* (via a boat) and how many troops it gets. You do not choose where it
+> _starts_ (via a boat) and how many troops it gets. You do not choose where it
 > goes.
 
 **`borderSize` is a first-class resource.** `tickFraction` divides by it, so tiles
@@ -775,7 +779,7 @@ Ownership moves, borders are recomputed for the tile and its 4 neighbours, and
 
 **Structures on a captured tile** (`PlayerExecution.ts:57-78`): everything
 transfers to the new owner at its current level — **except a Defense Post, which
-is destroyed**. A structure whose tile becomes *unowned* is destroyed outright.
+is destroyed**. A structure whose tile becomes _unowned_ is destroyed outright.
 
 ### Disconnected territory
 
@@ -788,16 +792,17 @@ water or the map edge through own-or-unclaimed land.
 
 ## 2.6 Amphibious assault
 
-| Property | Value |
-|---|---|
-| Gold cost | **0** |
-| Troop cost | deducted at departure |
-| Concurrent boats | **3** (`boatMaxNumber()`), 0 if TransportShip is disabled |
-| **Cooldown** | **none — there is no boat cooldown anywhere in `src/core`** |
-| Speed | 1 tile/tick, water A* |
-| Landing search | nearest shore within manhattan **50** of the click, owned by the owner of the clicked tile, on a water component touching your shoreline |
+| Property         | Value                                                                                                                                    |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Gold cost        | **0**                                                                                                                                    |
+| Troop cost       | deducted at departure                                                                                                                    |
+| Concurrent boats | **3** (`boatMaxNumber()`), 0 if TransportShip is disabled                                                                                |
+| **Cooldown**     | **none — there is no boat cooldown anywhere in `src/core`**                                                                              |
+| Speed            | 1 tile/tick, water A\*                                                                                                                   |
+| Landing search   | nearest shore within manhattan **50** of the click, owned by the owner of the clicked tile, on a water component touching your shoreline |
 
 **On arrival** (`TransportShipExecution.ts:239-292`):
+
 - Target tile owned by **you** → treated as a return: **25% of the troops die**.
   This fires even on a normal outbound trip if you captured the landing tile by
   land in the meantime.
@@ -829,24 +834,24 @@ if (defender === null) {
 }
 ```
 
-| | TerraNullius | Player |
-|---|---|---|
-| Attacker loss/tile | **flat**: Plains 16, Highland 20, Mountain 24 (human/nation); half for bots | scales with troop ratio, density, territory size |
-| Effect of stack size on loss | **none** | bigger stack is cheaper per tile |
-| Defender loss | 0 | `troops / numTiles` per tile |
-| Tick budget | `borderSize * 2` (**double**) | 1 |
-| Posts / fallout | **still apply** | apply |
-| Traitor / territory curves | do **not** apply | apply |
-| Retreat malus | **0%** | 25% |
+|                              | TerraNullius                                                                | Player                                           |
+| ---------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------ |
+| Attacker loss/tile           | **flat**: Plains 16, Highland 20, Mountain 24 (human/nation); half for bots | scales with troop ratio, density, territory size |
+| Effect of stack size on loss | **none**                                                                    | bigger stack is cheaper per tile                 |
+| Defender loss                | 0                                                                           | `troops / numTiles` per tile                     |
+| Tick budget                  | `borderSize * 2` (**double**)                                               | 1                                                |
+| Posts / fallout              | **still apply**                                                             | apply                                            |
+| Traitor / territory curves   | do **not** apply                                                            | apply                                            |
+| Retreat malus                | **0%**                                                                      | 25%                                              |
 
 **The expansion speed saturates.** The per-tile cost clamps at 5 once
 `attackTroops >= 400 * tileCost`:
 
-| Terrain | troops to saturate | max tiles/tick |
-|---|---|---|
-| Plains | 6,600 | `0.4 × borderSize` |
-| Highland | 8,000 | `0.4 × borderSize` |
-| Mountain | 10,000 | `0.4 × borderSize` |
+| Terrain  | troops to saturate | max tiles/tick     |
+| -------- | ------------------ | ------------------ |
+| Plains   | 6,600              | `0.4 × borderSize` |
+| Highland | 8,000              | `0.4 × borderSize` |
+| Mountain | 10,000             | `0.4 × borderSize` |
 
 Past ~10k troops, throwing more at neutral land buys nothing but more simultaneous
 frontage. Confirmed by scenario data: 2k troops → 125 tiles in 25 ticks (5/tick);
@@ -857,16 +862,16 @@ fallout multiplier); only the AI avoids it.
 
 ## 2.8 Defense posts
 
-| Property | Value |
-|---|---|
-| Range | **30** tiles, Euclidean (`distSquared <= 900`) |
-| Attacker-loss multiplier | **×5** |
-| Attacker-speed multiplier | **×3** slower |
-| Cost | `min(250_000, (n+1) * 50_000)` |
-| Build time | 50 ticks |
-| Min spacing from any structure | 15 tiles |
-| On tile capture | **destroyed**, not captured |
-| Upgradable | **no** |
+| Property                       | Value                                          |
+| ------------------------------ | ---------------------------------------------- |
+| Range                          | **30** tiles, Euclidean (`distSquared <= 900`) |
+| Attacker-loss multiplier       | **×5**                                         |
+| Attacker-speed multiplier      | **×3** slower                                  |
+| Cost                           | `min(250_000, (n+1) * 50_000)`                 |
+| Build time                     | 50 ticks                                       |
+| Min spacing from any structure | 15 tiles                                       |
+| On tile capture                | **destroyed**, not captured                    |
+| Upgradable                     | **no**                                         |
 
 **Posts do not stack.** `defenderHasDefensePost` is a boolean that short-circuits
 on the first match. Two overlapping posts give exactly the same 5×/3× as one. The
@@ -889,10 +894,10 @@ Under-construction posts do not count. A post must belong to the defender.
 3. **Frontage is the master speed variable.** Tiles/tick scales ~linearly with
    `borderSize`. A boat beachhead starts at ≤4 border tiles and is therefore
    glacial for its first ticks.
-4. **Cancelling costs 20 frozen ticks *before* the 25% tax.**
+4. **Cancelling costs 20 frozen ticks _before_ the 25% tax.**
 5. **Retreating from unclaimed land is free; from a player it costs 25%.**
 6. **A new land attack eats your existing boat beachhead** against the same
-   target — the merge checks *your* `sourceTile`, not the victim's. The spread-out
+   target — the merge checks _your_ `sourceTile`, not the victim's. The spread-out
    beachhead frontier is thrown away.
 7. **Simultaneous opposing attacks annihilate 1:1** at creation. Attacking someone
    who is attacking you can cancel both stacks before a tile moves.
@@ -909,7 +914,7 @@ Under-construction posts do not count. A post must belong to the defender.
 12. **Big empires are easier to attack AND better at attacking.**
     `largeTerritoryBonus` cuts attacker losses to 0.3× and speeds them up at giant
     size. This is deliberately anti-turtle.
-13. **Bots only get the 0.7× discount as *defenders* against Human/Nation
+13. **Bots only get the 0.7× discount as _defenders_ against Human/Nation
     attackers.** Bot-attacks-bot and bot-attacks-human get nothing.
 14. **Spawn immunity binds only Human attackers.** Nations and Bots ignore it.
 15. **Fewer than 100 defender tiles = instant elimination** on the next tile, and
@@ -935,11 +940,11 @@ Under-construction posts do not count. A post must belong to the defender.
 
 ### Starting troops (`Config.ts:1003-1022`)
 
-| Player | Troops |
-|---|---|
-| Bot | 10,000 |
-| Nation, Easy / Medium / Hard / Impossible | 12,500 / 18,750 / 25,000 / 31,250 |
-| Human | 25,000 (1,000,000 with `infiniteTroops`) |
+| Player                                    | Troops                                   |
+| ----------------------------------------- | ---------------------------------------- |
+| Bot                                       | 10,000                                   |
+| Nation, Easy / Medium / Hard / Impossible | 12,500 / 18,750 / 25,000 / 31,250        |
+| Human                                     | 25,000 (1,000,000 with `infiniteTroops`) |
 
 ### `maxTroops` (`Config.ts:1024-1056`) — verified
 
@@ -956,15 +961,15 @@ necessarily an integer** — downstream code handles floats.)
 
 A player with **zero tiles still has `maxTroops = 100,000`.**
 
-| tiles | maxTroops (0 cities) | marginal per tile |
-|---|---|---|
-| 50 | 120,913 | 250.0 |
-| 100 | 131,698 | 189.8 |
-| 500 | 183,255 | 99.9 |
-| 1,000 | 226,191 | 75.7 |
-| 5,000 | 431,445 | 39.8 |
-| 20,000 | 861,462 | 22.8 |
-| 100,000 | 2,100,000 | 12.0 |
+| tiles   | maxTroops (0 cities) | marginal per tile |
+| ------- | -------------------- | ----------------- |
+| 50      | 120,913              | 250.0             |
+| 100     | 131,698              | 189.8             |
+| 500     | 183,255              | 99.9              |
+| 1,000   | 226,191              | 75.7              |
+| 5,000   | 431,445              | 39.8              |
+| 20,000  | 861,462              | 22.8              |
+| 100,000 | 2,100,000            | 12.0              |
 
 `d(maxTroops)/dn = 1200 · n^-0.4` — the marginal value of a tile **halves every
 ~5.6× territory**.
@@ -991,12 +996,12 @@ Applied **every tick, to every alive player** (`PlayerExecution.ts:97-103`).
 
 **[DERIVED]** Time to saturate from T = 25,000:
 
-| maxTroops | to 50% | to 90% | to 99% |
-|---|---|---|---|
-| 121,411 (spawn territory) | 94 | 281 | 502 |
-| 300,000 | 193 | 434 | 717 |
-| 1,000,000 | 360 | 694 | 1,088 |
-| 2,000,000 | 482 | 886 | 1,361 |
+| maxTroops                 | to 50% | to 90% | to 99% |
+| ------------------------- | ------ | ------ | ------ |
+| 121,411 (spawn territory) | 94     | 281    | 502    |
+| 300,000                   | 193    | 434    | 717    |
+| 1,000,000                 | 360    | 694    | 1,088  |
+| 2,000,000                 | 482    | 886    | 1,361  |
 
 **Troops refill to ~99% of cap in under two minutes of game time. Troops are never
 the long-run bottleneck — `maxTroops` is.**
@@ -1013,15 +1018,15 @@ back down.
 
 ### Every income source
 
-| Source | Amount | Site |
-|---|---|---|
-| **Passive** | **100/tick** (50 for bots) × `goldMultiplier` — **flat, independent of everything** | `Config.ts:1092-1101` |
+| Source             | Amount                                                                                            | Site                            |
+| ------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------- |
+| **Passive**        | **100/tick** (50 for bots) × `goldMultiplier` — **flat, independent of everything**               | `Config.ts:1092-1101`           |
 | Trade ship arrival | `tradeShipGold(tilesTravelled)` to **each** of the source and destination port owners — not split | `TradeShipExecution.ts:214-215` |
-| Trade ship piracy | full amount to the captor | `TradeShipExecution.ts:195-196` |
-| Train stop | `trainGold(rel, stops)` to the train owner **and** the station owner | `TrainStation.ts:38-42` |
-| Conquest | 100% of a bot's/nation's gold, **50%** of a human's | `Config.ts:735-744` |
-| Donation | whatever the ally sends | `PlayerImpl.ts:1175` |
-| Starting gold | `gameConfig.startingGold ?? 0`; bots always 0 | `PlayerImpl.ts:217` |
+| Trade ship piracy  | full amount to the captor                                                                         | `TradeShipExecution.ts:195-196` |
+| Train stop         | `trainGold(rel, stops)` to the train owner **and** the station owner                              | `TrainStation.ts:38-42`         |
+| Conquest           | 100% of a bot's/nation's gold, **50%** of a human's                                               | `Config.ts:735-744`             |
+| Donation           | whatever the ally sends                                                                           | `PlayerImpl.ts:1175`            |
+| Starting gold      | `gameConfig.startingGold ?? 0`; bots always 0                                                     | `PlayerImpl.ts:217`             |
 
 **Human base income = 100 gold/tick = 1,000/s = 60,000/min.** Pinned by
 `tests/economy/ConstructionGold.test.ts:54`.
@@ -1036,21 +1041,23 @@ the delete path.
 ### Trade ships
 
 `tradeShipGold(dist)` (`Config.ts:516-521`):
+
 ```
 75_000 / (1 + e^(-0.03 * (dist - 300)))  +  50 * dist
 ```
+
 `dist` is **tiles actually travelled**, not straight-line.
 
-| dist | gold |
-|---|---|
-| 100 | 5,185 |
-| 200 | 13,556 |
-| **300** (inflection) | 52,500 |
-| 400 | 91,443 |
-| 500 | 99,814 |
-| 1,000 | 124,999 |
-| 2,000 | 175,000 |
-| 5,000 | 325,000 |
+| dist                 | gold    |
+| -------------------- | ------- |
+| 100                  | 5,185   |
+| 200                  | 13,556  |
+| **300** (inflection) | 52,500  |
+| 400                  | 91,443  |
+| 500                  | 99,814  |
+| 1,000                | 124,999 |
+| 2,000                | 175,000 |
+| 5,000                | 325,000 |
 
 The sigmoid centred on 300 is a brutal punishment for short hops. Past ~500 tiles
 only the linear `50·dist` term still grows.
@@ -1072,14 +1079,14 @@ throttled by everyone else's ports. Consecutive failures raise the odds (a pity
 timer), which square-roots the effect of saturation.
 
 | world fleet | saturation | rate | **[DERIVED]** sec/ship at a level-1 port |
-|---|---|---|---|
-| 0 | 1.435 | 69 | 9.7 |
-| 100 | 1.148 | 87 | 11.0 |
-| 300 | 0.625 | 160 | 15.2 |
-| 500 | 0.224 | 446 | 25.8 |
-| 800 | 0.125 | 799 | 34.8 |
+| ----------- | ---------- | ---- | ---------------------------------------- |
+| 0           | 1.435      | 69   | 9.7                                      |
+| 100         | 1.148      | 87   | 11.0                                     |
+| 300         | 0.625      | 160  | 15.2                                     |
+| 500         | 0.224      | 446  | 25.8                                     |
+| 800         | 0.125      | 799  | 34.8                                     |
 
-> The pity counter is per-port and increments once per *failed roll*, so a level-3
+> The pity counter is per-port and increments once per _failed roll_, so a level-3
 > port's counter climbs 3× as fast as a level-1 port's. **Port levels are
 > superlinear in trade output** — the repo's own scenario data shows a level-3 port
 > earning 1,485,000/min against a level-1's 800,700/min. This is not documented in
@@ -1096,18 +1103,19 @@ gets no bonus at all**. Maximum weight is `3 × level`.
 ### Trains
 
 `trainGold(rel, citiesVisited)` (`Config.ts:481-504`):
+
 ```
 citiesVisited = max(0, citiesVisited - 9)          // the first 10 stops are free
 base = { ally: 35_000, team: 25_000, other: 25_000, self: 10_000 }[rel]
 gold = max(5_000, base - citiesVisited * 5_000)
 ```
 
-| stops | self | team/other | **ally** |
-|---|---|---|---|
-| 0–9 | 10,000 | 25,000 | **35,000** |
-| 10 | 5,000 | 20,000 | 30,000 |
-| 12 | 5,000 | 10,000 | 20,000 |
-| ≥15 | 5,000 | 5,000 | 5,000 |
+| stops | self   | team/other | **ally**   |
+| ----- | ------ | ---------- | ---------- |
+| 0–9   | 10,000 | 25,000     | **35,000** |
+| 10    | 5,000  | 20,000     | 30,000     |
+| 12    | 5,000  | 10,000     | 20,000     |
+| ≥15   | 5,000  | 5,000      | 5,000      |
 
 Both the train owner and the station owner get the full amount. Only City and Port
 stations pay; Factory stops pay nothing and do not increment the counter.
@@ -1117,6 +1125,7 @@ cluster with a formal ally is a 3.5× multiplier over self-trade, for both parti
 
 **Spawn**: only Factory stations spawn trains. Per tick, `level` rolls with
 probability `1/trainSpawnRate`, min 10-tick gap between trains:
+
 ```
 trainSpawnRate(F, n) = max(1, floor( (F + 10) * 15 / trainSaturation(n) ))
     F = YOUR factory levels, n = GLOBAL train-unit count (a train is 7 units)
@@ -1130,26 +1139,28 @@ asymptote. **Factories have severe self-inflicted diminishing returns.**
 ## 3.3 Structure cost ladders
 
 `costWrapper` (`Config.ts:755-774`):
+
 ```
 numUnits = Σ over the listed types of min( unitsOwned(type), unitsConstructed(type) )
 cost     = costFn(numUnits + extraUnits)
 ```
-`unitsOwned` counts **levels** for completed units, so an *upgrade* advances the
+
+`unitsOwned` counts **levels** for completed units, so an _upgrade_ advances the
 same ladder as a new build. Losing units **lowers the price again**.
 
-| Unit | Formula | Shares ladder with | Ladder |
-|---|---|---|---|
-| City | `min(1e6, 2^k · 125,000)` | — | 125k → 250k → 500k → **1M flat** |
-| Port | `min(1e6, 2^k · 125,000)` | **Factory** | same |
-| Factory | `min(1e6, 2^k · 125,000)` | **Port** | same |
-| Defense Post | `min(250,000, (k+1) · 50,000)` | — | 50k, 100k, 150k, 200k, 250k |
-| Missile Silo | flat 1,000,000 | — | — |
-| SAM Launcher | `min(3e6, (k+1) · 1,500,000)` | — | 1.5M, 3M, 3M… |
-| Warship | `min(1e6, (k+1) · 250,000)` | — | 250k, 500k, 750k, 1M… |
-| Atom Bomb | flat 750,000 | — | — |
-| Hydrogen Bomb | flat 5,000,000 | — | — |
-| MIRV | `25M + 15M × game.mirvsLaunched()` | **global, all players** | 25M, 40M, 55M… |
-| Transport, Trade Ship, Train, Shell, SAM Missile, MIRV Warhead | **0** | — | — |
+| Unit                                                           | Formula                            | Shares ladder with      | Ladder                           |
+| -------------------------------------------------------------- | ---------------------------------- | ----------------------- | -------------------------------- |
+| City                                                           | `min(1e6, 2^k · 125,000)`          | —                       | 125k → 250k → 500k → **1M flat** |
+| Port                                                           | `min(1e6, 2^k · 125,000)`          | **Factory**             | same                             |
+| Factory                                                        | `min(1e6, 2^k · 125,000)`          | **Port**                | same                             |
+| Defense Post                                                   | `min(250,000, (k+1) · 50,000)`     | —                       | 50k, 100k, 150k, 200k, 250k      |
+| Missile Silo                                                   | flat 1,000,000                     | —                       | —                                |
+| SAM Launcher                                                   | `min(3e6, (k+1) · 1,500,000)`      | —                       | 1.5M, 3M, 3M…                    |
+| Warship                                                        | `min(1e6, (k+1) · 250,000)`        | —                       | 250k, 500k, 750k, 1M…            |
+| Atom Bomb                                                      | flat 750,000                       | —                       | —                                |
+| Hydrogen Bomb                                                  | flat 5,000,000                     | —                       | —                                |
+| MIRV                                                           | `25M + 15M × game.mirvsLaunched()` | **global, all players** | 25M, 40M, 55M…                   |
+| Transport, Trade Ship, Train, Shell, SAM Missile, MIRV Warhead | **0**                              | —                       | —                                |
 
 > **Ports and Factories share one counter.** Your first Factory costs 125,000 only
 > if you own no Ports. Build three Ports and the next Factory costs 1,000,000.
@@ -1159,31 +1170,31 @@ cumulative array; flat-cost nukes scale linearly.
 
 ## 3.4 Donations
 
-| Check | Rule |
-|---|---|
-| Relationship | must be `isFriendly` — **a formal ally or a teammate, and not disconnected** |
-| Human recipient | blocked unless the lobby enables `donateGold` / `donateTroops` |
-| Cooldown | **100 ticks, per recipient** — you can donate to three allies in the same tick |
-| Gold default | `sender.gold() / 3`; **no cap** |
-| Troop default | `floor(sender.troops() / 3)`; **capped at `maxTroops(recipient) - recipient.troops()`** |
+| Check           | Rule                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| Relationship    | must be `isFriendly` — **a formal ally or a teammate, and not disconnected**            |
+| Human recipient | blocked unless the lobby enables `donateGold` / `donateTroops`                          |
+| Cooldown        | **100 ticks, per recipient** — you can donate to three allies in the same tick          |
+| Gold default    | `sender.gold() / 3`; **no cap**                                                         |
+| Troop default   | `floor(sender.troops() / 3)`; **capped at `maxTroops(recipient) - recipient.troops()`** |
 
 Relation gained: gold gives `min(100, 5 · floor(goldSent / adjustedChunk))` where
 the chunk inflates with game time (`chunk × (1 + ticks/(3000 + spawnTicks))`) —
 **late donations buy proportionally less goodwill**. Troops give a flat +50 if
-above a randomised threshold (a fraction of the *recipient's* `maxTroops`,
+above a randomised threshold (a fraction of the _recipient's_ `maxTroops`,
 deliberately random so you cannot probe it).
 
 ## 3.5 Economic tick rates
 
-| Update | Cadence |
-|---|---|
-| Passive gold + troop growth | **every tick, per alive player** |
-| Alliance / embargo expiry sweeps | every tick |
-| Territory cluster recalc | every 20 ticks, or **every tick under 100 tiles** — and skipped entirely unless `lastTileChange() >= lastCalc` (`PlayerExecution.ts:121-125`) |
-| Trade-ship spawn roll | every 10 ticks per port, `level` rolls |
-| Train spawn roll | every tick per factory station, `level` rolls, 10-tick min gap |
-| Donate cooldown | 100 ticks |
-| Delete-unit cooldown / mark delay | 300 / 300 ticks |
+| Update                            | Cadence                                                                                                                                       |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Passive gold + troop growth       | **every tick, per alive player**                                                                                                              |
+| Alliance / embargo expiry sweeps  | every tick                                                                                                                                    |
+| Territory cluster recalc          | every 20 ticks, or **every tick under 100 tiles** — and skipped entirely unless `lastTileChange() >= lastCalc` (`PlayerExecution.ts:121-125`) |
+| Trade-ship spawn roll             | every 10 ticks per port, `level` rolls                                                                                                        |
+| Train spawn roll                  | every tick per factory station, `level` rolls, 10-tick min gap                                                                                |
+| Donate cooldown                   | 100 ticks                                                                                                                                     |
+| Delete-unit cooldown / mark delay | 300 / 300 ticks                                                                                                                               |
 
 > **Nothing economic runs during the spawn phase.** `PlayerExecution`,
 > `PortExecution`, `FactoryExecution`, `CityExecution`, `TrainStationExecution`,
@@ -1192,43 +1203,43 @@ deliberately random so you cannot probe it).
 
 ## 3.6 Where the loop actually breaks — **[DERIVED]**
 
-| Bottleneck | Why |
-|---|---|
-| **1. Coastline + a willing foreign port** | One ocean-crossing port pair is ~13× base income. Landlocked or universally embargoed, you are stuck at 60,000/min plus trains |
-| **2. Trade distance ≥ ~300 tiles** | Below the debuff the sigmoid collapses — a short coastal hop earns ~62,000/min, barely above base, for a 125,000 investment |
-| **3. Global fleet saturation** | In a big lobby `tradeShipSaturation` falls toward 0.25 regardless of your play |
-| **4. Factory count past ~10** | `sat·F/(15(F+10))`: 10 → 20 factories buys ~33% more trains for ~10M gold |
-| **5. Tiles past a few thousand** | Marginal max-troop yield drops below 40/tile; one city level is worth ~5,100 tiles at that margin |
-| **6. The flat 1M cost cap** | Past the 4th structure on a ladder, marginal cost is constant and marginal benefit is roughly constant. **The loop goes linear, not compounding** |
+| Bottleneck                                | Why                                                                                                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Coastline + a willing foreign port** | One ocean-crossing port pair is ~13× base income. Landlocked or universally embargoed, you are stuck at 60,000/min plus trains                    |
+| **2. Trade distance ≥ ~300 tiles**        | Below the debuff the sigmoid collapses — a short coastal hop earns ~62,000/min, barely above base, for a 125,000 investment                       |
+| **3. Global fleet saturation**            | In a big lobby `tradeShipSaturation` falls toward 0.25 regardless of your play                                                                    |
+| **4. Factory count past ~10**             | `sat·F/(15(F+10))`: 10 → 20 factories buys ~33% more trains for ~10M gold                                                                         |
+| **5. Tiles past a few thousand**          | Marginal max-troop yield drops below 40/tile; one city level is worth ~5,100 tiles at that margin                                                 |
+| **6. The flat 1M cost cap**               | Past the 4th structure on a ladder, marginal cost is constant and marginal benefit is roughly constant. **The loop goes linear, not compounding** |
 
 ### Measured income (from the repo's own committed snapshots)
 
 `tests/__snapshots__/TradeTrainScenarios.test.ts.snap` — gold/min per side:
 
-| Setup | gold/min | × base |
-|---|---|---|
-| Passive only | 60,000 | 1.0 |
-| 1 Port each, short coastal hop (~60 tiles) | 62,370 | **1.04** |
-| 1 Port each, across the ocean (~300 tiles) | 800,700 | 13.3 |
-| Port lvl-3 vs lvl-1, across the ocean | 1,485,000 | 24.8 |
-| 1 Port each, ~800 tiles | 1,136,000 | 18.9 |
-| 10 Ports each, across the ocean | 9,053,000 | 151 |
-| 50 Ports each, long route | 24,290,000 | 405 |
-| 1 Factory + 1 City (self-trade) | 46,000 | 0.77 |
-| 1 Factory + 4 Cities | 42,000 | 0.70 |
-| 1 Factory + an **ally** City in cluster | 76,000 (+250,000 to the ally) | 1.27 |
+| Setup                                      | gold/min                      | × base   |
+| ------------------------------------------ | ----------------------------- | -------- |
+| Passive only                               | 60,000                        | 1.0      |
+| 1 Port each, short coastal hop (~60 tiles) | 62,370                        | **1.04** |
+| 1 Port each, across the ocean (~300 tiles) | 800,700                       | 13.3     |
+| Port lvl-3 vs lvl-1, across the ocean      | 1,485,000                     | 24.8     |
+| 1 Port each, ~800 tiles                    | 1,136,000                     | 18.9     |
+| 10 Ports each, across the ocean            | 9,053,000                     | 151      |
+| 50 Ports each, long route                  | 24,290,000                    | 405      |
+| 1 Factory + 1 City (self-trade)            | 46,000                        | 0.77     |
+| 1 Factory + 4 Cities                       | 42,000                        | 0.70     |
+| 1 Factory + an **ally** City in cluster    | 76,000 (+250,000 to the ally) | 1.27     |
 
 Read the second row again. **A port with only a short coastal route is worth
 almost nothing.** Route length is the whole game.
 
 ### Payback periods — **[DERIVED]**, at base income, first structure = 125,000
 
-| First purchase | Income added | Payback |
-|---|---|---|
-| Port with an ocean partner ≥300 tiles away | +800,700/min | **~9 seconds of operation** |
-| Port with only a short coastal hop | +2,370/min | ~53 minutes |
-| Factory + City (250,000 total) | +46,000/min | ~5.4 minutes |
-| City alone | +0 gold, +250,000 maxTroops | never — it is a military purchase |
+| First purchase                             | Income added                | Payback                           |
+| ------------------------------------------ | --------------------------- | --------------------------------- |
+| Port with an ocean partner ≥300 tiles away | +800,700/min                | **~9 seconds of operation**       |
+| Port with only a short coastal hop         | +2,370/min                  | ~53 minutes                       |
+| Factory + City (250,000 total)             | +46,000/min                 | ~5.4 minutes                      |
+| City alone                                 | +0 gold, +250,000 maxTroops | never — it is a military purchase |
 
 ---
 
@@ -1243,24 +1254,24 @@ ladders are in `03-economy.md §3.3`.
 
 `UnitType` — `Game.ts:195-212`. Groupings — `Game.ts:220-253`.
 
-| Enum | String | Group | You can build it? |
-|---|---|---|---|
-| `TransportShip` | `"Transport"` | PlayerBuildable | yes (not in the build menu — it is the boat-attack intent) |
-| `Warship` | `"Warship"` | BuildableAttacks | yes |
-| `Shell` | `"Shell"` | — | no (warships spawn them) |
-| `SAMMissile` | `"SAMMissile"` | — | no |
-| `Port` | `"Port"` | Structures | yes |
-| `AtomBomb` | `"Atom Bomb"` | Nukes, BuildableAttacks | yes |
-| `HydrogenBomb` | `"Hydrogen Bomb"` | Nukes, BuildableAttacks | yes |
-| `TradeShip` | `"Trade Ship"` | — | no (ports spawn them) |
-| `MissileSilo` | `"Missile Silo"` | Structures | yes |
-| `DefensePost` | `"Defense Post"` | Structures | yes |
-| `SAMLauncher` | `"SAM Launcher"` | Structures | yes |
-| `City` | `"City"` | Structures | yes |
-| `MIRV` | `"MIRV"` | Nukes, BuildableAttacks | yes |
-| `MIRVWarhead` | `"MIRV Warhead"` | Nukes | no |
-| `Train` | `"Train"` | — | no (factories spawn them) |
-| `Factory` | `"Factory"` | Structures | yes |
+| Enum            | String            | Group                   | You can build it?                                          |
+| --------------- | ----------------- | ----------------------- | ---------------------------------------------------------- |
+| `TransportShip` | `"Transport"`     | PlayerBuildable         | yes (not in the build menu — it is the boat-attack intent) |
+| `Warship`       | `"Warship"`       | BuildableAttacks        | yes                                                        |
+| `Shell`         | `"Shell"`         | —                       | no (warships spawn them)                                   |
+| `SAMMissile`    | `"SAMMissile"`    | —                       | no                                                         |
+| `Port`          | `"Port"`          | Structures              | yes                                                        |
+| `AtomBomb`      | `"Atom Bomb"`     | Nukes, BuildableAttacks | yes                                                        |
+| `HydrogenBomb`  | `"Hydrogen Bomb"` | Nukes, BuildableAttacks | yes                                                        |
+| `TradeShip`     | `"Trade Ship"`    | —                       | no (ports spawn them)                                      |
+| `MissileSilo`   | `"Missile Silo"`  | Structures              | yes                                                        |
+| `DefensePost`   | `"Defense Post"`  | Structures              | yes                                                        |
+| `SAMLauncher`   | `"SAM Launcher"`  | Structures              | yes                                                        |
+| `City`          | `"City"`          | Structures              | yes                                                        |
+| `MIRV`          | `"MIRV"`          | Nukes, BuildableAttacks | yes                                                        |
+| `MIRVWarhead`   | `"MIRV Warhead"`  | Nukes                   | no                                                         |
+| `Train`         | `"Train"`         | —                       | no (factories spawn them)                                  |
+| `Factory`       | `"Factory"`       | Structures              | yes                                                        |
 
 `Structures = [City, DefensePost, SAMLauncher, MissileSilo, Port, Factory]`.
 **Anything without `maxHealth` dies to a single hit** (`UnitImpl.ts:233-235`) —
@@ -1268,15 +1279,15 @@ that is everything except the Warship.
 
 ## 4.2 Build time and placement
 
-| Structure | Build ticks | Seconds |
-|---|---|---|
-| City | 20 | 2 |
-| Factory | 20 | 2 |
-| Port | 50 | 5 |
-| Defense Post | 50 | 5 |
-| Missile Silo | 100 | 10 |
-| **SAM Launcher** | **300** | **30** |
-| Warship, nukes, MIRV | 0 — delegate immediately | — |
+| Structure            | Build ticks              | Seconds |
+| -------------------- | ------------------------ | ------- |
+| City                 | 20                       | 2       |
+| Factory              | 20                       | 2       |
+| Port                 | 50                       | 5       |
+| Defense Post         | 50                       | 5       |
+| Missile Silo         | 100                      | 10      |
+| **SAM Launcher**     | **300**                  | **30**  |
+| Warship, nukes, MIRV | 0 — delegate immediately | —       |
 
 `instantBuild` sets all of these to 0.
 
@@ -1294,9 +1305,10 @@ and it counts as **1** toward the cost ladder rather than its level.
 
 **Land structures** (City, Factory, MissileSilo, DefensePost, SAMLauncher) —
 `PlayerImpl.ts:1734-1805`:
+
 1. The clicked tile must be **owned by you**, or there is no placement at all.
 2. Flood your own tiles within Euclidean **15** of the click.
-3. Reject any candidate within Euclidean **15** of *any* structure of *any* owner,
+3. Reject any candidate within Euclidean **15** of _any_ structure of _any_ owner,
    including under-construction ones.
 4. Sort by distance to the click — the structure **auto-snaps to the nearest
    surviving tile**.
@@ -1322,30 +1334,31 @@ one** — `canUpgrade` wins over `canBuild`. The cost is the next rung of the sa
 ladder.
 
 `increaseLevel()` (`UnitImpl.ts:738-757`):
+
 - For **MissileSilo and SAMLauncher**, the new missile slot **starts on cooldown**.
 - For **SAMLauncher**, range interpolates linearly to the new value over
   `samUpgradeDuration() = 45` ticks.
 
 ### What a level actually buys
 
-| Structure | Effect of level |
-|---|---|
-| **City** | `maxTroops += 250,000` per level. Under-construction cities excluded |
-| **Port** | (a) trade-ship rolls per 10-tick check = level; (b) trade-partner weight = level; (c) warship docking capacity = level; (d) docked healing pool = `level × 5` HP/tick shared |
-| **Factory** | train-spawn rolls per tick = level; counted level-weighted in `trainSpawnRate` |
-| **Missile Silo** | **number of simultaneously ready missiles** |
-| **SAM Launcher** | ready interceptors = level, **and** range |
-| Defense Post | n/a — always level 1 |
+| Structure        | Effect of level                                                                                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **City**         | `maxTroops += 250,000` per level. Under-construction cities excluded                                                                                                         |
+| **Port**         | (a) trade-ship rolls per 10-tick check = level; (b) trade-partner weight = level; (c) warship docking capacity = level; (d) docked healing pool = `level × 5` HP/tick shared |
+| **Factory**      | train-spawn rolls per tick = level; counted level-weighted in `trainSpawnRate`                                                                                               |
+| **Missile Silo** | **number of simultaneously ready missiles**                                                                                                                                  |
+| **SAM Launcher** | ready interceptors = level, **and** range                                                                                                                                    |
+| Defense Post     | n/a — always level 1                                                                                                                                                         |
 
 ## 4.4 Capture, destruction and deletion
 
 ### When the tile under a structure changes hands (`PlayerExecution.ts:57-78`, every tick)
 
-| Structure | Fate |
-|---|---|
-| City, Port, Factory, Missile Silo, SAM Launcher | **captured intact at their current level** |
-| **Defense Post** | **destroyed**, credited to the captor |
-| Any structure whose tile becomes **unowned** (nuked into fallout/water) | **destroyed**, no credit |
+| Structure                                                               | Fate                                       |
+| ----------------------------------------------------------------------- | ------------------------------------------ |
+| City, Port, Factory, Missile Silo, SAM Launcher                         | **captured intact at their current level** |
+| **Defense Post**                                                        | **destroyed**, credited to the captor      |
+| Any structure whose tile becomes **unowned** (nuked into fallout/water) | **destroyed**, no credit                   |
 
 Capture clears any pending voluntary deletion, removes the unit from the old
 owner's list, and moves **both players' cost ladders**. A captured structure keeps
@@ -1362,9 +1375,9 @@ teammate** (`GameImpl.ts:1540-1553`). Trade ships are captured by warships.
 Preconditions: the unit exists, is yours, is active, is **on your own territory**,
 **on land**, not during the spawn phase, and the cooldown has elapsed.
 
-| Constant | Value |
-|---|---|
-| `deleteUnitCooldown()` | **300 ticks (30 s)** between deletions, per player |
+| Constant                 | Value                                                      |
+| ------------------------ | ---------------------------------------------------------- |
+| `deleteUnitCooldown()`   | **300 ticks (30 s)** between deletions, per player         |
 | `deletionMarkDuration()` | **300 ticks** — the unit keeps working for 30 s, then dies |
 
 > **There is no gold refund.** None. Deleting a level-N structure destroys the
@@ -1374,7 +1387,7 @@ Preconditions: the unit exists, is yours, is active, is **on your own territory*
 ## 4.5 City
 
 Its entire tick logic is: on the first tick, if a Factory is within
-`trainStationMaxRange() = 110`, become a train station. That is all it *does*.
+`trainStationMaxRange() = 110`, become a train station. That is all it _does_.
 
 Its value is `+250,000 maxTroops per level` and being a train **trade
 destination** (25,000–35,000 gold per visiting train, paid to both parties).
@@ -1410,18 +1423,18 @@ losses, ×3 slower, does not stack, destroyed on capture, not upgradable, and
 
 ## 4.10 Warships
 
-| Property | Value |
-|---|---|
-| Base max health | **1000** |
-| Cost | `min(1M, (n+1) × 250k)` |
-| Patrol range | 100 |
-| Targeting range | 130 |
-| Shell reload | 20 ticks (fires every 21) — **but transport-ship targets are exempt: `lastShellAttack` is not updated, so a warship shelling transports fires every tick** (`WarshipExecution.ts:656-661`) |
-| Docking range | 5 |
-| Passive heal | **+1 HP/tick** within **150** of any of your ports, in any state |
-| Docked heal pool | `portLevel × 5` HP/tick, split across docked ships |
-| Retreat threshold | health < **75%** of veterancy-adjusted max |
-| Shell lifetime after the firing unit dies | 50 ticks |
+| Property                                  | Value                                                                                                                                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Base max health                           | **1000**                                                                                                                                                                                   |
+| Cost                                      | `min(1M, (n+1) × 250k)`                                                                                                                                                                    |
+| Patrol range                              | 100                                                                                                                                                                                        |
+| Targeting range                           | 130                                                                                                                                                                                        |
+| Shell reload                              | 20 ticks (fires every 21) — **but transport-ship targets are exempt: `lastShellAttack` is not updated, so a warship shelling transports fires every tick** (`WarshipExecution.ts:656-661`) |
+| Docking range                             | 5                                                                                                                                                                                          |
+| Passive heal                              | **+1 HP/tick** within **150** of any of your ports, in any state                                                                                                                           |
+| Docked heal pool                          | `portLevel × 5` HP/tick, split across docked ships                                                                                                                                         |
+| Retreat threshold                         | health < **75%** of veterancy-adjusted max                                                                                                                                                 |
+| Shell lifetime after the firing unit dies | 50 ticks                                                                                                                                                                                   |
 
 ### Shell damage (`ShellExecution.ts:96-114`)
 
@@ -1475,24 +1488,24 @@ patrol tile also disables repair-retreat for 50 ticks.
 
 ### Veterancy (`UnitImpl.ts:651-727`)
 
-| Constant | Value |
-|---|---|
-| Max veterancy | **3** |
-| Health bonus | **+20% of base max HP per level** |
-| Shell damage bonus | **+20% per level** |
-| Transport kills per level | **10** |
-| Trade captures per level | **25** |
+| Constant                  | Value                             |
+| ------------------------- | --------------------------------- |
+| Max veterancy             | **3**                             |
+| Health bonus              | **+20% of base max HP per level** |
+| Shell damage bonus        | **+20% per level**                |
+| Transport kills per level | **10**                            |
+| Trade captures per level  | **25**                            |
 
 **Killing an enemy Warship (the final blow) = instant +1 level**, and it **wipes**
 the partial progress meter. Transports and captures share one meter worth 250
 points per level: a transport kill is 25 points, a capture is 10. Overflow carries.
 
 | Vet | Max HP | Retreat threshold | Shell damage range |
-|---|---|---|---|
-| 0 | 1000 | 750 | 200–300 |
-| 1 | 1200 | 900 | 240–360 |
-| 2 | 1400 | 1050 | 280–420 |
-| 3 | 1600 | 1200 | 320–480 |
+| --- | ------ | ----------------- | ------------------ |
+| 0   | 1000   | 750               | 200–300            |
+| 1   | 1200   | 900               | 240–360            |
+| 2   | 1400   | 1050              | 280–420            |
+| 3   | 1600   | 1200              | 320–480            |
 
 Gaining a level does **not** heal the ship. Veterancy lives in `warshipState` and
 therefore **survives capture**. Only warships have it.
@@ -1538,15 +1551,15 @@ penalty per stop from the 11th onward, floored at 5,000.
 
 ## 5.1 The nuke table
 
-| | Atom Bomb | Hydrogen Bomb | MIRV (carrier) | MIRV Warhead |
-|---|---|---|---|---|
-| Cost | 750,000 | 5,000,000 | `25M + 15M × global launches` | free |
-| Inner radius | **12** | **80** | n/a (never detonates) | **12** |
-| Outer radius | **30** | **100** | n/a | **18** |
-| Speed | 10 | 10 | 15 | 22 (+0..4) |
-| Interceptable | yes | yes | **NO** | yes |
-| Breaks alliances | yes | yes | yes (on launch) | **no** |
-| Warning message | `NUKE_INBOUND` | `HYDROGEN_BOMB_INBOUND` | `MIRV_INBOUND` | **none** |
+|                  | Atom Bomb      | Hydrogen Bomb           | MIRV (carrier)                | MIRV Warhead |
+| ---------------- | -------------- | ----------------------- | ----------------------------- | ------------ |
+| Cost             | 750,000        | 5,000,000               | `25M + 15M × global launches` | free         |
+| Inner radius     | **12**         | **80**                  | n/a (never detonates)         | **12**       |
+| Outer radius     | **30**         | **100**                 | n/a                           | **18**       |
+| Speed            | 10             | 10                      | 15                            | 22 (+0..4)   |
+| Interceptable    | yes            | yes                     | **NO**                        | yes          |
+| Breaks alliances | yes            | yes                     | yes (on launch)               | **no**       |
+| Warning message  | `NUKE_INBOUND` | `HYDROGEN_BOMB_INBOUND` | `MIRV_INBOUND`                | **none**     |
 
 `Config.ts:1103-1113` (magnitudes), `:1119-1130` (speeds). The MIRV cost counter
 `mirvsLaunched` is **game-global across all players** — every MIRV anyone fires
@@ -1558,12 +1571,12 @@ raises the price for everyone.
 - Target tile must not be impassable.
 - Cannot target a same-team player's territory unless the game is over and it is
   not singleplayer.
-- In **Team mode**, an Atom/Hydrogen strike is refused if any *teammate-owned
-  structure* lies within the nuke's **outer** radius. **MIRV is exempt.**
+- In **Team mode**, an Atom/Hydrogen strike is refused if any _teammate-owned
+  structure_ lies within the nuke's **outer** radius. **MIRV is exempt.**
 - **MIRV additionally requires the target tile to have an owner.**
 - Launch platform = your nearest ready silo. No ready silo = no launch.
 
-Nuking a **formal ally** is allowed — only *teammates* are protected. It breaks
+Nuking a **formal ally** is allowed — only _teammates_ are protected. It breaks
 the alliance and marks you a traitor.
 
 ## 5.3 Flight and the interception window
@@ -1575,7 +1588,7 @@ than the nominal speed suggests.
 
 > **The single most important nuke mechanic**: each trajectory tile is flagged
 > `targetable` only if it is within `defaultNukeTargetableRange() = 150` of **the
-> target tile** *or* within 150 of **the launch silo** (`NukeExecution.ts:347-385`).
+> target tile** _or_ within 150 of **the launch silo** (`NukeExecution.ts:347-385`).
 > **A nuke on a long flight is untargetable in the middle of its arc.** SAMs can
 > only engage near the launcher or near the impact point.
 
@@ -1636,17 +1649,17 @@ Weighted tile count in the blast — inner weight 1, outer weight 0.5 — agains
 radius. Affected allies have the alliance broken and relation set to −100, and
 their pending alliance requests are auto-rejected.
 
-**MIRV warheads never break alliances.** The MIRV *carrier* breaks the alliance
+**MIRV warheads never break alliances.** The MIRV _carrier_ breaks the alliance
 with the target player at launch.
 
 ## 5.7 MIRV specifics
 
-| Property | Value |
-|---|---|
-| Warhead count | **350** |
-| Range | 1,500 |
-| Minimum spread between warhead targets | 55 manhattan |
-| Carrier flight time | normalised to ~14 ticks |
+| Property                               | Value                   |
+| -------------------------------------- | ----------------------- |
+| Warhead count                          | **350**                 |
+| Range                                  | 1,500                   |
+| Minimum spread between warhead targets | 55 manhattan            |
+| Carrier flight time                    | normalised to ~14 ticks |
 
 Every warhead target must be land, owned by the **original target player**, within
 1,500 of the aim point, and ≥55 from every other chosen target. Targets are
@@ -1660,13 +1673,13 @@ Destroying the carrier by other means cancels all its warhead executions.
 
 ## 5.8 SAM launchers
 
-| Property | Value |
-|---|---|
-| Cost | `min(3M, (n+1) × 1.5M)` |
-| Build time | **300 ticks (30 s)** — the longest in the game |
-| Reload | 90 ticks; ready interceptors = level |
-| Interceptor speed | 12 tiles/tick, straight line |
-| Detection sweep | `maxSamRange × 4 = 600` |
+| Property          | Value                                          |
+| ----------------- | ---------------------------------------------- |
+| Cost              | `min(3M, (n+1) × 1.5M)`                        |
+| Build time        | **300 ticks (30 s)** — the longest in the game |
+| Reload            | 90 ticks; ready interceptors = level           |
+| Interceptor speed | 12 tiles/tick, straight line                   |
+| Detection sweep   | `maxSamRange × 4 = 600`                        |
 
 ### Range
 
@@ -1674,9 +1687,9 @@ Destroying the carrier by other means cancels all its warhead executions.
 samRange(level) = 150 - 480 / (level + 5)
 ```
 
-| Level | 1 | 2 | 3 | 4 | 5 | 6 | 10 |
-|---|---|---|---|---|---|---|---|
-| Range | **70** | 81.4 | 90 | 96.7 | 102 | 106.4 | 118 |
+| Level | 1      | 2    | 3   | 4    | 5   | 6     | 10  |
+| ----- | ------ | ---- | --- | ---- | --- | ----- | --- |
+| Range | **70** | 81.4 | 90  | 96.7 | 102 | 106.4 | 118 |
 
 Asymptotically approaches 150 and never reaches it. During an upgrade the
 effective range **interpolates linearly** over 45 ticks. A level gained by upgrade
@@ -1719,12 +1732,12 @@ SAM missile locked onto it is within 12 tiles of the impact point.
 ## 5.9 Practical consequences — **[DERIVED]**
 
 1. **Range 70 at level 1 is small.** Against a hydrogen bomb (outer radius 100),
-   a level-1 SAM sitting on the thing it protects is *inside* the blast radius of
+   a level-1 SAM sitting on the thing it protects is _inside_ the blast radius of
    a strike that lands short of it. SAM levels below 5 are explicitly targeted by
    Impossible nations for exactly this reason (+100,000 score per outranged SAM).
 2. **The targetable window is exploitable in both directions.** Launching from far
    away means the midcourse is untargetable, but the terminal 150 tiles are still
-   defended. Launching from *close* means the whole flight is in the target's SAM
+   defended. Launching from _close_ means the whole flight is in the target's SAM
    envelope. Long-range silos are safer.
 3. **A SAM's 300-tick build time is a real window.** Thirty seconds is three silo
    reloads.
@@ -1746,24 +1759,25 @@ SAM missile locked onto it is within 12 tiles of the impact point.
 
 ## 6.1 Alliances
 
-| Constant | Value | Seconds |
-|---|---|---|
-| `allianceDuration()` | `customAllianceDuration × 600`, default **3,000** | 300 (5 min) |
-| `allianceRequestDuration()` | 200 | 20 |
-| `allianceRequestCooldown()` | 300 | 30 |
-| `allianceExtensionPromptOffset()` | 300 | 30 |
-| `disableAlliances()` | true if `customAllianceDuration === 0` | — |
+| Constant                          | Value                                             | Seconds     |
+| --------------------------------- | ------------------------------------------------- | ----------- |
+| `allianceDuration()`              | `customAllianceDuration × 600`, default **3,000** | 300 (5 min) |
+| `allianceRequestDuration()`       | 200                                               | 20          |
+| `allianceRequestCooldown()`       | 300                                               | 30          |
+| `allianceExtensionPromptOffset()` | 300                                               | 30          |
+| `disableAlliances()`              | true if `customAllianceDuration === 0`            | —           |
 
 ### Request
 
 `canSendAllianceRequest` is false if alliances are disabled, the target is
 yourself, **either player is disconnected**, you are already friendly, you are
 dead, or an outgoing request to them already exists. It is **true** if an
-*incoming* request from them exists — that is the counter-accept path. Otherwise
+_incoming_ request from them exists — that is the counter-accept path. Otherwise
 the last outgoing request to that player must be ≥300 ticks old.
 
 **The counter-request path does more than a plain accept**
 (`src/core/execution/alliance/AllianceRequestExecution.ts:45-65`):
+
 - `+100` relation **both ways**
 - both sides' **temporary** embargoes against each other are dropped (permanent
   ones survive)
@@ -1789,14 +1803,14 @@ flags never expire on their own. `extend()` sets
 
 ### What an alliance actually does
 
-| Mechanic | Effect |
-|---|---|
-| Land and boat attacks | **Blocked** |
-| Nukes on an ally | **Allowed** — only *teammates* are protected. Breaks the alliance, marks you a traitor |
-| Donations | Require `isFriendly` |
-| Trade partner selection | Friendly ports get **double weight** in the lottery |
-| **Train gold** | **35,000/stop for an ally** vs 25,000 for a teammate or stranger |
-| Targeting | Allies see each other's `targets()`, and AI allies act on them |
+| Mechanic                | Effect                                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| Land and boat attacks   | **Blocked**                                                                            |
+| Nukes on an ally        | **Allowed** — only _teammates_ are protected. Breaks the alliance, marks you a traitor |
+| Donations               | Require `isFriendly`                                                                   |
+| Trade partner selection | Friendly ports get **double weight** in the lottery                                    |
+| **Train gold**          | **35,000/stop for an ally** vs 25,000 for a teammate or stranger                       |
+| Targeting               | Allies see each other's `targets()`, and AI allies act on them                         |
 
 > `isFriendly(other)` returns **false if `other.isDisconnected()`**. Every
 > consequence below flows from that one line.
@@ -1812,31 +1826,31 @@ ally hard enough, by MIRVing an ally, or (for AI) by the betray behaviour —
 
 Duration: **300 ticks (30 s)**. Re-betraying restarts the clock.
 
-| Penalty | Value |
-|---|---|
-| Attackers lose **half** the troops against you | `attackerTroopLoss × 0.5` |
-| Attacks against you are **25% faster** | `tickFraction × 0.8` |
-| Relation from the betrayed | **−100** |
-| Relation from bystanders | **−40** to every `nearby()` non-teammate — including the betrayed if adjacent, so up to **−140** total |
-| Nation AI | ~90% alliance rejection; non-Easy nations break with allied traitors; high in the Hard/Impossible attack order |
-| Bots | pick random non-friendly traitor neighbours to attack |
+| Penalty                                        | Value                                                                                                          |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Attackers lose **half** the troops against you | `attackerTroopLoss × 0.5`                                                                                      |
+| Attacks against you are **25% faster**         | `tickFraction × 0.8`                                                                                           |
+| Relation from the betrayed                     | **−100**                                                                                                       |
+| Relation from bystanders                       | **−40** to every `nearby()` non-teammate — including the betrayed if adjacent, so up to **−140** total         |
+| Nation AI                                      | ~90% alliance rejection; non-Easy nations break with allied traitors; high in the Hard/Impossible attack order |
+| Bots                                           | pick random non-friendly traitor neighbours to attack                                                          |
 
 `betrayals()` is **display only** — no mechanical effect.
 
 > `Config.traitorSpeedDebuff()` is misleadingly named: 0.8 multiplies
-> `tickFraction`, so attacks *against* a traitor go **faster**.
+> `tickFraction`, so attacks _against_ a traitor go **faster**.
 
 ## 6.3 Relations
 
 Stored per ordered pair, **asymmetric**, clamped to `[-100, 100]`. Buckets
 (`PlayerImpl.ts:946-957`):
 
-| Raw | `Relation` |
-|---|---|
-| `< -50` | Hostile |
+| Raw        | `Relation`  |
+| ---------- | ----------- |
+| `< -50`    | Hostile     |
 | `-50 … <0` | Distrustful |
-| `0 … <50` | Neutral |
-| `≥ 50` | Friendly |
+| `0 … <50`  | Neutral     |
+| `≥ 50`     | Friendly    |
 
 Unseen pairs start at **0 (Neutral)**.
 
@@ -1845,22 +1859,22 @@ Unseen pairs start at **0 (Neutral)**.
 
 ### Everything that changes relation
 
-| Event | Δ | Direction |
-|---|---|---|
-| Alliance formed via counter-request | **+100** | both |
-| Donate troops above the difficulty minimum | **+50** | recipient → sender |
-| Donate gold | `+5` per chunk, capped **+100** | recipient → sender |
-| Emoji ❤️ 🥰 🕊️ 🏳️ 👏 to a Nation | **+15**, *Easy only* | recipient → sender |
-| Embargo placed / lifted against a nation | **−20** / **+20** | nation → you |
-| Warship retaliation, trade capture / transport kill | **−7.5** / **−15** | nation → you |
-| Nation assists an ally | **−20** | nation → ally (the cost of the favour) |
-| **Being targeted** (`targetPlayer`) | **−40** | target → targeter |
-| Neighbour breaks an alliance near you | **−40** | each nearby non-teammate → breaker |
-| Emoji 🤡 / 🖕 to a Nation | **−10** / **−100** | recipient → sender |
-| **Being attacked** | **−60 / −70 / −80 / −100** by difficulty | defender → attacker |
-| Alliance broken on you | **−100** | betrayed → traitor |
-| Qualifying nuke | **−100** | hit → launcher |
-| MIRV launched at you | **−100** both ways | mutual |
+| Event                                               | Δ                                        | Direction                              |
+| --------------------------------------------------- | ---------------------------------------- | -------------------------------------- |
+| Alliance formed via counter-request                 | **+100**                                 | both                                   |
+| Donate troops above the difficulty minimum          | **+50**                                  | recipient → sender                     |
+| Donate gold                                         | `+5` per chunk, capped **+100**          | recipient → sender                     |
+| Emoji ❤️ 🥰 🕊️ 🏳️ 👏 to a Nation                    | **+15**, _Easy only_                     | recipient → sender                     |
+| Embargo placed / lifted against a nation            | **−20** / **+20**                        | nation → you                           |
+| Warship retaliation, trade capture / transport kill | **−7.5** / **−15**                       | nation → you                           |
+| Nation assists an ally                              | **−20**                                  | nation → ally (the cost of the favour) |
+| **Being targeted** (`targetPlayer`)                 | **−40**                                  | target → targeter                      |
+| Neighbour breaks an alliance near you               | **−40**                                  | each nearby non-teammate → breaker     |
+| Emoji 🤡 / 🖕 to a Nation                           | **−10** / **−100**                       | recipient → sender                     |
+| **Being attacked**                                  | **−60 / −70 / −80 / −100** by difficulty | defender → attacker                    |
+| Alliance broken on you                              | **−100**                                 | betrayed → traitor                     |
+| Qualifying nuke                                     | **−100**                                 | hit → launcher                         |
+| MIRV launched at you                                | **−100** both ways                       | mutual                                 |
 
 Gold-donation chunk size: Easy 2,500 / Medium 5,000 / Hard 12,500 / Impossible
 25,000, **scaled by `1 + ticks/(3000 + spawnTicks)`** — relation gets more
@@ -1874,16 +1888,17 @@ embargo blocks trade in both directions.**
 Blocked: sea trade (partner selection and in-flight ships), rail trade, AI
 structure siting. **Not blocked**: attacks, nukes, alliances, donations.
 
-| Item | Value |
-|---|---|
+| Item                         | Value               |
+| ---------------------------- | ------------------- |
 | `temporaryEmbargoDuration()` | 3,000 ticks (5 min) |
-| `embargoAllCooldown()` | 100 ticks |
+| `embargoAllCooldown()`       | 100 ticks           |
 
 A **permanent** embargo already in place is never downgraded to temporary, and
 `endTemporaryEmbargo` is a no-op on it. The manual embargo button always sets
 permanent. `EmbargoAllExecution` skips yourself, **all bots**, and teammates.
 
 **Auto-embargo triggers:**
+
 1. **Being attacked** — the only temporary embargo in the codebase. Applied
    whenever neither attacker nor defender is a bot. 5 minutes. Cleared early only
    by the alliance counter-request path.
@@ -1907,15 +1922,15 @@ team** — bots freely attack each other, and the Bot team **can never win**.
 
 ### What teammates share
 
-| Mechanic | Teammates | Allies |
-|---|---|---|
-| Attacks blocked | yes | yes |
-| Nukes blocked | **yes** (plus a blast-radius structure check in Team mode) | **no** |
-| Donations | yes | yes |
-| Auto-embargo / `EmbargoAllExecution` | exempt | not exempt |
-| Trade partner weight | normal | **doubled** |
-| **Train gold** | 25,000 (same as a stranger) | **35,000** |
-| Win condition | shared tile sum | separate |
+| Mechanic                             | Teammates                                                  | Allies      |
+| ------------------------------------ | ---------------------------------------------------------- | ----------- |
+| Attacks blocked                      | yes                                                        | yes         |
+| Nukes blocked                        | **yes** (plus a blast-radius structure check in Team mode) | **no**      |
+| Donations                            | yes                                                        | yes         |
+| Auto-embargo / `EmbargoAllExecution` | exempt                                                     | not exempt  |
+| Trade partner weight                 | normal                                                     | **doubled** |
+| **Train gold**                       | 25,000 (same as a stranger)                                | **35,000**  |
+| Win condition                        | shared tile sum                                            | separate    |
 
 ### Disconnected players — a large exploitable surface
 
@@ -1943,11 +1958,11 @@ structures, no nukes, no diplomacy logic).
 `attackRate` rolled once at init:
 
 | Difficulty | Ticks between decision passes |
-|---|---|
-| Easy | 65–100 |
-| Medium | 55–70 |
-| Hard | 45–60 |
-| Impossible | 30–50 |
+| ---------- | ----------------------------- |
+| Easy       | 65–100                        |
+| Medium     | 55–70                         |
+| Hard       | 45–60                         |
+| Impossible | 30–50                         |
 
 Per-nation ratios rolled at construction: `triggerRatio = 0.50–0.60`,
 `reserveRatio = 0.30–0.40`, `expandRatio = 0.10–0.20`.
@@ -1971,17 +1986,18 @@ hostile embargoes → **attack** → warship infestation counter → **nuke**.
 4. `attackBestTarget`.
 
 `attackBestTarget` gates:
+
 - If a neighbouring **bot owns structures** → attack bots first, before any ratio gate.
 - Gate 1: `troops/maxTroops >= reserveRatio` (0.30–0.40) or abort.
 - Gate 2: `troops/maxTroops >= triggerRatio` (0.50–0.60), else a 1/10 chance to
   proceed anyway.
 - Then run the difficulty-ordered strategy list, stopping at the first hit.
 
-| Difficulty | Strategy order |
-|---|---|
-| Easy | nuked, bots, retaliate, assist, betray, hated, weakest |
-| Medium | bots, nuked, retaliate, assist, betray, hated, afk, traitor, weakest, island, donate |
-| Hard | bots, retaliate, assist, betray, nuked, traitor, afk, hated, veryWeak, juicy, victim, weakest, island, donate |
+| Difficulty | Strategy order                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------- |
+| Easy       | nuked, bots, retaliate, assist, betray, hated, weakest                                                        |
+| Medium     | bots, nuked, retaliate, assist, betray, hated, afk, traitor, weakest, island, donate                          |
+| Hard       | bots, retaliate, assist, betray, nuked, traitor, afk, hated, veryWeak, juicy, victim, weakest, island, donate |
 | Impossible | retaliate, bots, veryWeak, betray, assist, victim, traitor, juicy, afk, nuked, hated, weakest, island, donate |
 
 Key strategies: `veryWeak` targets anyone with `troops < maxTroops × 0.15`;
@@ -2001,12 +2017,13 @@ only when nothing borders you.
   refuses 1/4 of the time, Hard/Impossible always attack.
 
 > **Four ways to freeze a Hard/Impossible nation:**
+>
 > 1. Park a large stack next to it — `troopSendCap` will not let it commit
 >    elsewhere.
 > 2. Leave unowned land on its border — step 2 short-circuits every decision tick.
 > 3. Keep your troops above 15% of your `maxTroops` to stay out of `veryWeak`, and
 >    above 75% of the nation's troops to stay out of `juicy`.
-> 4. Note that *it* stops attacking entirely if *its* troops fall below
+> 4. Note that _it_ stops attacking entirely if _its_ troops fall below
 >    `reserveRatio` (~0.3–0.4 of its max), except via the bot branch.
 
 ### Alliance decisions (`getAllianceDecision`, evaluated top-down)
@@ -2023,7 +2040,7 @@ only when nothing borders you.
 6. Relation < Neutral → reject.
 7. Relation == Friendly → accept (Hard/Impossible add 17%/33% extra rejection).
 8. Already enough alliances (Medium 4–6, Hard 3–5, Impossible 2–4; Hard/Impossible
-   also refuse to ally with *all* their neighbours).
+   also refuse to ally with _all_ their neighbours).
 9. **Earlygame free pass**: Easy `< 3000 + spawn` at 90%; Medium `< 1800` at 70%;
    Hard `< 1800` at 50%; Impossible `< 600` at 30%.
 10. Similarly strong — accept if their troops (+ outgoing attacks) exceed yours by
@@ -2057,12 +2074,12 @@ enabled), or Port first (high nation density), then **Port → Factory → SAM �
 Silo**, each gated on `owned < floor(cityCount × ratio)`, falling back to
 **City**. Cities are the default sink and drive every other ratio.
 
-| Structure | ratio per city | perceived-cost inflation per owned |
-|---|---|---|
-| Port | 0.75 | +100% each |
-| Factory | 0.75 (×0.33 if coastal and ports enabled) | +100% each |
-| SAM | Easy 0.15 / Med 0.20 / Hard 0.25 / Imp 0.30 | +30% each |
-| Missile Silo | 0.20 (0.40 for the first), **hard cap 3** | +100% each |
+| Structure    | ratio per city                              | perceived-cost inflation per owned |
+| ------------ | ------------------------------------------- | ---------------------------------- |
+| Port         | 0.75                                        | +100% each                         |
+| Factory      | 0.75 (×0.33 if coastal and ports enabled)   | +100% each                         |
+| SAM          | Easy 0.15 / Med 0.20 / Hard 0.25 / Imp 0.30 | +30% each                          |
+| Missile Silo | 0.20 (0.40 for the first), **hard cap 3**   | +100% each                         |
 
 `getPerceivedCost` inflates prices **only while `gold < getSaveUpTarget()`** —
 this is the mechanism that makes nations hoard for nukes.
@@ -2097,6 +2114,7 @@ nearest silo, minus 1,000,000 per recent nuke overlapping the tile.
 Hesitation roll first: Easy 1/2, Medium 1/4, Hard 1/8, Impossible 1/16 chance to
 skip. Then, each with a **global 300-tick per-target cooldown shared across all
 nations**:
+
 1. Counter-MIRV — anyone whose MIRV is currently aimed at you.
 2. **Victory denial** — anyone (or the largest member of a team) holding ≥ Easy
    75% / Medium 65% / Hard 55% / **Impossible 40%** of total land.
@@ -2135,19 +2153,19 @@ warships.
 
 ## 6.7 Emoji and quick chat
 
-| Item | Value |
-|---|---|
+| Item                     | Value                        |
+| ------------------------ | ---------------------------- |
 | Emoji display / cooldown | 50 ticks each, per recipient |
-| Quick chat cooldown | 30 ticks |
+| Quick chat cooldown      | 30 ticks                     |
 
 **Emoji have real effects only when the recipient is a Nation:**
 
-| Emoji → Nation | Effect |
-|---|---|
-| 🖕 | **−100 relation** + an angry auto-reply |
-| 🤡 | **−10 relation** |
+| Emoji → Nation | Effect                                    |
+| -------------- | ----------------------------------------- |
+| 🖕             | **−100 relation** + an angry auto-reply   |
+| 🤡             | **−10 relation**                          |
 | 🕊️ 🏳️ ❤️ 🥰 👏 | **+15 relation, on Easy difficulty only** |
-| anything else | nothing |
+| anything else  | nothing                                   |
 
 So the only mechanically meaningful plays are 🖕 to instantly drive a nation to
 Hostile (which triggers auto-embargo, the `hated` attack strategy and nuke
@@ -2156,7 +2174,7 @@ targeting), 🤡 for a small nudge, and the peace set against Easy nations.
 **Quick chat has no mechanical effect whatsoever.** It calls `displayChat` twice
 and records a cooldown. Nothing in `src/core` reads it; no AI responds.
 
-**Targeting (`targetPlayer`) *is* mechanical**: 100-tick duration, 150-tick
+**Targeting (`targetPlayer`) _is_ mechanical**: 100-tick duration, 150-tick
 cooldown, **−40 relation** from the target, and allies — including AI nations —
 read `targets()` to decide whom to attack and nuke. It is how you ask an AI ally
 for help.
@@ -2172,17 +2190,18 @@ This is the chapter you emit commands from.
 ## 7.1 The envelope
 
 ```ts
-ClientIntentMessageSchema = z.object({          // Schemas.ts:1159
+ClientIntentMessageSchema = z.object({
+  // Schemas.ts:1159
   type: z.literal("intent"),
-  intent: IntentSchema,                         // discriminated union on "type"
-})
+  intent: IntentSchema, // discriminated union on "type"
+});
 ```
 
 **The client never sends `clientID`.** The server stamps it from the
 authenticated socket (`GameServer.ts:337`):
 
 ```ts
-StampedIntent = Intent & { clientID: ClientID }   // Schemas.ts:817-820
+StampedIntent = Intent & { clientID: ClientID }; // Schemas.ts:817-820
 ```
 
 `MappedID` is a dictionary-encoded clientID matching `/^[A-Za-z0-9]{8,10}$/`. The
@@ -2199,44 +2218,44 @@ never enter the turn log.
 
 ### Gameplay intents
 
-| `type` | Schema | Notes and preconditions |
-|---|---|---|
-| `attack` | `{ targetID: MappedID \| null, troops: float(min 0) \| null }` | **`targetID: null` means attack TerraNullius.** `troops: null` falls back to `troops/5` (human) or `/20` (bot). Clamped to your troops; the actual **floored deducted** amount is used |
-| `cancel_attack` | `{ attackID: string }` | `attackID` comes from `AttackUpdate.id` in `PlayerUpdate.outgoingAttacks`. Retreat completes 20 ticks later. **Unbounded string** — only the 2 KB frame cap limits it |
-| `boat` | `{ troops: float(min 0) /*required*/, dst: uint }` | Fails silently and deterministically if: 3 boats already in flight, target is your own tile, `!canAttackPlayer`, no landing tile, or no launch port |
-| `cancel_boat` | `{ unitID: uint }` | Must be one of your own outgoing boats |
-| `move_warship` | `{ unitIds: int[] (nonempty), tile: uint }` | ⚠️ **no max array length**. Each warship must exist, be active, and **share a water component with the target** — others are silently skipped |
-| `spawn` | `{ tile: uint }` | Must be *queued during* the spawn phase. Under `randomSpawn`, no re-rolls |
-| `build_unit` | `{ unit: UnitType, tile: uint, rocketDirectionUp?: boolean, amount?: uint(1..50) }` | Rejected if the unit is disabled, the tile is invalid, no legal spawn tile exists, or gold is insufficient |
-| `upgrade_structure` | `{ unit: UnitType, unitId: uint, amount?: uint(1..50) }` | ⚠️ **`unit` is accepted and then ignored** by the executor. The structure must be yours |
-| `delete_unit` | `{ unitId: uint }` | Yours, active, on land, on your own territory, not in the spawn phase, past the 300-tick cooldown |
-| `allianceRequest` | `{ recipient: MappedID }` | See `06-diplomacy-and-ai.md §6.1` |
-| `allianceReject` | `{ requestor: MappedID }` | **No relation penalty for rejecting** |
-| `allianceExtension` | `{ recipient: MappedID }` | |
-| `breakAlliance` | `{ recipient: MappedID }` | Marks you a traitor for 300 ticks |
-| `targetPlayer` | `{ target: MappedID }` | Not self, not friendly, 150-tick cooldown. **−40 relation.** Lasts 100 ticks |
-| `emoji` | `{ recipient: MappedID \| "AllPlayers", emoji: uint(0..59) }` | 12 rows × 5 = 60 entries, so **max index 59**. 50-tick cooldown per recipient |
-| `quick_chat` | `{ recipient: MappedID, quickChatKey: string, target?: MappedID }` | `"<category>.<key>"` from `resources/QuickChat.json`. **No mechanical effect** |
-| `donate_gold` | `{ recipient: MappedID, gold: float(min 0) \| null }` | Requires `isFriendly`. 100-tick cooldown per recipient. `null` → `gold/3` |
-| `donate_troops` | `{ recipient: MappedID, troops: float(min 0) \| null }` | Same gate. Capped at the recipient's headroom |
-| `embargo` | `{ targetID: MappedID, action: "start" \| "stop" }` | Always permanent |
-| `embargo_all` | `{ action: "start" \| "stop" }` | 100-tick cooldown; skips self, bots and teammates |
-| `toggle_pause` | `{ paused: boolean }` (`.default(false)`) | Lobby creator or admin only; refused on listed games |
-| `mark_disconnected` | `{ isDisconnected: boolean }` | **Server-internal.** A client sending it is rejected 400 |
+| `type`              | Schema                                                                              | Notes and preconditions                                                                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attack`            | `{ targetID: MappedID \| null, troops: float(min 0) \| null }`                      | **`targetID: null` means attack TerraNullius.** `troops: null` falls back to `troops/5` (human) or `/20` (bot). Clamped to your troops; the actual **floored deducted** amount is used |
+| `cancel_attack`     | `{ attackID: string }`                                                              | `attackID` comes from `AttackUpdate.id` in `PlayerUpdate.outgoingAttacks`. Retreat completes 20 ticks later. **Unbounded string** — only the 2 KB frame cap limits it                  |
+| `boat`              | `{ troops: float(min 0) /*required*/, dst: uint }`                                  | Fails silently and deterministically if: 3 boats already in flight, target is your own tile, `!canAttackPlayer`, no landing tile, or no launch port                                    |
+| `cancel_boat`       | `{ unitID: uint }`                                                                  | Must be one of your own outgoing boats                                                                                                                                                 |
+| `move_warship`      | `{ unitIds: int[] (nonempty), tile: uint }`                                         | ⚠️ **no max array length**. Each warship must exist, be active, and **share a water component with the target** — others are silently skipped                                          |
+| `spawn`             | `{ tile: uint }`                                                                    | Must be _queued during_ the spawn phase. Under `randomSpawn`, no re-rolls                                                                                                              |
+| `build_unit`        | `{ unit: UnitType, tile: uint, rocketDirectionUp?: boolean, amount?: uint(1..50) }` | Rejected if the unit is disabled, the tile is invalid, no legal spawn tile exists, or gold is insufficient                                                                             |
+| `upgrade_structure` | `{ unit: UnitType, unitId: uint, amount?: uint(1..50) }`                            | ⚠️ **`unit` is accepted and then ignored** by the executor. The structure must be yours                                                                                                |
+| `delete_unit`       | `{ unitId: uint }`                                                                  | Yours, active, on land, on your own territory, not in the spawn phase, past the 300-tick cooldown                                                                                      |
+| `allianceRequest`   | `{ recipient: MappedID }`                                                           | See `06-diplomacy-and-ai.md §6.1`                                                                                                                                                      |
+| `allianceReject`    | `{ requestor: MappedID }`                                                           | **No relation penalty for rejecting**                                                                                                                                                  |
+| `allianceExtension` | `{ recipient: MappedID }`                                                           |                                                                                                                                                                                        |
+| `breakAlliance`     | `{ recipient: MappedID }`                                                           | Marks you a traitor for 300 ticks                                                                                                                                                      |
+| `targetPlayer`      | `{ target: MappedID }`                                                              | Not self, not friendly, 150-tick cooldown. **−40 relation.** Lasts 100 ticks                                                                                                           |
+| `emoji`             | `{ recipient: MappedID \| "AllPlayers", emoji: uint(0..59) }`                       | 12 rows × 5 = 60 entries, so **max index 59**. 50-tick cooldown per recipient                                                                                                          |
+| `quick_chat`        | `{ recipient: MappedID, quickChatKey: string, target?: MappedID }`                  | `"<category>.<key>"` from `resources/QuickChat.json`. **No mechanical effect**                                                                                                         |
+| `donate_gold`       | `{ recipient: MappedID, gold: float(min 0) \| null }`                               | Requires `isFriendly`. 100-tick cooldown per recipient. `null` → `gold/3`                                                                                                              |
+| `donate_troops`     | `{ recipient: MappedID, troops: float(min 0) \| null }`                             | Same gate. Capped at the recipient's headroom                                                                                                                                          |
+| `embargo`           | `{ targetID: MappedID, action: "start" \| "stop" }`                                 | Always permanent                                                                                                                                                                       |
+| `embargo_all`       | `{ action: "start" \| "stop" }`                                                     | 100-tick cooldown; skips self, bots and teammates                                                                                                                                      |
+| `toggle_pause`      | `{ paused: boolean }` (`.default(false)`)                                           | Lobby creator or admin only; refused on listed games                                                                                                                                   |
+| `mark_disconnected` | `{ isDisconnected: boolean }`                                                       | **Server-internal.** A client sending it is rejected 400                                                                                                                               |
 
 ### Control intents (never simulated)
 
-| `type` | Schema | Authorization |
-|---|---|---|
-| `kick_player` | `{ targetClientID?, targetPublicID? }` | Lobby creator or admin; **refused on a publicly listed lobby unless admin**; 400 on self-kick |
-| `update_game_config` | `{ config: partial GameConfig }` | Creator or admin bot; 403 public; 409 started; 409 on listed/host-cheats/whitelist |
-| `toggle_game_start_timer` | `{}` | Creator or admin bot; 403 public; 409 started/queued |
+| `type`                    | Schema                                 | Authorization                                                                                 |
+| ------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `kick_player`             | `{ targetClientID?, targetPublicID? }` | Lobby creator or admin; **refused on a publicly listed lobby unless admin**; 400 on self-kick |
+| `update_game_config`      | `{ config: partial GameConfig }`       | Creator or admin bot; 403 public; 409 started; 409 on listed/host-cheats/whitelist            |
+| `toggle_game_start_timer` | `{}`                                   | Creator or admin bot; 403 public; 409 started/queued                                          |
 
 > ⚠️ **`ExecutionManager.createExec` has no case for those three** and falls
 > through to `default: throw`. On a real server this is unreachable (the server
 > returns before queueing them). **But `LocalServer` — singleplayer and replays —
 > pushes every non-pause intent into the turn unconditionally**, and `createExecs`
-> is called *outside* `GameRunner.executeNextTick`'s try/catch. An agent driving
+> is called _outside_ `GameRunner.executeNextTick`'s try/catch. An agent driving
 > `LocalServer` directly must never emit those three.
 
 > `ExecutionManager.createExec` also requires `playerByClientID` to resolve;
@@ -2274,8 +2293,8 @@ execution order for the turn.
 9. `this._ticks++` — **the increment is last**, so the `tick` field of updates
    emitted this pass is the pre-increment value.
 
-> **Critical latency fact.** An execution created from a turn-*N* intent is pushed
-> to `unInitExecs`; step 2 only ticks *already-initialized* executions. So its
+> **Critical latency fact.** An execution created from a turn-_N_ intent is pushed
+> to `unInitExecs`; step 2 only ticks _already-initialized_ executions. So its
 > first `tick()` is on **tick N+1**. Many one-shot executions do all their work in
 > `init()` and report `isActive() === false` — those do take effect on tick N.
 > Budget **≥2 ticks (200 ms) plus RTT** for anything that needs a `tick()`.
@@ -2300,13 +2319,14 @@ Executions **disabled** during the spawn phase include `AttackExecution`,
 ### Per-tick payload
 
 ```ts
-interface GameUpdateViewData {              // GameUpdates.ts:21-76
+interface GameUpdateViewData {
+  // GameUpdates.ts:21-76
   tick: number;
-  updates: GameUpdates;                     // Record<GameUpdateType, Update[]>
-  packedTileUpdates: Uint32Array;           // [tileRef, (state & 0xffff) | (terrain << 16)] pairs
+  updates: GameUpdates; // Record<GameUpdateType, Update[]>
+  packedTileUpdates: Uint32Array; // [tileRef, (state & 0xffff) | (terrain << 16)] pairs
   packedMotionPlans?: Uint32Array;
-  packedPlayerUpdates?: Float64Array;       // QUINTS: [smallID, tilesOwned, gold, troops, goldEarned]
-  packedAttackUpdates?: Float64Array;       // quads: [ownerSmallID, direction(0=out,1=in), index, troops]
+  packedPlayerUpdates?: Float64Array; // QUINTS: [smallID, tilesOwned, gold, troops, goldEarned]
+  packedAttackUpdates?: Float64Array; // quads: [ownerSmallID, direction(0=out,1=in), index, troops]
   playerNameViewData?: Record<string, NameViewData>;
   tickExecutionDuration?: number;
   pendingTurns?: number;
@@ -2368,14 +2388,14 @@ here" oracle.** It returns `canAttack`, `buildableUnits[]`,
 
 ### Client → server messages
 
-| type | Schema |
-|---|---|
-| `join` | `{ token, gameID, username, clanTag, cosmetics?, turnstileToken, spectator?, gitCommit?, platform? }` |
-| `rejoin` | `{ gameID, lastTurn: uint, token, gitCommit? }` |
-| `intent` | `{ intent }` |
-| `ping` | `{ sentAt: uint }` |
-| `hash` | `{ hash: float, turnNumber: uint }` |
-| `winner`, `live_stats`, `spectate`, `report`, `log` | — |
+| type                                                | Schema                                                                                                |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `join`                                              | `{ token, gameID, username, clanTag, cosmetics?, turnstileToken, spectator?, gitCommit?, platform? }` |
+| `rejoin`                                            | `{ gameID, lastTurn: uint, token, gitCommit? }`                                                       |
+| `intent`                                            | `{ intent }`                                                                                          |
+| `ping`                                              | `{ sentAt: uint }`                                                                                    |
+| `hash`                                              | `{ hash: float, turnNumber: uint }`                                                                   |
+| `winner`, `live_stats`, `spectate`, `report`, `log` | —                                                                                                     |
 
 Constraints: username 3–27 chars over `[ _.\-a-zA-Z0-9À-ÿ]` with ≥1 non-space;
 clan tag `/^[a-zA-Z0-9]{2,5}$/`; `gameID` `/^[A-Za-z0-9]{8,10}$/`.
@@ -2430,14 +2450,14 @@ silently converted to a **spectator**.
 
 ### Rate limits — hard numbers
 
-| Constant | Value | Effect on breach |
-|---|---|---|
-| `INTENTS_PER_SECOND` | **10** | intent **silently dropped** |
-| `INTENTS_PER_MINUTE` | **150** | silently dropped |
-| `MAX_INTENT_SIZE` | **2,000 bytes** | **kick** |
-| `REJOINS_PER_MINUTE` | 5 | dropped |
-| `TOTAL_BYTES` | **5 MiB** cumulative per client per game | **kick** |
-| HTTP API | 20 req/IP/s | — |
+| Constant             | Value                                    | Effect on breach            |
+| -------------------- | ---------------------------------------- | --------------------------- |
+| `INTENTS_PER_SECOND` | **10**                                   | intent **silently dropped** |
+| `INTENTS_PER_MINUTE` | **150**                                  | silently dropped            |
+| `MAX_INTENT_SIZE`    | **2,000 bytes**                          | **kick**                    |
+| `REJOINS_PER_MINUTE` | 5                                        | dropped                     |
+| `TOTAL_BYTES`        | **5 MiB** cumulative per client per game | **kick**                    |
+| HTTP API             | 20 req/IP/s                              | —                           |
 
 **Non-intent messages (`ping`, `hash`, `winner`, `live_stats`, `spectate`,
 `report`) have no per-count limit** — only the 5 MiB cap.
@@ -2455,15 +2475,15 @@ the reconnect mapping. `maxGameDuration = 3 h`; `emptyGameTimeout = 10 min`.
 
 ## 7.6 Game modes and lobby options
 
-| Enum | Values |
-|---|---|
-| `GameType` | `Singleplayer` / `Public` / `Private` |
-| `GameMode` | `FFA` / `Team` |
-| `RankedType` | `OneVOne` (`"1v1"`) / `TwoVTwo` (`"2v2"`) |
-| `Difficulty` | `Easy` / `Medium` / `Hard` / `Impossible` |
-| `GameMapSize` | `Compact` / `Normal` |
-| `PlayerType` | `Bot` / `Human` / `Nation` |
-| Team presets | `Duos`, `Trios`, `Quads`, `HumansVsNations` |
+| Enum          | Values                                      |
+| ------------- | ------------------------------------------- |
+| `GameType`    | `Singleplayer` / `Public` / `Private`       |
+| `GameMode`    | `FFA` / `Team`                              |
+| `RankedType`  | `OneVOne` (`"1v1"`) / `TwoVTwo` (`"2v2"`)   |
+| `Difficulty`  | `Easy` / `Medium` / `Hard` / `Impossible`   |
+| `GameMapSize` | `Compact` / `Normal`                        |
+| `PlayerType`  | `Bot` / `Human` / `Nation`                  |
+| Team presets  | `Duos`, `Trios`, `Quads`, `HumansVsNations` |
 
 ### `GameConfigSchema` — every field
 
@@ -2505,6 +2525,7 @@ only after the spawn phase.
 ### The threshold predicate
 
 Returns true if **any** of:
+
 1. `maxTimerValue` is set and `elapsedGameSeconds >= maxTimerValue * 60` — the
    leader wins.
 2. `elapsedGameSeconds >= 10,200` (**170 minutes**) — a hard forced finish 10
@@ -2517,7 +2538,7 @@ Returns true if **any** of:
 drops by **2 points per minute** after `startMinutes` (default 30), floored at 0 —
 so a stalled game always ends.
 
-> Nuking neutral land *lowers the denominator*, making the 80% threshold easier to
+> Nuking neutral land _lowers the denominator_, making the 80% threshold easier to
 > reach for whoever holds the most remaining land. **[DERIVED]**
 
 ### FFA
@@ -2565,13 +2586,13 @@ retreat, bleeding 1%→50% max HP per second.
 
 ### Seeding — everything derives from `gameID`
 
-| Seed | Consumer |
-|---|---|
-| `simpleHash(gameID)` | the master random that assigns `PlayerInfo.id` per human, then nation creation |
-| `simpleHash(gameID) + 1` | `Executor.random` |
-| `simpleHash(gameID) + 2` | `TribeSpawner` |
-| `simpleHash(playerInfo.id) + simpleHash(gameID)` | each `SpawnExecution` |
-| **hardcoded `123`** | **every `AttackExecution`** |
+| Seed                                             | Consumer                                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `simpleHash(gameID)`                             | the master random that assigns `PlayerInfo.id` per human, then nation creation |
+| `simpleHash(gameID) + 1`                         | `Executor.random`                                                              |
+| `simpleHash(gameID) + 2`                         | `TribeSpawner`                                                                 |
+| `simpleHash(playerInfo.id) + simpleHash(gameID)` | each `SpawnExecution`                                                          |
+| **hardcoded `123`**                              | **every `AttackExecution`**                                                    |
 
 The PRNG is **sfc32**, all 32-bit integer ops, seed expanded through splitmix32
 with 12 warm-up calls. `nextInt(min, max)` is **max-exclusive**.
@@ -2597,12 +2618,12 @@ mid-execution. Turns added but not executed are **not** part of it.
 ### Replays
 
 Archived records require an **exact `gitCommit` match**. `PlayerRecord` must keep
-`teamIndex`, `friends` and `isLobbyCreator` — they are simulation *inputs*.
+`teamIndex`, `friends` and `isLobbyCreator` — they are simulation _inputs_.
 `toggle_pause` intents are stripped during replay.
 
 ### Simulating ahead — the caveats
 
-1. You cannot predict other players' intents; you can only simulate *your* intents
+1. You cannot predict other players' intents; you can only simulate _your_ intents
    against current state.
 2. An intent lands in whichever turn is open when the server receives it, and its
    execution `init()`s on that tick and first `tick()`s on the next. **Budget ≥2
@@ -2642,12 +2663,12 @@ Everything below then works on node 22 (warnings only). Do **not** use
 `npm test` = `vitest run && vitest run tests/server`. Vitest config lives inside
 `vite.config.ts:311` (jsdom, `tests/setup.ts`).
 
-| Command | Result on this machine |
-|---|---|
-| `npx vitest run` | **527 files, 6,790 passed, 1 skipped, ~18 min** |
-| `npx vitest run tests/server` | 73 files, 820 passed, 119 s |
-| `npx vitest tests/core/snapshot/CoreSnapshot.test.ts --run` | 2 passed, 3.7 s |
-| `npx vitest NationAllianceBehavior --run` | name-pattern form |
+| Command                                                     | Result on this machine                          |
+| ----------------------------------------------------------- | ----------------------------------------------- |
+| `npx vitest run`                                            | **527 files, 6,790 passed, 1 skipped, ~18 min** |
+| `npx vitest run tests/server`                               | 73 files, 820 passed, 119 s                     |
+| `npx vitest tests/core/snapshot/CoreSnapshot.test.ts --run` | 2 passed, 3.7 s                                 |
+| `npx vitest NationAllianceBehavior --run`                   | name-pattern form                               |
 
 Ignorable noise: `Lit is in dev mode`, `MaxListenersExceededWarning`, and a
 `Failed to parse URL from /maps/australia/manifest.json` in
@@ -2659,11 +2680,11 @@ or network required.
 
 ## 8.3 Loading a map outside the browser
 
-| Loader | Maps |
-|---|---|
-| `tests/perf/fullgame/NodeGameMapLoader.ts` | the **real production maps** in `resources/maps/<lowercased key>/` (**128** maps) |
+| Loader                                             | Maps                                                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `tests/perf/fullgame/NodeGameMapLoader.ts`         | the **real production maps** in `resources/maps/<lowercased key>/` (**128** maps)                 |
 | `tests/util/ScriptedGame.ts` → `TestDataMapLoader` | `tests/testdata/maps/{world,plains,big_plains,giantworldmap,ocean_and_land,half_land_half_ocean}` |
-| `tests/util/Setup.ts` → `setup()` | the same test maps, but builds a `Game` directly with no `GameRunner` |
+| `tests/util/Setup.ts` → `setup()`                  | the same test maps, but builds a `Game` directly with no `GameRunner`                             |
 
 ```ts
 import { loadTerrainMap } from "src/core/game/TerrainMapLoader";
@@ -2671,8 +2692,11 @@ import { NodeGameMapLoader } from "tests/perf/fullgame/NodeGameMapLoader";
 import { GameMapType, GameMapSize } from "src/core/game/Game";
 
 const t = await loadTerrainMap(
-  GameMapType.Europe, GameMapSize.Compact,
-  new NodeGameMapLoader("resources/maps"), /* loadLayerImages */ false);
+  GameMapType.Europe,
+  GameMapSize.Compact,
+  new NodeGameMapLoader("resources/maps"),
+  /* loadLayerImages */ false,
+);
 // t.gameMap, t.miniGameMap, t.nations, t.additionalNations, t.teamGameSpawnAreas
 ```
 
@@ -2702,12 +2726,18 @@ to prove a change did not alter simulation behaviour.
 `tests/util/ScriptedGame.ts` is the closest thing in the repo to a bot playing.
 
 ```ts
-import { createScriptedRunner, scriptedGameStart, stepScripted }
-  from "tests/util/ScriptedGame";
+import {
+  createScriptedRunner,
+  scriptedGameStart,
+  stepScripted,
+} from "tests/util/ScriptedGame";
 
-const runner = await createScriptedRunner("world", scriptedGameStart({ bots: 10, nations: 4 }));
+const runner = await createScriptedRunner(
+  "world",
+  scriptedGameStart({ bots: 10, nations: 4 }),
+);
 for (let i = 0; i < 300; i++) stepScripted(runner);
-const snap = runner.snapshot();       // Uint8Array
+const snap = runner.snapshot(); // Uint8Array
 // VERIFIED: "tick 300 spawnPhase false alive 17 / snapshot bytes: 61809"
 ```
 
@@ -2801,17 +2831,17 @@ alive players: 21
 
 ### Pitfalls, all hit during verification
 
-| Pitfall | Detail |
-|---|---|
-| **Spawn phase never ends in Singleplayer** | `GameRunner.init()` adds `SpawnTimerExecution` only when `gameType !== Singleplayer`. With `Singleplayer` you must call `game.endSpawnPhase()` yourself. **Use `GameType.Private`** to get the timer |
-| **~200 wasted ticks** | `numSpawnPhaseTurns()` is 100 (SP) / 150 (randomSpawn) / **200** |
-| **`game.players()` filters to alive** | It returns **0** before anyone spawns. Use `game.allPlayers()` for the full roster |
-| **Intents must carry `clientID`** | The real server stamps it; headless, you stamp it yourself. An unknown clientID becomes a harmless `NoOpExecution` |
-| **IDs are schema-validated** | `gameID` and `clientID` must be 8 alphanumerics; usernames ≥3 chars; clan tags 2–5. See `cid()` in `tests/util/GameServerHarness.ts:28` |
-| **`executeNextTick()` returns false** | when no turn is queued or a tick is already executing. Always `addTurn` first. Errors arrive through the callback as `ErrorUpdate`, **not** as a throw |
-| **Silence the logging** | `console.debug = () => {}` — the sim is chatty per tick |
-| **No build step needed** | `npx tsx` works directly |
-| **Never emit `kick_player` / `update_game_config` / `toggle_game_start_timer`** | `LocalServer` queues them and `createExec` throws outside the try/catch. See `07-action-api.md §7.2` |
+| Pitfall                                                                         | Detail                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spawn phase never ends in Singleplayer**                                      | `GameRunner.init()` adds `SpawnTimerExecution` only when `gameType !== Singleplayer`. With `Singleplayer` you must call `game.endSpawnPhase()` yourself. **Use `GameType.Private`** to get the timer |
+| **~200 wasted ticks**                                                           | `numSpawnPhaseTurns()` is 100 (SP) / 150 (randomSpawn) / **200**                                                                                                                                     |
+| **`game.players()` filters to alive**                                           | It returns **0** before anyone spawns. Use `game.allPlayers()` for the full roster                                                                                                                   |
+| **Intents must carry `clientID`**                                               | The real server stamps it; headless, you stamp it yourself. An unknown clientID becomes a harmless `NoOpExecution`                                                                                   |
+| **IDs are schema-validated**                                                    | `gameID` and `clientID` must be 8 alphanumerics; usernames ≥3 chars; clan tags 2–5. See `cid()` in `tests/util/GameServerHarness.ts:28`                                                              |
+| **`executeNextTick()` returns false**                                           | when no turn is queued or a tick is already executing. Always `addTurn` first. Errors arrive through the callback as `ErrorUpdate`, **not** as a throw                                               |
+| **Silence the logging**                                                         | `console.debug = () => {}` — the sim is chatty per tick                                                                                                                                              |
+| **No build step needed**                                                        | `npx tsx` works directly                                                                                                                                                                             |
+| **Never emit `kick_player` / `update_game_config` / `toggle_game_start_timer`** | `LocalServer` queues them and `createExec` throws outside the try/catch. See `07-action-api.md §7.2`                                                                                                 |
 
 ## 8.6 Snapshot / restore
 
@@ -2857,7 +2887,7 @@ The repo ships a Playwright harness at **`.claude/skills/run-openfront/`**
 
 ```bash
 bash .claude/skills/run-openfront/setup.sh
-(npm run dev > /tmp/dev.log 2>&1 &)             # vite on :9000, NOT 5173
+(npm run dev > /tmp/dev.log 2>&1 &) # vite on :9000, NOT 5173
 node .claude/skills/run-openfront/game.mjs
 ```
 
@@ -2866,6 +2896,7 @@ Exported helpers: `startSoloGame`, `gameState`, `findSpawnTile`, `spawn`,
 `clickWorld`, `panTo`, `setAttackRatio`, `openRadialMenu`.
 
 Critical notes from that skill:
+
 - **`launch({ rafIntervalMs: 3000 }) is mandatory in-game.** SwiftShader needs
   seconds per frame; unthrottled rAF starves the main thread and the singleplayer
   turn loop drops to ~0.3 ticks/s instead of 10.
@@ -2884,13 +2915,13 @@ Critical notes from that skill:
 `src/client/hud/layers/PlayerActionHandler.ts` (96 lines) is the complete adapter
 between clicks and intents. Every method just emits a `Send*IntentEvent`:
 
-| Method | Emits |
-|---|---|
-| `handleAttack(player, targetId)` | `SendAttackIntentEvent(targetId, uiState.attackRatio * player.troops())` — `targetId = null` means TerraNullius |
-| `handleBoatAttack(player, tile)` | `SendBoatAttackIntentEvent(tile, attackRatio * troops)` |
-| `handleSpawn`, `handleAllianceRequest`, `handleExtendAlliance`, `handleBreakAlliance`, `handleTargetPlayer`, `handleEmbargo`, `handleEmoji`, `handleDeleteUnit` | the corresponding events |
-| `handleDonateGold(recipient)` | amount always `null` — the modal picks it |
-| `handleDonateTroops(recipient, troops?)` | **drops the call if `troops <= 0`** |
+| Method                                                                                                                                                          | Emits                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `handleAttack(player, targetId)`                                                                                                                                | `SendAttackIntentEvent(targetId, uiState.attackRatio * player.troops())` — `targetId = null` means TerraNullius |
+| `handleBoatAttack(player, tile)`                                                                                                                                | `SendBoatAttackIntentEvent(tile, attackRatio * troops)`                                                         |
+| `handleSpawn`, `handleAllianceRequest`, `handleExtendAlliance`, `handleBreakAlliance`, `handleTargetPlayer`, `handleEmbargo`, `handleEmoji`, `handleDeleteUnit` | the corresponding events                                                                                        |
+| `handleDonateGold(recipient)`                                                                                                                                   | amount always `null` — the modal picks it                                                                       |
+| `handleDonateTroops(recipient, troops?)`                                                                                                                        | **drops the call if `troops <= 0`**                                                                             |
 
 Build and upgrade intents bypass this class and come from `BuildMenu` /
 `RadialMenuElements`.
@@ -2902,7 +2933,7 @@ converting a click into a troop count. Default **0.2**. Slider is `min=1 max=100
 with `value/100`. Keyboard steps by 10 percentage points; stepping up from 0.01
 lands on **0.10, not 0.11**.
 
-> ⚠️ `GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a *percent*. It is
+> ⚠️ `GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a _percent_. It is
 > overwritten by `ControlPanel.init()`, but any intent emitted before that would
 > request `20 × troops`.
 
@@ -2985,14 +3016,14 @@ Nothing accrues during the spawn phase. Spend the whole 20 seconds choosing.
 
 **Score a candidate on, in order:**
 
-| Weight | Criterion | Mechanic |
-|---|---|---|
-| Highest | Contiguous **unowned land** reachable in the first ~60 s | terra nullius is flat 16–24 troops/tile with zero defender loss (§02.7) |
-| High | **Coast on a large water component**, with a buildable shore tile within 20 manhattan | ports/trade/warships/boats all gate on it (§01.5) |
-| High | Low **border-to-area ratio** of the region you can plausibly claim | halving your border halves the rate you can be eaten (§02.5) |
-| Medium | Distance to the nearest human or nation `spawnTile` | manual picks have **no minimum distance** — proximity is a choice |
-| Medium | Mountain/highland on the likely invasion axis, plains on your expansion axis | terrain penalty is paid by the attacker (§01.2) |
-| Low | Map edge / impassable adjacency | exempts you from encirclement auto-annexation (§02.5) |
+| Weight  | Criterion                                                                             | Mechanic                                                                |
+| ------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Highest | Contiguous **unowned land** reachable in the first ~60 s                              | terra nullius is flat 16–24 troops/tile with zero defender loss (§02.7) |
+| High    | **Coast on a large water component**, with a buildable shore tile within 20 manhattan | ports/trade/warships/boats all gate on it (§01.5)                       |
+| High    | Low **border-to-area ratio** of the region you can plausibly claim                    | halving your border halves the rate you can be eaten (§02.5)            |
+| Medium  | Distance to the nearest human or nation `spawnTile`                                   | manual picks have **no minimum distance** — proximity is a choice       |
+| Medium  | Mountain/highland on the likely invasion axis, plains on your expansion axis          | terrain penalty is paid by the attacker (§01.2)                         |
+| Low     | Map edge / impassable adjacency                                                       | exempts you from encirclement auto-annexation (§02.5)                   |
 
 **Concrete heuristic:** click 4–5 tiles inland from a coastline that faces a large
 ocean, with a bay or peninsula behind you and open neutral land in front. That
@@ -3018,9 +3049,10 @@ The arithmetic: against terra nullius, attacker loss is a flat `mag/5` per tile 
 6,600 troops on plains.
 
 **Therefore:**
+
 - Attack neutral land **continuously**, in stacks of ~7,000–10,000. More than that
   buys nothing per attack (the cost clamps at 5) — it only buys more simultaneous
-  frontage, which *does* help, so run several attacks in parallel rather than one
+  frontage, which _does_ help, so run several attacks in parallel rather than one
   huge one.
 - Take **whatever is adjacent, regardless of terrain.** Once your stack is above
   the clamp, terrain no longer slows neutral expansion at all. Terrain only starts
@@ -3056,6 +3088,7 @@ at all yet.** 62,370/min against a 60,000/min baseline is not worth 125,000 gold
 Build cities and fight instead.
 
 **Then, in rough order:**
+
 1. Ports until the global trade fleet saturation knee (~330 world ships) flattens
    the curve. Upgrade existing ports as readily as building new ones — port levels
    are superlinear because the pity counter climbs `level` times faster (§03).
@@ -3080,6 +3113,7 @@ tilesYouCanTake   ≈ yourStack / attackerLoss_per_tile
 ```
 
 **Sanity checks before attacking:**
+
 - Is `tilesYouCanTake` worth the entire stack? **You will spend all of it.** PvP
   attacks burn out; they do not return troops on success.
 - Is the defender's **density** (`troops / tiles`) low? Density is their real
@@ -3119,6 +3153,7 @@ landing tile is taken free with no combat. But the beachhead starts with a
 ≤4-tile frontier, so it is glacial until it spreads.
 
 Use boats to:
+
 - Open a second front on a player whose land border you cannot widen.
 - Take an island or a disconnected landmass no one contests.
 - Land behind a defense post's 30-tile radius.
@@ -3162,14 +3197,14 @@ and never betray while you have an exposed border with a third party.
 
 Nation AI targets you by measurable thresholds. Stay outside them:
 
-| Threshold | Stay |
-|---|---|
-| `veryWeak`: `troops < maxTroops × 0.15` | **above 15% of your cap** |
-| `juicy`: `troops <= theirs × 0.75` | **above 75% of the strongest neighbour's troops** |
-| `victim`: incoming attacks `> your troops × 0.5` | do not let attacks pile up |
-| FFA nuke crown gap: Easy 40% / Med 30% / Hard 20% / **Imp 10%** land lead | below the gap, or accept nukes |
+| Threshold                                                                      | Stay                                                   |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `veryWeak`: `troops < maxTroops × 0.15`                                        | **above 15% of your cap**                              |
+| `juicy`: `troops <= theirs × 0.75`                                             | **above 75% of the strongest neighbour's troops**      |
+| `victim`: incoming attacks `> your troops × 0.5`                               | do not let attacks pile up                             |
+| FFA nuke crown gap: Easy 40% / Med 30% / Hard 20% / **Imp 10%** land lead      | below the gap, or accept nukes                         |
 | MIRV victory denial: Easy 75% / Med 65% / Hard 55% / **Imp 40%** of total land | **crossing 40% invites a MIRV in an Impossible lobby** |
-| MIRV steamroll: cities > 8–20 **and** ≥1.15–2× second place | do not lead cities by that margin |
+| MIRV steamroll: cities > 8–20 **and** ≥1.15–2× second place                    | do not lead cities by that margin                      |
 
 Conversely, **to freeze a Hard/Impossible nation**: park a large stack on its
 border (`troopSendCap` retains 75–90% of the strongest neighbour's troops), and
@@ -3182,7 +3217,7 @@ The bar is **80% of non-fallout land**, checked once per second, strict `>`.
 
 **Three levers:**
 
-1. **The denominator excludes fallout.** Nuking *neutral* land permanently removes
+1. **The denominator excludes fallout.** Nuking _neutral_ land permanently removes
    it from the win denominator (fallout never decays). If you hold the most
    remaining land, every neutral tile you irradiate moves the bar toward you. This
    is the most under-appreciated mechanic in the game.
@@ -3193,6 +3228,7 @@ The bar is **80% of non-fallout land**, checked once per second, strict `>`.
    `maxTimerValue` does the same, earlier.
 
 **Nuclear endgame:**
+
 - MIRV is **uninterceptable** and drives a target to 3% of max troops, map-wide,
   including every transport they own. It is the hard counter to a turtle. It costs
   25M and raises the global price by 15M for everyone.
@@ -3266,8 +3302,8 @@ Once per decision cycle (every ~10–20 ticks; you have 10 intents/s, 150/min):
 8. **Mutual attack annihilation** — attacking an incoming attacker cancels both
    stacks 1:1 before a tile moves.
 9. **Upgrade, don't build**: placing a structure within 15 tiles of your own same
-   type silently becomes an upgrade at the same ladder price — and city *levels*,
-   not city *count*, drive `maxTroops`.
+   type silently becomes an upgrade at the same ladder price — and city _levels_,
+   not city _count_, drive `maxTroops`.
 10. **Structures survive capture** (except defense posts), so taking a developed
     enemy tile hands you the city, port, factory, silo or SAM standing on it, at
     its current level.
@@ -3284,45 +3320,45 @@ repo's own comments.
 
 ## 99.1 Fork divergences from upstream OpenFront
 
-| Divergence | Consequence |
-|---|---|
-| **No population / worker system.** `maxPopulation`, `populationIncreaseRate`, `targetTroopRatio`, `troopAdjustmentRate`, `player.population()`, `player.workers()` **do not exist** | Any strategy built on the worker/troop split is meaningless here |
-| `goldAdditionRate` is a **flat constant**, not worker-derived | Territory produces no gold. The variable `goldFromWorkers` (`PlayerExecution.ts:99`) is a vestigial name |
-| One `Config.ts`, no `DefaultConfig`/`DevConfig`/`PreprodConfig` split | — |
-| Alliance duration is host-configurable (1–15 min; `0` disables alliances) | — |
-| Nation AI split into 7 behaviour modules + shared `AiAttackBehavior` | Bots ("tribes") use only `AiAttackBehavior` |
-| **zbin positional binary wire**, no version byte | An agent written against upstream docs will mis-parse frames |
-| Hard `gitCommit` equality gate at join | A stale client is refused outright |
-| Doomsday Clock, Overtime, `hostCheats`, `trusted`, allowlists, `anonymizeNames`, `rankedType`, `publicGameModifiers`, tribes, spectator mode, lobby listing | All fork additions |
-| `WinCheckExecution.HARD_TIME_LIMIT_SECONDS = 10,200` | Fork-specific forced finish |
+| Divergence                                                                                                                                                                          | Consequence                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **No population / worker system.** `maxPopulation`, `populationIncreaseRate`, `targetTroopRatio`, `troopAdjustmentRate`, `player.population()`, `player.workers()` **do not exist** | Any strategy built on the worker/troop split is meaningless here                                         |
+| `goldAdditionRate` is a **flat constant**, not worker-derived                                                                                                                       | Territory produces no gold. The variable `goldFromWorkers` (`PlayerExecution.ts:99`) is a vestigial name |
+| One `Config.ts`, no `DefaultConfig`/`DevConfig`/`PreprodConfig` split                                                                                                               | —                                                                                                        |
+| Alliance duration is host-configurable (1–15 min; `0` disables alliances)                                                                                                           | —                                                                                                        |
+| Nation AI split into 7 behaviour modules + shared `AiAttackBehavior`                                                                                                                | Bots ("tribes") use only `AiAttackBehavior`                                                              |
+| **zbin positional binary wire**, no version byte                                                                                                                                    | An agent written against upstream docs will mis-parse frames                                             |
+| Hard `gitCommit` equality gate at join                                                                                                                                              | A stale client is refused outright                                                                       |
+| Doomsday Clock, Overtime, `hostCheats`, `trusted`, allowlists, `anonymizeNames`, `rankedType`, `publicGameModifiers`, tribes, spectator mode, lobby listing                         | All fork additions                                                                                       |
+| `WinCheckExecution.HARD_TIME_LIMIT_SECONDS = 10,200`                                                                                                                                | Fork-specific forced finish                                                                              |
 
 ## 99.2 Documentation that is wrong
 
-| Claim | Reality |
-|---|---|
+| Claim                                                                                                      | Reality                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `GameMap.ts:129-132` and `map-generator/README.md:91`: "nuke trajectories cannot cross impassable terrain" | **False.** `tests/ImpassableTerrain.test.ts:324-336` asserts a nuke flies over and detonates. No trajectory-blocking code exists |
-| `Config.ts:363-364`: `falloutDefenseModifier` range is `[5, 2.5]` | The formula `5 - r*2` gives **`[3, 5]`** |
-| `GameImpl.ts:127`: `packedPlayerUpdates` described as `[smallID, tilesOwned, gold, troops] quads` | It is **5 lanes**: `[smallID, tilesOwned, gold, troops, goldEarned]`. `GameUpdates.ts:38-47` has it right |
-| `Config.traitorSpeedDebuff()` (the name) | 0.8 multiplies `tickFraction`, so attacks *against* a traitor go **faster** |
-| `src/client/render/CLAUDE.md` references `src/client/graphics/` | That directory does not exist; it is `src/client/hud/`. The pass list is also stale |
-| `package.json` engines: `node >=24.15.0` | node 22 runs the full suite green; `engine-strict=true` makes this a hard install failure |
+| `Config.ts:363-364`: `falloutDefenseModifier` range is `[5, 2.5]`                                          | The formula `5 - r*2` gives **`[3, 5]`**                                                                                         |
+| `GameImpl.ts:127`: `packedPlayerUpdates` described as `[smallID, tilesOwned, gold, troops] quads`          | It is **5 lanes**: `[smallID, tilesOwned, gold, troops, goldEarned]`. `GameUpdates.ts:38-47` has it right                        |
+| `Config.traitorSpeedDebuff()` (the name)                                                                   | 0.8 multiplies `tickFraction`, so attacks _against_ a traitor go **faster**                                                      |
+| `src/client/render/CLAUDE.md` references `src/client/graphics/`                                            | That directory does not exist; it is `src/client/hud/`. The pass list is also stale                                              |
+| `package.json` engines: `node >=24.15.0`                                                                   | node 22 runs the full suite green; `engine-strict=true` makes this a hard install failure                                        |
 
 ## 99.3 Dead code — present, plausible, never executed
 
-| Thing | Status |
-|---|---|
+| Thing                                                                                                                                  | Status                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | **Defense posts never fire.** `DefensePostExecution.shoot()` has no live caller; the ship-targeting block is commented out (`:64-106`) | `defensePostShellAttackRate() = 100` and `defensePostTargettingRange() = 75` are unreachable config |
-| **SAM interception has no random roll.** `SAMLauncherExecution` constructs a `PseudoRandom` and never reads it | Interception is fully deterministic |
-| `GameMap.hasDefenseBonus` / `setDefenseBonus` (state bit 14) | Allocated, snapshotted, rendered — **never set by the simulation** |
-| `GameMap.cost(ref)` | Proxied by `GameImpl` and `GameView`, **no callers**. Pathfinding uses its own costs |
-| `src/core/game/TerrainSearchMap.ts` (65 lines) | **Zero references** anywhere in `src/` or `tests/` |
-| `Player.expiredAlliances()` | Declared, returned, snapshotted — **nothing ever pushes to it**. Always `[]` |
-| `decreaseLevel()` | Implemented, **no caller in `src/core`**. Partial demolition never happens |
-| `warshipShellLifetime()` = 20 | Unused; shells use `shellLifetime()` = 50 |
-| `PathFinding.WaterSimple` | A no-op alias for `PathFinding.Water` |
-| `UpgradeStructureExecution.cost` | Declared, never assigned. The real charge is in `PlayerImpl.upgradeUnit` |
-| `GameUpdateType.Tile` | In the enum, **never emitted** — tiles travel in `packedTileUpdates` |
-| `upgrade_structure.unit` | Accepted by the schema, **ignored** by the executor |
+| **SAM interception has no random roll.** `SAMLauncherExecution` constructs a `PseudoRandom` and never reads it                         | Interception is fully deterministic                                                                 |
+| `GameMap.hasDefenseBonus` / `setDefenseBonus` (state bit 14)                                                                           | Allocated, snapshotted, rendered — **never set by the simulation**                                  |
+| `GameMap.cost(ref)`                                                                                                                    | Proxied by `GameImpl` and `GameView`, **no callers**. Pathfinding uses its own costs                |
+| `src/core/game/TerrainSearchMap.ts` (65 lines)                                                                                         | **Zero references** anywhere in `src/` or `tests/`                                                  |
+| `Player.expiredAlliances()`                                                                                                            | Declared, returned, snapshotted — **nothing ever pushes to it**. Always `[]`                        |
+| `decreaseLevel()`                                                                                                                      | Implemented, **no caller in `src/core`**. Partial demolition never happens                          |
+| `warshipShellLifetime()` = 20                                                                                                          | Unused; shells use `shellLifetime()` = 50                                                           |
+| `PathFinding.WaterSimple`                                                                                                              | A no-op alias for `PathFinding.Water`                                                               |
+| `UpgradeStructureExecution.cost`                                                                                                       | Declared, never assigned. The real charge is in `PlayerImpl.upgradeUnit`                            |
+| `GameUpdateType.Tile`                                                                                                                  | In the enum, **never emitted** — tiles travel in `packedTileUpdates`                                |
+| `upgrade_structure.unit`                                                                                                               | Accepted by the schema, **ignored** by the executor                                                 |
 
 ## 99.4 Traps that will cost you a game
 
@@ -3353,7 +3389,7 @@ is what every later min-distance check reads.
 
 ### `attackRatio` is a fraction, except once
 
-`GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a *percent*. It is
+`GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a _percent_. It is
 overwritten by `ControlPanel.init()`, but an intent emitted before that would
 request `20 × troops`.
 
@@ -3408,34 +3444,34 @@ dynamic-nation games.
 
 ## 99.5 Behaviour that is correct but counterintuitive
 
-| Behaviour | Why |
-|---|---|
-| The 0.7× bot-defender discount **does not apply to bot attackers** | Golden values confirm bot-vs-bot and bot-vs-human are baseline |
-| Spawn immunity binds **only humans** | Nations and bots attack through it |
-| Nuking a formal **ally** is allowed; nuking a **teammate** is not | Only the team check exists in `nukeSpawn` |
-| Teammates get **no** train bonus; allies get 35,000 vs 25,000 | `rel` classification treats `team` and `other` identically |
-| One-sided embargoes block trade **both ways** | `canTrade` checks both directions |
-| Ports and Factories **share one cost ladder** | `costWrapper` sums both types |
-| Conquering **clears fallout** | `GameImpl.conquer` calls `setFallout(tile, false)` |
-| Defense posts are **destroyed** on capture, everything else is captured | Explicit special case in `PlayerExecution` |
-| Warship **veterancy survives capture** | It lives in `warshipState`, untouched by `setOwner` |
-| Water paths can cross 1-tile land barriers | The 2×2 minimap downsample lets water win. The repo has a `describe("Known bugs")` block for it |
-| Rail paths are minimap-quantised too | Easy to miss |
-| Trade ships hugging the coast are near-unpiratable | `safeFromPirates` refreshes on every shoreline water tile |
-| Port **levels** are superlinear in trade output | The pity counter increments once per failed roll, so a level-3 port's counter climbs 3× faster. Undocumented in the code |
+| Behaviour                                                               | Why                                                                                                                      |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| The 0.7× bot-defender discount **does not apply to bot attackers**      | Golden values confirm bot-vs-bot and bot-vs-human are baseline                                                           |
+| Spawn immunity binds **only humans**                                    | Nations and bots attack through it                                                                                       |
+| Nuking a formal **ally** is allowed; nuking a **teammate** is not       | Only the team check exists in `nukeSpawn`                                                                                |
+| Teammates get **no** train bonus; allies get 35,000 vs 25,000           | `rel` classification treats `team` and `other` identically                                                               |
+| One-sided embargoes block trade **both ways**                           | `canTrade` checks both directions                                                                                        |
+| Ports and Factories **share one cost ladder**                           | `costWrapper` sums both types                                                                                            |
+| Conquering **clears fallout**                                           | `GameImpl.conquer` calls `setFallout(tile, false)`                                                                       |
+| Defense posts are **destroyed** on capture, everything else is captured | Explicit special case in `PlayerExecution`                                                                               |
+| Warship **veterancy survives capture**                                  | It lives in `warshipState`, untouched by `setOwner`                                                                      |
+| Water paths can cross 1-tile land barriers                              | The 2×2 minimap downsample lets water win. The repo has a `describe("Known bugs")` block for it                          |
+| Rail paths are minimap-quantised too                                    | Easy to miss                                                                                                             |
+| Trade ships hugging the coast are near-unpiratable                      | `safeFromPirates` refreshes on every shoreline water tile                                                                |
+| Port **levels** are superlinear in trade output                         | The pity counter increments once per failed roll, so a level-3 port's counter climbs 3× faster. Undocumented in the code |
 
 ## 99.6 Open questions I did not resolve
 
 1. **Alliance acceptance is asymmetric.** The `+100` relation, the temporary-
    embargo clearing and the in-flight nuke cancellation live only in the
-   *counter-request* path (`src/core/execution/alliance/AllianceRequestExecution.ts:45-65`). A plain accept via
+   _counter-request_ path (`src/core/execution/alliance/AllianceRequestExecution.ts:45-65`). A plain accept via
    `AllianceRequestImpl.accept()` gets none of it. Whether the client's accept
    button routes through an `AllianceRequestExecution` was not traced. **Treat as
    unverified.**
 2. `AttackExecution.ts:302-306` calls `refreshToConquer()` immediately before
    `retreat()`, which deletes the attack. Appears vestigial.
 3. `AttackExecution.ts:239-244` — the `removeTroops === false && sourceTile ===
-   null` refund branch is unreachable with current callers.
+null` refund branch is unreachable with current callers.
 4. `NationExecution.handleEmbargoesToHostileNations` branch 3 is shadowed by
    branch 2 for Easy/Medium, so it only ever fires for Hard.
 5. `TribeExecution.maybeAttack`'s alliance-break branch is near-unreachable — the

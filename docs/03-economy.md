@@ -8,11 +8,11 @@
 
 ### Starting troops (`Config.ts:1003-1022`)
 
-| Player | Troops |
-|---|---|
-| Bot | 10,000 |
-| Nation, Easy / Medium / Hard / Impossible | 12,500 / 18,750 / 25,000 / 31,250 |
-| Human | 25,000 (1,000,000 with `infiniteTroops`) |
+| Player                                    | Troops                                   |
+| ----------------------------------------- | ---------------------------------------- |
+| Bot                                       | 10,000                                   |
+| Nation, Easy / Medium / Hard / Impossible | 12,500 / 18,750 / 25,000 / 31,250        |
+| Human                                     | 25,000 (1,000,000 with `infiniteTroops`) |
 
 ### `maxTroops` (`Config.ts:1024-1056`) — verified
 
@@ -29,15 +29,15 @@ necessarily an integer** — downstream code handles floats.)
 
 A player with **zero tiles still has `maxTroops = 100,000`.**
 
-| tiles | maxTroops (0 cities) | marginal per tile |
-|---|---|---|
-| 50 | 120,913 | 250.0 |
-| 100 | 131,698 | 189.8 |
-| 500 | 183,255 | 99.9 |
-| 1,000 | 226,191 | 75.7 |
-| 5,000 | 431,445 | 39.8 |
-| 20,000 | 861,462 | 22.8 |
-| 100,000 | 2,100,000 | 12.0 |
+| tiles   | maxTroops (0 cities) | marginal per tile |
+| ------- | -------------------- | ----------------- |
+| 50      | 120,913              | 250.0             |
+| 100     | 131,698              | 189.8             |
+| 500     | 183,255              | 99.9              |
+| 1,000   | 226,191              | 75.7              |
+| 5,000   | 431,445              | 39.8              |
+| 20,000  | 861,462              | 22.8              |
+| 100,000 | 2,100,000            | 12.0              |
 
 `d(maxTroops)/dn = 1200 · n^-0.4` — the marginal value of a tile **halves every
 ~5.6× territory**.
@@ -64,12 +64,12 @@ Applied **every tick, to every alive player** (`PlayerExecution.ts:97-103`).
 
 **[DERIVED]** Time to saturate from T = 25,000:
 
-| maxTroops | to 50% | to 90% | to 99% |
-|---|---|---|---|
-| 121,411 (spawn territory) | 94 | 281 | 502 |
-| 300,000 | 193 | 434 | 717 |
-| 1,000,000 | 360 | 694 | 1,088 |
-| 2,000,000 | 482 | 886 | 1,361 |
+| maxTroops                 | to 50% | to 90% | to 99% |
+| ------------------------- | ------ | ------ | ------ |
+| 121,411 (spawn territory) | 94     | 281    | 502    |
+| 300,000                   | 193    | 434    | 717    |
+| 1,000,000                 | 360    | 694    | 1,088  |
+| 2,000,000                 | 482    | 886    | 1,361  |
 
 **Troops refill to ~99% of cap in under two minutes of game time. Troops are never
 the long-run bottleneck — `maxTroops` is.**
@@ -86,15 +86,15 @@ back down.
 
 ### Every income source
 
-| Source | Amount | Site |
-|---|---|---|
-| **Passive** | **100/tick** (50 for bots) × `goldMultiplier` — **flat, independent of everything** | `Config.ts:1092-1101` |
+| Source             | Amount                                                                                            | Site                            |
+| ------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------- |
+| **Passive**        | **100/tick** (50 for bots) × `goldMultiplier` — **flat, independent of everything**               | `Config.ts:1092-1101`           |
 | Trade ship arrival | `tradeShipGold(tilesTravelled)` to **each** of the source and destination port owners — not split | `TradeShipExecution.ts:214-215` |
-| Trade ship piracy | full amount to the captor | `TradeShipExecution.ts:195-196` |
-| Train stop | `trainGold(rel, stops)` to the train owner **and** the station owner | `TrainStation.ts:38-42` |
-| Conquest | 100% of a bot's/nation's gold, **50%** of a human's | `Config.ts:735-744` |
-| Donation | whatever the ally sends | `PlayerImpl.ts:1175` |
-| Starting gold | `gameConfig.startingGold ?? 0`; bots always 0 | `PlayerImpl.ts:217` |
+| Trade ship piracy  | full amount to the captor                                                                         | `TradeShipExecution.ts:195-196` |
+| Train stop         | `trainGold(rel, stops)` to the train owner **and** the station owner                              | `TrainStation.ts:38-42`         |
+| Conquest           | 100% of a bot's/nation's gold, **50%** of a human's                                               | `Config.ts:735-744`             |
+| Donation           | whatever the ally sends                                                                           | `PlayerImpl.ts:1175`            |
+| Starting gold      | `gameConfig.startingGold ?? 0`; bots always 0                                                     | `PlayerImpl.ts:217`             |
 
 **Human base income = 100 gold/tick = 1,000/s = 60,000/min.** Pinned by
 `tests/economy/ConstructionGold.test.ts:54`.
@@ -109,21 +109,23 @@ the delete path.
 ### Trade ships
 
 `tradeShipGold(dist)` (`Config.ts:516-521`):
+
 ```
 75_000 / (1 + e^(-0.03 * (dist - 300)))  +  50 * dist
 ```
+
 `dist` is **tiles actually travelled**, not straight-line.
 
-| dist | gold |
-|---|---|
-| 100 | 5,185 |
-| 200 | 13,556 |
-| **300** (inflection) | 52,500 |
-| 400 | 91,443 |
-| 500 | 99,814 |
-| 1,000 | 124,999 |
-| 2,000 | 175,000 |
-| 5,000 | 325,000 |
+| dist                 | gold    |
+| -------------------- | ------- |
+| 100                  | 5,185   |
+| 200                  | 13,556  |
+| **300** (inflection) | 52,500  |
+| 400                  | 91,443  |
+| 500                  | 99,814  |
+| 1,000                | 124,999 |
+| 2,000                | 175,000 |
+| 5,000                | 325,000 |
 
 The sigmoid centred on 300 is a brutal punishment for short hops. Past ~500 tiles
 only the linear `50·dist` term still grows.
@@ -145,14 +147,14 @@ throttled by everyone else's ports. Consecutive failures raise the odds (a pity
 timer), which square-roots the effect of saturation.
 
 | world fleet | saturation | rate | **[DERIVED]** sec/ship at a level-1 port |
-|---|---|---|---|
-| 0 | 1.435 | 69 | 9.7 |
-| 100 | 1.148 | 87 | 11.0 |
-| 300 | 0.625 | 160 | 15.2 |
-| 500 | 0.224 | 446 | 25.8 |
-| 800 | 0.125 | 799 | 34.8 |
+| ----------- | ---------- | ---- | ---------------------------------------- |
+| 0           | 1.435      | 69   | 9.7                                      |
+| 100         | 1.148      | 87   | 11.0                                     |
+| 300         | 0.625      | 160  | 15.2                                     |
+| 500         | 0.224      | 446  | 25.8                                     |
+| 800         | 0.125      | 799  | 34.8                                     |
 
-> The pity counter is per-port and increments once per *failed roll*, so a level-3
+> The pity counter is per-port and increments once per _failed roll_, so a level-3
 > port's counter climbs 3× as fast as a level-1 port's. **Port levels are
 > superlinear in trade output** — the repo's own scenario data shows a level-3 port
 > earning 1,485,000/min against a level-1's 800,700/min. This is not documented in
@@ -169,18 +171,19 @@ gets no bonus at all**. Maximum weight is `3 × level`.
 ### Trains
 
 `trainGold(rel, citiesVisited)` (`Config.ts:481-504`):
+
 ```
 citiesVisited = max(0, citiesVisited - 9)          // the first 10 stops are free
 base = { ally: 35_000, team: 25_000, other: 25_000, self: 10_000 }[rel]
 gold = max(5_000, base - citiesVisited * 5_000)
 ```
 
-| stops | self | team/other | **ally** |
-|---|---|---|---|
-| 0–9 | 10,000 | 25,000 | **35,000** |
-| 10 | 5,000 | 20,000 | 30,000 |
-| 12 | 5,000 | 10,000 | 20,000 |
-| ≥15 | 5,000 | 5,000 | 5,000 |
+| stops | self   | team/other | **ally**   |
+| ----- | ------ | ---------- | ---------- |
+| 0–9   | 10,000 | 25,000     | **35,000** |
+| 10    | 5,000  | 20,000     | 30,000     |
+| 12    | 5,000  | 10,000     | 20,000     |
+| ≥15   | 5,000  | 5,000      | 5,000      |
 
 Both the train owner and the station owner get the full amount. Only City and Port
 stations pay; Factory stops pay nothing and do not increment the counter.
@@ -190,6 +193,7 @@ cluster with a formal ally is a 3.5× multiplier over self-trade, for both parti
 
 **Spawn**: only Factory stations spawn trains. Per tick, `level` rolls with
 probability `1/trainSpawnRate`, min 10-tick gap between trains:
+
 ```
 trainSpawnRate(F, n) = max(1, floor( (F + 10) * 15 / trainSaturation(n) ))
     F = YOUR factory levels, n = GLOBAL train-unit count (a train is 7 units)
@@ -203,26 +207,28 @@ asymptote. **Factories have severe self-inflicted diminishing returns.**
 ## 3.3 Structure cost ladders
 
 `costWrapper` (`Config.ts:755-774`):
+
 ```
 numUnits = Σ over the listed types of min( unitsOwned(type), unitsConstructed(type) )
 cost     = costFn(numUnits + extraUnits)
 ```
-`unitsOwned` counts **levels** for completed units, so an *upgrade* advances the
+
+`unitsOwned` counts **levels** for completed units, so an _upgrade_ advances the
 same ladder as a new build. Losing units **lowers the price again**.
 
-| Unit | Formula | Shares ladder with | Ladder |
-|---|---|---|---|
-| City | `min(1e6, 2^k · 125,000)` | — | 125k → 250k → 500k → **1M flat** |
-| Port | `min(1e6, 2^k · 125,000)` | **Factory** | same |
-| Factory | `min(1e6, 2^k · 125,000)` | **Port** | same |
-| Defense Post | `min(250,000, (k+1) · 50,000)` | — | 50k, 100k, 150k, 200k, 250k |
-| Missile Silo | flat 1,000,000 | — | — |
-| SAM Launcher | `min(3e6, (k+1) · 1,500,000)` | — | 1.5M, 3M, 3M… |
-| Warship | `min(1e6, (k+1) · 250,000)` | — | 250k, 500k, 750k, 1M… |
-| Atom Bomb | flat 750,000 | — | — |
-| Hydrogen Bomb | flat 5,000,000 | — | — |
-| MIRV | `25M + 15M × game.mirvsLaunched()` | **global, all players** | 25M, 40M, 55M… |
-| Transport, Trade Ship, Train, Shell, SAM Missile, MIRV Warhead | **0** | — | — |
+| Unit                                                           | Formula                            | Shares ladder with      | Ladder                           |
+| -------------------------------------------------------------- | ---------------------------------- | ----------------------- | -------------------------------- |
+| City                                                           | `min(1e6, 2^k · 125,000)`          | —                       | 125k → 250k → 500k → **1M flat** |
+| Port                                                           | `min(1e6, 2^k · 125,000)`          | **Factory**             | same                             |
+| Factory                                                        | `min(1e6, 2^k · 125,000)`          | **Port**                | same                             |
+| Defense Post                                                   | `min(250,000, (k+1) · 50,000)`     | —                       | 50k, 100k, 150k, 200k, 250k      |
+| Missile Silo                                                   | flat 1,000,000                     | —                       | —                                |
+| SAM Launcher                                                   | `min(3e6, (k+1) · 1,500,000)`      | —                       | 1.5M, 3M, 3M…                    |
+| Warship                                                        | `min(1e6, (k+1) · 250,000)`        | —                       | 250k, 500k, 750k, 1M…            |
+| Atom Bomb                                                      | flat 750,000                       | —                       | —                                |
+| Hydrogen Bomb                                                  | flat 5,000,000                     | —                       | —                                |
+| MIRV                                                           | `25M + 15M × game.mirvsLaunched()` | **global, all players** | 25M, 40M, 55M…                   |
+| Transport, Trade Ship, Train, Shell, SAM Missile, MIRV Warhead | **0**                              | —                       | —                                |
 
 > **Ports and Factories share one counter.** Your first Factory costs 125,000 only
 > if you own no Ports. Build three Ports and the next Factory costs 1,000,000.
@@ -232,31 +238,31 @@ cumulative array; flat-cost nukes scale linearly.
 
 ## 3.4 Donations
 
-| Check | Rule |
-|---|---|
-| Relationship | must be `isFriendly` — **a formal ally or a teammate, and not disconnected** |
-| Human recipient | blocked unless the lobby enables `donateGold` / `donateTroops` |
-| Cooldown | **100 ticks, per recipient** — you can donate to three allies in the same tick |
-| Gold default | `sender.gold() / 3`; **no cap** |
-| Troop default | `floor(sender.troops() / 3)`; **capped at `maxTroops(recipient) - recipient.troops()`** |
+| Check           | Rule                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| Relationship    | must be `isFriendly` — **a formal ally or a teammate, and not disconnected**            |
+| Human recipient | blocked unless the lobby enables `donateGold` / `donateTroops`                          |
+| Cooldown        | **100 ticks, per recipient** — you can donate to three allies in the same tick          |
+| Gold default    | `sender.gold() / 3`; **no cap**                                                         |
+| Troop default   | `floor(sender.troops() / 3)`; **capped at `maxTroops(recipient) - recipient.troops()`** |
 
 Relation gained: gold gives `min(100, 5 · floor(goldSent / adjustedChunk))` where
 the chunk inflates with game time (`chunk × (1 + ticks/(3000 + spawnTicks))`) —
 **late donations buy proportionally less goodwill**. Troops give a flat +50 if
-above a randomised threshold (a fraction of the *recipient's* `maxTroops`,
+above a randomised threshold (a fraction of the _recipient's_ `maxTroops`,
 deliberately random so you cannot probe it).
 
 ## 3.5 Economic tick rates
 
-| Update | Cadence |
-|---|---|
-| Passive gold + troop growth | **every tick, per alive player** |
-| Alliance / embargo expiry sweeps | every tick |
-| Territory cluster recalc | every 20 ticks, or **every tick under 100 tiles** — and skipped entirely unless `lastTileChange() >= lastCalc` (`PlayerExecution.ts:121-125`) |
-| Trade-ship spawn roll | every 10 ticks per port, `level` rolls |
-| Train spawn roll | every tick per factory station, `level` rolls, 10-tick min gap |
-| Donate cooldown | 100 ticks |
-| Delete-unit cooldown / mark delay | 300 / 300 ticks |
+| Update                            | Cadence                                                                                                                                       |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Passive gold + troop growth       | **every tick, per alive player**                                                                                                              |
+| Alliance / embargo expiry sweeps  | every tick                                                                                                                                    |
+| Territory cluster recalc          | every 20 ticks, or **every tick under 100 tiles** — and skipped entirely unless `lastTileChange() >= lastCalc` (`PlayerExecution.ts:121-125`) |
+| Trade-ship spawn roll             | every 10 ticks per port, `level` rolls                                                                                                        |
+| Train spawn roll                  | every tick per factory station, `level` rolls, 10-tick min gap                                                                                |
+| Donate cooldown                   | 100 ticks                                                                                                                                     |
+| Delete-unit cooldown / mark delay | 300 / 300 ticks                                                                                                                               |
 
 > **Nothing economic runs during the spawn phase.** `PlayerExecution`,
 > `PortExecution`, `FactoryExecution`, `CityExecution`, `TrainStationExecution`,
@@ -265,40 +271,40 @@ deliberately random so you cannot probe it).
 
 ## 3.6 Where the loop actually breaks — **[DERIVED]**
 
-| Bottleneck | Why |
-|---|---|
-| **1. Coastline + a willing foreign port** | One ocean-crossing port pair is ~13× base income. Landlocked or universally embargoed, you are stuck at 60,000/min plus trains |
-| **2. Trade distance ≥ ~300 tiles** | Below the debuff the sigmoid collapses — a short coastal hop earns ~62,000/min, barely above base, for a 125,000 investment |
-| **3. Global fleet saturation** | In a big lobby `tradeShipSaturation` falls toward 0.25 regardless of your play |
-| **4. Factory count past ~10** | `sat·F/(15(F+10))`: 10 → 20 factories buys ~33% more trains for ~10M gold |
-| **5. Tiles past a few thousand** | Marginal max-troop yield drops below 40/tile; one city level is worth ~5,100 tiles at that margin |
-| **6. The flat 1M cost cap** | Past the 4th structure on a ladder, marginal cost is constant and marginal benefit is roughly constant. **The loop goes linear, not compounding** |
+| Bottleneck                                | Why                                                                                                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Coastline + a willing foreign port** | One ocean-crossing port pair is ~13× base income. Landlocked or universally embargoed, you are stuck at 60,000/min plus trains                    |
+| **2. Trade distance ≥ ~300 tiles**        | Below the debuff the sigmoid collapses — a short coastal hop earns ~62,000/min, barely above base, for a 125,000 investment                       |
+| **3. Global fleet saturation**            | In a big lobby `tradeShipSaturation` falls toward 0.25 regardless of your play                                                                    |
+| **4. Factory count past ~10**             | `sat·F/(15(F+10))`: 10 → 20 factories buys ~33% more trains for ~10M gold                                                                         |
+| **5. Tiles past a few thousand**          | Marginal max-troop yield drops below 40/tile; one city level is worth ~5,100 tiles at that margin                                                 |
+| **6. The flat 1M cost cap**               | Past the 4th structure on a ladder, marginal cost is constant and marginal benefit is roughly constant. **The loop goes linear, not compounding** |
 
 ### Measured income (from the repo's own committed snapshots)
 
 `tests/__snapshots__/TradeTrainScenarios.test.ts.snap` — gold/min per side:
 
-| Setup | gold/min | × base |
-|---|---|---|
-| Passive only | 60,000 | 1.0 |
-| 1 Port each, short coastal hop (~60 tiles) | 62,370 | **1.04** |
-| 1 Port each, across the ocean (~300 tiles) | 800,700 | 13.3 |
-| Port lvl-3 vs lvl-1, across the ocean | 1,485,000 | 24.8 |
-| 1 Port each, ~800 tiles | 1,136,000 | 18.9 |
-| 10 Ports each, across the ocean | 9,053,000 | 151 |
-| 50 Ports each, long route | 24,290,000 | 405 |
-| 1 Factory + 1 City (self-trade) | 46,000 | 0.77 |
-| 1 Factory + 4 Cities | 42,000 | 0.70 |
-| 1 Factory + an **ally** City in cluster | 76,000 (+250,000 to the ally) | 1.27 |
+| Setup                                      | gold/min                      | × base   |
+| ------------------------------------------ | ----------------------------- | -------- |
+| Passive only                               | 60,000                        | 1.0      |
+| 1 Port each, short coastal hop (~60 tiles) | 62,370                        | **1.04** |
+| 1 Port each, across the ocean (~300 tiles) | 800,700                       | 13.3     |
+| Port lvl-3 vs lvl-1, across the ocean      | 1,485,000                     | 24.8     |
+| 1 Port each, ~800 tiles                    | 1,136,000                     | 18.9     |
+| 10 Ports each, across the ocean            | 9,053,000                     | 151      |
+| 50 Ports each, long route                  | 24,290,000                    | 405      |
+| 1 Factory + 1 City (self-trade)            | 46,000                        | 0.77     |
+| 1 Factory + 4 Cities                       | 42,000                        | 0.70     |
+| 1 Factory + an **ally** City in cluster    | 76,000 (+250,000 to the ally) | 1.27     |
 
 Read the second row again. **A port with only a short coastal route is worth
 almost nothing.** Route length is the whole game.
 
 ### Payback periods — **[DERIVED]**, at base income, first structure = 125,000
 
-| First purchase | Income added | Payback |
-|---|---|---|
-| Port with an ocean partner ≥300 tiles away | +800,700/min | **~9 seconds of operation** |
-| Port with only a short coastal hop | +2,370/min | ~53 minutes |
-| Factory + City (250,000 total) | +46,000/min | ~5.4 minutes |
-| City alone | +0 gold, +250,000 maxTroops | never — it is a military purchase |
+| First purchase                             | Income added                | Payback                           |
+| ------------------------------------------ | --------------------------- | --------------------------------- |
+| Port with an ocean partner ≥300 tiles away | +800,700/min                | **~9 seconds of operation**       |
+| Port with only a short coastal hop         | +2,370/min                  | ~53 minutes                       |
+| Factory + City (250,000 total)             | +46,000/min                 | ~5.4 minutes                      |
+| City alone                                 | +0 gold, +250,000 maxTroops | never — it is a military purchase |

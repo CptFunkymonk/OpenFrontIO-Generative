@@ -17,7 +17,7 @@ session's PATH. It is idempotent: a cached container starts in ~0.2 s, a fresh
 one in ~16 s.
 
 ```bash
-CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh   # by hand, if needed
+CLAUDE_CODE_REMOTE=true .claude/hooks/session-start.sh # by hand, if needed
 ```
 
 Do **not** use `npm install` — repo policy; `npm run inst` is the blessed alias.
@@ -30,12 +30,12 @@ Do **not** use `npm install` — repo policy; `npm run inst` is the blessed alia
 `npm test` = `vitest run && vitest run tests/server`. Vitest config lives inside
 `vite.config.ts:311` (jsdom, `tests/setup.ts`).
 
-| Command | Result on this machine |
-|---|---|
-| `npx vitest run` | **527 files, 6,790 passed, 1 skipped, ~18 min** |
-| `npx vitest run tests/server` | 73 files, 820 passed, 119 s |
-| `npx vitest tests/core/snapshot/CoreSnapshot.test.ts --run` | 2 passed, 3.7 s |
-| `npx vitest NationAllianceBehavior --run` | name-pattern form |
+| Command                                                     | Result on this machine                          |
+| ----------------------------------------------------------- | ----------------------------------------------- |
+| `npx vitest run`                                            | **527 files, 6,790 passed, 1 skipped, ~18 min** |
+| `npx vitest run tests/server`                               | 73 files, 820 passed, 119 s                     |
+| `npx vitest tests/core/snapshot/CoreSnapshot.test.ts --run` | 2 passed, 3.7 s                                 |
+| `npx vitest NationAllianceBehavior --run`                   | name-pattern form                               |
 
 Ignorable noise: `Lit is in dev mode`, `MaxListenersExceededWarning`, and a
 `Failed to parse URL from /maps/australia/manifest.json` in
@@ -47,11 +47,11 @@ or network required.
 
 ## 8.3 Loading a map outside the browser
 
-| Loader | Maps |
-|---|---|
-| `tests/perf/fullgame/NodeGameMapLoader.ts` | the **real production maps** in `resources/maps/<lowercased key>/` (**128** maps) |
+| Loader                                             | Maps                                                                                              |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `tests/perf/fullgame/NodeGameMapLoader.ts`         | the **real production maps** in `resources/maps/<lowercased key>/` (**128** maps)                 |
 | `tests/util/ScriptedGame.ts` → `TestDataMapLoader` | `tests/testdata/maps/{world,plains,big_plains,giantworldmap,ocean_and_land,half_land_half_ocean}` |
-| `tests/util/Setup.ts` → `setup()` | the same test maps, but builds a `Game` directly with no `GameRunner` |
+| `tests/util/Setup.ts` → `setup()`                  | the same test maps, but builds a `Game` directly with no `GameRunner`                             |
 
 ```ts
 import { loadTerrainMap } from "src/core/game/TerrainMapLoader";
@@ -59,8 +59,11 @@ import { NodeGameMapLoader } from "tests/perf/fullgame/NodeGameMapLoader";
 import { GameMapType, GameMapSize } from "src/core/game/Game";
 
 const t = await loadTerrainMap(
-  GameMapType.Europe, GameMapSize.Compact,
-  new NodeGameMapLoader("resources/maps"), /* loadLayerImages */ false);
+  GameMapType.Europe,
+  GameMapSize.Compact,
+  new NodeGameMapLoader("resources/maps"),
+  /* loadLayerImages */ false,
+);
 // t.gameMap, t.miniGameMap, t.nations, t.additionalNations, t.teamGameSpawnAreas
 ```
 
@@ -90,12 +93,18 @@ to prove a change did not alter simulation behaviour.
 `tests/util/ScriptedGame.ts` is the closest thing in the repo to a bot playing.
 
 ```ts
-import { createScriptedRunner, scriptedGameStart, stepScripted }
-  from "tests/util/ScriptedGame";
+import {
+  createScriptedRunner,
+  scriptedGameStart,
+  stepScripted,
+} from "tests/util/ScriptedGame";
 
-const runner = await createScriptedRunner("world", scriptedGameStart({ bots: 10, nations: 4 }));
+const runner = await createScriptedRunner(
+  "world",
+  scriptedGameStart({ bots: 10, nations: 4 }),
+);
 for (let i = 0; i < 300; i++) stepScripted(runner);
-const snap = runner.snapshot();       // Uint8Array
+const snap = runner.snapshot(); // Uint8Array
 // VERIFIED: "tick 300 spawnPhase false alive 17 / snapshot bytes: 61809"
 ```
 
@@ -189,17 +198,17 @@ alive players: 21
 
 ### Pitfalls, all hit during verification
 
-| Pitfall | Detail |
-|---|---|
-| **Spawn phase never ends in Singleplayer** | `GameRunner.init()` adds `SpawnTimerExecution` only when `gameType !== Singleplayer`. With `Singleplayer` you must call `game.endSpawnPhase()` yourself. **Use `GameType.Private`** to get the timer |
-| **~200 wasted ticks** | `numSpawnPhaseTurns()` is 100 (SP) / 150 (randomSpawn) / **200** |
-| **`game.players()` filters to alive** | It returns **0** before anyone spawns. Use `game.allPlayers()` for the full roster |
-| **Intents must carry `clientID`** | The real server stamps it; headless, you stamp it yourself. An unknown clientID becomes a harmless `NoOpExecution` |
-| **IDs are schema-validated** | `gameID` and `clientID` must be 8 alphanumerics; usernames ≥3 chars; clan tags 2–5. See `cid()` in `tests/util/GameServerHarness.ts:28` |
-| **`executeNextTick()` returns false** | when no turn is queued or a tick is already executing. Always `addTurn` first. Errors arrive through the callback as `ErrorUpdate`, **not** as a throw |
-| **Silence the logging** | `console.debug = () => {}` — the sim is chatty per tick |
-| **No build step needed** | `npx tsx` works directly |
-| **Never emit `kick_player` / `update_game_config` / `toggle_game_start_timer`** | `LocalServer` queues them and `createExec` throws outside the try/catch. See `07-action-api.md §7.2` |
+| Pitfall                                                                         | Detail                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spawn phase never ends in Singleplayer**                                      | `GameRunner.init()` adds `SpawnTimerExecution` only when `gameType !== Singleplayer`. With `Singleplayer` you must call `game.endSpawnPhase()` yourself. **Use `GameType.Private`** to get the timer |
+| **~200 wasted ticks**                                                           | `numSpawnPhaseTurns()` is 100 (SP) / 150 (randomSpawn) / **200**                                                                                                                                     |
+| **`game.players()` filters to alive**                                           | It returns **0** before anyone spawns. Use `game.allPlayers()` for the full roster                                                                                                                   |
+| **Intents must carry `clientID`**                                               | The real server stamps it; headless, you stamp it yourself. An unknown clientID becomes a harmless `NoOpExecution`                                                                                   |
+| **IDs are schema-validated**                                                    | `gameID` and `clientID` must be 8 alphanumerics; usernames ≥3 chars; clan tags 2–5. See `cid()` in `tests/util/GameServerHarness.ts:28`                                                              |
+| **`executeNextTick()` returns false**                                           | when no turn is queued or a tick is already executing. Always `addTurn` first. Errors arrive through the callback as `ErrorUpdate`, **not** as a throw                                               |
+| **Silence the logging**                                                         | `console.debug = () => {}` — the sim is chatty per tick                                                                                                                                              |
+| **No build step needed**                                                        | `npx tsx` works directly                                                                                                                                                                             |
+| **Never emit `kick_player` / `update_game_config` / `toggle_game_start_timer`** | `LocalServer` queues them and `createExec` throws outside the try/catch. See `07-action-api.md §7.2`                                                                                                 |
 
 ## 8.6 Snapshot / restore
 
@@ -246,9 +255,9 @@ cloud environment Chromium is pre-installed and the session hook installs the
 matching Playwright, so `setup.sh` is only needed on other hosts:
 
 ```bash
-(npm run dev > /tmp/dev.log 2>&1 &)             # vite on :9000, NOT 5173
+(npm run dev > /tmp/dev.log 2>&1 &) # vite on :9000, NOT 5173
 node .claude/skills/run-openfront/game.mjs
-node .claude/skills/run-openfront/autopilot.mjs baseline Iceland 90   # an agent plays, see 10-agent-interface.md
+node .claude/skills/run-openfront/autopilot.mjs baseline Iceland 90 # an agent plays, see 10-agent-interface.md
 ```
 
 Exported helpers: `startSoloGame`, `gameState`, `findSpawnTile`, `spawn`,
@@ -256,6 +265,7 @@ Exported helpers: `startSoloGame`, `gameState`, `findSpawnTile`, `spawn`,
 `clickWorld`, `panTo`, `setAttackRatio`, `openRadialMenu`.
 
 Critical notes from that skill:
+
 - **The client refuses software WebGL** (`src/client/render/gl/initGL.ts`
   requests `failIfMajorPerformanceCaveat` and rejects SwiftShader/llvmpipe
   renderer strings), and headless Chromium only has SwiftShader.
@@ -280,13 +290,13 @@ Critical notes from that skill:
 `src/client/hud/layers/PlayerActionHandler.ts` (96 lines) is the complete adapter
 between clicks and intents. Every method just emits a `Send*IntentEvent`:
 
-| Method | Emits |
-|---|---|
-| `handleAttack(player, targetId)` | `SendAttackIntentEvent(targetId, uiState.attackRatio * player.troops())` — `targetId = null` means TerraNullius |
-| `handleBoatAttack(player, tile)` | `SendBoatAttackIntentEvent(tile, attackRatio * troops)` |
-| `handleSpawn`, `handleAllianceRequest`, `handleExtendAlliance`, `handleBreakAlliance`, `handleTargetPlayer`, `handleEmbargo`, `handleEmoji`, `handleDeleteUnit` | the corresponding events |
-| `handleDonateGold(recipient)` | amount always `null` — the modal picks it |
-| `handleDonateTroops(recipient, troops?)` | **drops the call if `troops <= 0`** |
+| Method                                                                                                                                                          | Emits                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `handleAttack(player, targetId)`                                                                                                                                | `SendAttackIntentEvent(targetId, uiState.attackRatio * player.troops())` — `targetId = null` means TerraNullius |
+| `handleBoatAttack(player, tile)`                                                                                                                                | `SendBoatAttackIntentEvent(tile, attackRatio * troops)`                                                         |
+| `handleSpawn`, `handleAllianceRequest`, `handleExtendAlliance`, `handleBreakAlliance`, `handleTargetPlayer`, `handleEmbargo`, `handleEmoji`, `handleDeleteUnit` | the corresponding events                                                                                        |
+| `handleDonateGold(recipient)`                                                                                                                                   | amount always `null` — the modal picks it                                                                       |
+| `handleDonateTroops(recipient, troops?)`                                                                                                                        | **drops the call if `troops <= 0`**                                                                             |
 
 Build and upgrade intents bypass this class and come from `BuildMenu` /
 `RadialMenuElements`.
@@ -298,7 +308,7 @@ converting a click into a troop count. Default **0.2**. Slider is `min=1 max=100
 with `value/100`. Keyboard steps by 10 percentage points; stepping up from 0.01
 lands on **0.10, not 0.11**.
 
-> ⚠️ `GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a *percent*. It is
+> ⚠️ `GameRenderer.ts:62` seeds `uiState.attackRatio = 20` — a _percent_. It is
 > overwritten by `ControlPanel.init()`, but any intent emitted before that would
 > request `20 × troops`.
 

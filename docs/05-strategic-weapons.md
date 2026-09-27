@@ -2,15 +2,15 @@
 
 ## 5.1 The nuke table
 
-| | Atom Bomb | Hydrogen Bomb | MIRV (carrier) | MIRV Warhead |
-|---|---|---|---|---|
-| Cost | 750,000 | 5,000,000 | `25M + 15M × global launches` | free |
-| Inner radius | **12** | **80** | n/a (never detonates) | **12** |
-| Outer radius | **30** | **100** | n/a | **18** |
-| Speed | 10 | 10 | 15 | 22 (+0..4) |
-| Interceptable | yes | yes | **NO** | yes |
-| Breaks alliances | yes | yes | yes (on launch) | **no** |
-| Warning message | `NUKE_INBOUND` | `HYDROGEN_BOMB_INBOUND` | `MIRV_INBOUND` | **none** |
+|                  | Atom Bomb      | Hydrogen Bomb           | MIRV (carrier)                | MIRV Warhead |
+| ---------------- | -------------- | ----------------------- | ----------------------------- | ------------ |
+| Cost             | 750,000        | 5,000,000               | `25M + 15M × global launches` | free         |
+| Inner radius     | **12**         | **80**                  | n/a (never detonates)         | **12**       |
+| Outer radius     | **30**         | **100**                 | n/a                           | **18**       |
+| Speed            | 10             | 10                      | 15                            | 22 (+0..4)   |
+| Interceptable    | yes            | yes                     | **NO**                        | yes          |
+| Breaks alliances | yes            | yes                     | yes (on launch)               | **no**       |
+| Warning message  | `NUKE_INBOUND` | `HYDROGEN_BOMB_INBOUND` | `MIRV_INBOUND`                | **none**     |
 
 `Config.ts:1103-1113` (magnitudes), `:1119-1130` (speeds). The MIRV cost counter
 `mirvsLaunched` is **game-global across all players** — every MIRV anyone fires
@@ -22,12 +22,12 @@ raises the price for everyone.
 - Target tile must not be impassable.
 - Cannot target a same-team player's territory unless the game is over and it is
   not singleplayer.
-- In **Team mode**, an Atom/Hydrogen strike is refused if any *teammate-owned
-  structure* lies within the nuke's **outer** radius. **MIRV is exempt.**
+- In **Team mode**, an Atom/Hydrogen strike is refused if any _teammate-owned
+  structure_ lies within the nuke's **outer** radius. **MIRV is exempt.**
 - **MIRV additionally requires the target tile to have an owner.**
 - Launch platform = your nearest ready silo. No ready silo = no launch.
 
-Nuking a **formal ally** is allowed — only *teammates* are protected. It breaks
+Nuking a **formal ally** is allowed — only _teammates_ are protected. It breaks
 the alliance and marks you a traitor.
 
 ## 5.3 Flight and the interception window
@@ -39,7 +39,7 @@ than the nominal speed suggests.
 
 > **The single most important nuke mechanic**: each trajectory tile is flagged
 > `targetable` only if it is within `defaultNukeTargetableRange() = 150` of **the
-> target tile** *or* within 150 of **the launch silo** (`NukeExecution.ts:347-385`).
+> target tile** _or_ within 150 of **the launch silo** (`NukeExecution.ts:347-385`).
 > **A nuke on a long flight is untargetable in the middle of its arc.** SAMs can
 > only engage near the launcher or near the impact point.
 
@@ -100,17 +100,17 @@ Weighted tile count in the blast — inner weight 1, outer weight 0.5 — agains
 radius. Affected allies have the alliance broken and relation set to −100, and
 their pending alliance requests are auto-rejected.
 
-**MIRV warheads never break alliances.** The MIRV *carrier* breaks the alliance
+**MIRV warheads never break alliances.** The MIRV _carrier_ breaks the alliance
 with the target player at launch.
 
 ## 5.7 MIRV specifics
 
-| Property | Value |
-|---|---|
-| Warhead count | **350** |
-| Range | 1,500 |
-| Minimum spread between warhead targets | 55 manhattan |
-| Carrier flight time | normalised to ~14 ticks |
+| Property                               | Value                   |
+| -------------------------------------- | ----------------------- |
+| Warhead count                          | **350**                 |
+| Range                                  | 1,500                   |
+| Minimum spread between warhead targets | 55 manhattan            |
+| Carrier flight time                    | normalised to ~14 ticks |
 
 Every warhead target must be land, owned by the **original target player**, within
 1,500 of the aim point, and ≥55 from every other chosen target. Targets are
@@ -124,13 +124,13 @@ Destroying the carrier by other means cancels all its warhead executions.
 
 ## 5.8 SAM launchers
 
-| Property | Value |
-|---|---|
-| Cost | `min(3M, (n+1) × 1.5M)` |
-| Build time | **300 ticks (30 s)** — the longest in the game |
-| Reload | 90 ticks; ready interceptors = level |
-| Interceptor speed | 12 tiles/tick, straight line |
-| Detection sweep | `maxSamRange × 4 = 600` |
+| Property          | Value                                          |
+| ----------------- | ---------------------------------------------- |
+| Cost              | `min(3M, (n+1) × 1.5M)`                        |
+| Build time        | **300 ticks (30 s)** — the longest in the game |
+| Reload            | 90 ticks; ready interceptors = level           |
+| Interceptor speed | 12 tiles/tick, straight line                   |
+| Detection sweep   | `maxSamRange × 4 = 600`                        |
 
 ### Range
 
@@ -138,9 +138,9 @@ Destroying the carrier by other means cancels all its warhead executions.
 samRange(level) = 150 - 480 / (level + 5)
 ```
 
-| Level | 1 | 2 | 3 | 4 | 5 | 6 | 10 |
-|---|---|---|---|---|---|---|---|
-| Range | **70** | 81.4 | 90 | 96.7 | 102 | 106.4 | 118 |
+| Level | 1      | 2    | 3   | 4    | 5   | 6     | 10  |
+| ----- | ------ | ---- | --- | ---- | --- | ----- | --- |
+| Range | **70** | 81.4 | 90  | 96.7 | 102 | 106.4 | 118 |
 
 Asymptotically approaches 150 and never reaches it. During an upgrade the
 effective range **interpolates linearly** over 45 ticks. A level gained by upgrade
@@ -183,12 +183,12 @@ SAM missile locked onto it is within 12 tiles of the impact point.
 ## 5.9 Practical consequences — **[DERIVED]**
 
 1. **Range 70 at level 1 is small.** Against a hydrogen bomb (outer radius 100),
-   a level-1 SAM sitting on the thing it protects is *inside* the blast radius of
+   a level-1 SAM sitting on the thing it protects is _inside_ the blast radius of
    a strike that lands short of it. SAM levels below 5 are explicitly targeted by
    Impossible nations for exactly this reason (+100,000 score per outranged SAM).
 2. **The targetable window is exploitable in both directions.** Launching from far
    away means the midcourse is untargetable, but the terminal 150 tiles are still
-   defended. Launching from *close* means the whole flight is in the target's SAM
+   defended. Launching from _close_ means the whole flight is in the target's SAM
    envelope. Long-range silos are safer.
 3. **A SAM's 300-tick build time is a real window.** Thirty seconds is three silo
    reloads.
