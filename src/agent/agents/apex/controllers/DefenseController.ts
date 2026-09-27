@@ -806,6 +806,9 @@ export class DefenseController implements Controller {
   ): string | null {
     const { o, me, nm, tick: t } = v;
     if (me.isAlliedWith(N)) return "allied";
+    // Package WP1 (review F1): no recall of a foe mark's nation (its
+    // request would be vetoed after the forecast and the embargo stop).
+    if (v.scheduler.vetoed(`ally:${N.id()}`)) return "foe of the search";
     if (held >= max) return `slots ${held}/${max}`;
     if (!me.canSendAllianceRequest(N)) {
       return me.outgoingAllianceRequests().some((r) => r.recipient() === N)

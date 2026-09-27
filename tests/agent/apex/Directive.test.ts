@@ -705,29 +705,23 @@ describe("apex directive, review round 2 (package WP1)", () => {
     expect(seen).toBe(true);
   });
 
-  // Known defect, review F1: the fix is DiplomacyController's (not this
-  // package's file): counterAccept counts the vetoed key's refusal ("key")
-  // as a slot the recall took, so a foe's pending request holds a slot and
-  // the next nation's request is not accepted. With the fix proposed in
-  // /tmp/claude-0/pkg-WP1/f1-diplomacy.patch (Scheduler.vetoed asked
-  // first) this passes: make it a plain test then.
-  test.fails(
-    "F1 (known, needs DiplomacyController): a foe's pending request holds no counter-accept slot",
-    () => {
-      // Impossible: ceil(0.25 * 5 players) = 2 slots. D takes one.
-      const w = world({});
-      const [nA, , C, D] = NATIONS.map((n) => w.nation(n.id));
-      for (let i = 0; i < 10; i++) w.h.step();
-      w.game.addExecution(new AllianceRequestExecution(D, AGENT_ID));
-      for (let i = 0; i < 5; i++) w.h.step();
-      expect(w.us.isAlliedWith(D)).toBe(true);
-      const t = w.game.ticks();
-      w.policy.setDirective([{ at: t, foe: { id: nA.id(), until: t + 500 } }]);
-      w.game.addExecution(new AllianceRequestExecution(nA, AGENT_ID));
-      w.game.addExecution(new AllianceRequestExecution(C, AGENT_ID));
-      for (let i = 0; i < 30; i++) w.h.step();
-      expect(w.us.isAlliedWith(nA)).toBe(false);
-      expect(w.us.isAlliedWith(C)).toBe(true);
-    },
-  );
+  // Review F1: counterAccept counted the vetoed key's refusal ("key") as
+  // a slot the recall took, so a foe's pending request held a slot and the
+  // next nation's request was not accepted; it asks Scheduler.vetoed first.
+  test("F1: a foe's pending request holds no counter-accept slot", () => {
+    // Impossible: ceil(0.25 * 5 players) = 2 slots. D takes one.
+    const w = world({});
+    const [nA, , C, D] = NATIONS.map((n) => w.nation(n.id));
+    for (let i = 0; i < 10; i++) w.h.step();
+    w.game.addExecution(new AllianceRequestExecution(D, AGENT_ID));
+    for (let i = 0; i < 5; i++) w.h.step();
+    expect(w.us.isAlliedWith(D)).toBe(true);
+    const t = w.game.ticks();
+    w.policy.setDirective([{ at: t, foe: { id: nA.id(), until: t + 500 } }]);
+    w.game.addExecution(new AllianceRequestExecution(nA, AGENT_ID));
+    w.game.addExecution(new AllianceRequestExecution(C, AGENT_ID));
+    for (let i = 0; i < 30; i++) w.h.step();
+    expect(w.us.isAlliedWith(nA)).toBe(false);
+    expect(w.us.isAlliedWith(C)).toBe(true);
+  });
 });

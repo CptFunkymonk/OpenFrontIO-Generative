@@ -518,6 +518,8 @@ export class DiplomacyController implements Controller {
       const id = N.id();
       const e = a.expiresAt();
       if (N.type() !== PlayerType.Nation || !mid.keep.includes(id)) continue;
+      // Package WP1 (review F1): no gift for a foe mark's extension.
+      if (v.scheduler.vetoed(`ext:${id}`)) continue;
       if (e - t > o.webFriendLead || e <= t || gifts[id] === e) continue;
       if ((mid.dmid[id] ?? 0) < o.webFriendMinDanger) continue;
       if (!v.wm.nations.some((n) => n.id === id)) continue;
@@ -623,6 +625,8 @@ export class DiplomacyController implements Controller {
       const N = a.other(me);
       const id = N.id();
       if (N.type() !== PlayerType.Nation || !mid.keep.includes(id)) continue;
+      // Package WP1 (review F1): no gift for a foe mark's extension.
+      if (v.scheduler.vetoed(`ext:${id}`)) continue;
       if ((mid.dmid[id] ?? 0) < o.webFriendMinDanger) continue;
       if (!a.agreedToExtend(me) || a.agreedToExtend(N)) continue;
       if (a.expiresAt() - t > o.webFriendLead) continue;
@@ -693,6 +697,9 @@ export class DiplomacyController implements Controller {
     let wanted = 0;
     if (mid !== undefined) {
       for (const id of mid.keep) {
+        // Package WP1 (review F1): a foe of the search's plan is not
+        // wanted while its mark lasts (no request of ours can go to it).
+        if (v.scheduler.vetoed(`ally:${id}`)) continue;
         if (!v.game.hasPlayer(id) || !me.isAlliedWith(v.game.player(id))) {
           wanted++;
         }
@@ -718,6 +725,9 @@ export class DiplomacyController implements Controller {
       if (o.strikes && underStrike(v, N.smallID())) continue;
       // Food-list nations' requests are left to expire (200 ticks).
       if (o.foodList && s.web.food.includes(N.id())) continue;
+      // Package WP1 (review F1): so are a foe mark's. Its key is vetoed,
+      // and the refusal ("key") would count it below as a slot taken.
+      if (v.scheduler.vetoed(`ally:${N.id()}`)) continue;
       if (mid !== undefined) {
         if (mid.keep.includes(N.id())) wanted--;
         else if (held + wanted >= mid.slots) continue;
@@ -836,6 +846,12 @@ export class DiplomacyController implements Controller {
       }
       delete renew[id];
       if (!mid.keep.includes(id)) continue;
+      // Package WP1 (review F1): nor a foe mark's (its request would be
+      // vetoed after the forecast and the embargo stop).
+      if (v.scheduler.vetoed(`ally:${id}`)) {
+        v.log?.(`${t} dip renew ${N.name()}: foe of the search`);
+        continue;
+      }
       if (!me.canSendAllianceRequest(N)) {
         v.log?.(`${t} dip renew ${N.name()}: cannot request`);
         continue;
@@ -1409,6 +1425,9 @@ export class DiplomacyController implements Controller {
       if (s.web.food.includes(id)) continue;
       // Package A1 (review F2).
       if (o.strikes && underStrike(v, N.smallID())) continue;
+      // Package WP1 (review F1): a foe mark's nation takes no forecast and
+      // gets no embargo stop (its request would be vetoed).
+      if (v.scheduler.vetoed(`ally:${id}`)) continue;
       const d = nm.nextDecision(id, t + 1);
       const stoppedBy = this.stoppedBy(v, s, N);
       const f = nm.acceptsAlliance(id, {
