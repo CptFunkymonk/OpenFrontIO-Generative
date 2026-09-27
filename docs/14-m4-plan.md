@@ -126,10 +126,12 @@ UE on quick@20, 32 games:
 | top 3 at minute 10                         | 58.1% (18 of 31)              |
 | at minute 3: ≥ median nation, ≥ top nation | 100%, 65.6%                   |
 | wins                                       | 0                             |
-| games a nation won before minute 20        | 12 of 32, at 8.9-19.3 minutes |
+| games lost before minute 20                | 12 of 32, at 8.9-19.3 minutes |
 
-The 12 games a nation won are Onion, Four Islands, The Box, Yellow Sea and
-Bering (twice each), Passage and Japan g24. The top nation's median share is
+Of those 12 games, a nation won 8: Onion g4 and g20, Yellow Sea g12 and g28,
+Bering g3 and g19, Four Islands g23 and Japan g24. UE was eliminated in the
+other 4: Four Islands g7, The Box g9 and g25, and Passage g21 (corrected by
+WP6's review, 2026-09-27). The top nation's median share is
 11.3% at minute 5, 17.7% at minute 10, 20.6% at minute 15 and 30.5% at minute 20. The 75th percentiles are 16.8%, 26.2%, 36.9% and 43.1%.
 
 The race is decided early. A nation that snowballs does not slow down:
@@ -695,7 +697,7 @@ instead of 19.4.
 - **Ties** keep the base.
 - **Option `searchRival` (κ, default 0).** Subtract κ·(the top nation's tiles
   at h − the base's). It makes plans that slow the snowballer worth something,
-  since that nation won 12 of 32 UE games before minute 20. **Guess**, to
+  since a nation won 8 of 32 UE games before minute 20. **Guess**, to
   A/B.
 
 ### 2.6 Budget and scheduling (deterministic)
