@@ -34,6 +34,7 @@ bootstrap 95% interval.
 | 2026-09-26 | `1f01f47`–`5f09620` | `apex` + `nukeModel` (SAM hub)                                                                                       | 24 `quick`, `--max-minutes 20`                  | 0    | —        | —         | —          | no demonstrated effect (3 better, 1 much worse, 20 identical); 16 of 19 bombs at apex came from the land leader aiming at its runner-up, 3–40 ticks after it started aiming, too late for a 300-tick SAM. Not adopted                                                                                                                 |
 | 2026-09-27 | `5f09620`           | `apex` (the `2c9ea80` defaults)                                                                                      | 254 `dev`, `--max-minutes 20`                   | 0    | 0.129    | 10.3%     | 92         | the `dev@20` reference (`arena-results/dev20-int`, 3.5 h wall with other work on the machine): final land 3.8%; top 3 at minute 10 in 24.5%; out before minute 20 in 36.2% (dev is harder than quick: 18.8% there)                                                                                                                    |
 | 2026-09-27 | `5f09620`           | `apex` + strikes U + spawn erasure (the `4f1913c` defaults)                                                          | 254 `dev`, `--max-minutes 20`                   | 0    | 0.190    | 15.2%     | 56         | Δ +0.061 [+0.051, +0.073] vs the row above, 196 better / 49 worse / 9 tied, every map category positive; final land 7.7%; top 3 at minute 10 in 40.7%, out before minute 20 in 22.0% (M3 wants ≥ 70% and < 10%); at minute 3 ≥ median nation in 98.8% and ≥ top nation in 61.4%, so the M2 bar (80% and 50%) is met on `dev`. Adopted |
+| 2026-09-27 | `004de76`           | `apex` (strikes U + spawn erasure)                                                                                   | 381 `holdout`, `--max-minutes 4`                | 0    | 0.141    | 11.3%     | 0          | **M2 signed off**: at minute 3 ≥ median nation in 98.7% of games (bar 80%), ≥ top nation in 65.9% (bar 50%); none eliminated by minute 4. Played in two parts after a container restart (games 0–330, then 331–380) and merged (`arena-results/holdout4-apex-merged`)                                                                 |
 
 Reproduce:
 
@@ -56,6 +57,7 @@ npm run arena:compare -- arena-results/dev4-baseline arena-results/dev4-apex
 npm run arena -- --suite quick --agent baseline --agent apex --max-minutes 20 --out arena-results/quick20-champion
 git checkout 2c9ea80 && npm run arena -- --suite dev --agent apex --max-minutes 20 --out arena-results/dev20-2c9ea80
 git checkout 4f1913c && npm run arena -- --suite dev --agent apex --max-minutes 20 --out arena-results/dev20-4f1913c
+git checkout 004de76 && npm run arena -- --suite holdout --agent apex --max-minutes 4 --out arena-results/holdout4-apex
 ```
 
 The `5f09620` rows ran with explicit options (the flags in the entrant column
