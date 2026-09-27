@@ -75,11 +75,7 @@ export interface TargetState {
 
 /** `id`'s state towards `me` in `game` (a dead or unknown player: not
  *  alive, not allied, not attacking). */
-export function targetState(
-  game: Game,
-  me: Player,
-  id: PlayerID,
-): TargetState {
+export function targetState(game: Game, me: Player, id: PlayerID): TargetState {
   if (!game.hasPlayer(id)) {
     return { alive: false, allied: false, attacking: false };
   }

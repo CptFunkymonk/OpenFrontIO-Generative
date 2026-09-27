@@ -2,7 +2,7 @@ import type { PlayerID } from "../../../../core/game/Game";
 import { PlayerType } from "../../../../core/game/Game";
 import type { AgentContext, AgentOutcome } from "../../../Agent";
 import type { ForkSource, GameFork } from "../../../Fork";
-import { BudgetMirror } from "../../../lib/Lookahead";
+import { BudgetMirror, RolloutPolicy } from "../../../lib/Lookahead";
 import {
   cheapest,
   CostModel,
@@ -24,9 +24,16 @@ import {
   roundOneCandidates,
   SearchView,
 } from "../../../lib/search/Registry";
-import { Judged, RoundsParams, runRounds } from "../../../lib/search/Rounds";
+import {
+  advanceSteps,
+  Judged,
+  RoundsParams,
+  RoundsResult,
+  roundsSteps,
+} from "../../../lib/search/Rounds";
 import type { AttackSeen } from "../../../lib/search/Runner";
 import { Runner } from "../../../lib/search/Runner";
+import { rebasePlan, Slicer, targetState } from "../../../lib/search/Slicer";
 import {
   Fired,
   NationObs,
@@ -41,7 +48,12 @@ import {
   ValueParams,
 } from "../../../lib/search/Value";
 import type { ApexOptions } from "../options";
-import type { LiveSearch, RolloutSpec, SearchHost } from "../policy";
+import type {
+  LiveSearch,
+  RolloutCopy,
+  RolloutSpec,
+  SearchHost,
+} from "../policy";
 
 // Package WP2 (docs/14-m4-plan.md §2.0-2.6, §2.10): the live search. At
 // the start of every live tick past the spawn phase (ApexPolicy's
@@ -62,8 +74,11 @@ import type { LiveSearch, RolloutSpec, SearchHost } from "../policy";
 // the copies' sends go only into their forks. Its decisions depend on the
 // game and the committed φ table, never on wall time (timings are logged).
 // Only live: rollout copies have no search. A search blocks its live tick
-// for seconds to minutes (the arena's clock waits; a browser's would not):
-// keep it to the arena until it is time-sliced (M7, §2.6).
+// for seconds to minutes (the arena's clock waits; a browser's would not),
+// unless it is time-sliced (package SLICE, searchSliceMs > 0: the rounds run
+// in slices of that many wall ms over the following live ticks, and the plan
+// is re-based to the tick it is adopted; lib/search/Slicer.ts). The arena
+// keeps searchSliceMs 0 (game-time clock, replayable runs).
 
 /** Checkpoints of a rollout (ticks after the fork), act3's. */
 export const CHECK_GRID: readonly number[] = [
@@ -158,6 +173,9 @@ export function validateSearchOptions(o: ApexOptions): void {
     fail("searchReserve", "and searchSlack must be at least 0");
   }
   if (o.searchLapseFoeAt < 0) fail("searchLapseFoeAt", "must be at least 0");
+  if (o.searchSliceMs < 0 || o.searchSliceMaxTicks < 1) {
+    fail("searchSliceMs", "must be at least 0, and searchSliceMaxTicks 1");
+  }
   if ((o.searchDangerNow !== 0 || o.searchDangerCap !== 0) && DANGER === null) {
     fail(
       "searchDangerNow",
@@ -176,6 +194,10 @@ interface Stats {
   ms: number;
   byTrigger: Record<string, number>;
   actsByKind: Record<string, number>;
+  /** Package SLICE: sliced searches given up (searchSliceMaxTicks), and
+   *  chosen plans dropped at their late adoption. */
+  abandoned: number;
+  dropped: number;
 }
 
 /** How a try ended: it ran, the budget refused it (the tick it could pay
@@ -183,7 +205,27 @@ interface Stats {
 type Outcome =
   | { ran: true; foreseen: { id: PlayerID; at: number }[] }
   | { ran: false; retryAt: number }
-  | { ran: false; none: true };
+  | { ran: false; none: true }
+  /** Package SLICE: the rounds go on at the next live tick. */
+  | { ran: false; pending: true };
+
+/** What a search's rounds end in: a refusal after the base's first round,
+ *  or the rounds' result. */
+type Ready =
+  | { refused: Outcome }
+  | { res: RoundsResult; cands: Candidate[]; level: number };
+
+/** Package SLICE: a search whose rounds are running over live ticks. */
+interface Pending {
+  t0: number;
+  obs: TriggerObs;
+  fired: Fired;
+  slicer: Slicer<Ready>;
+  /** Plays the choice at this tick (the rounds finished). */
+  finish: (ctx: AgentContext, host: SearchHost) => Outcome;
+  /** Gives the search up at this tick, `k` ticks after t0. */
+  abandon: (ctx: AgentContext, k: number) => Outcome;
+}
 
 export class SearchController implements LiveSearch {
   readonly name = "search";
@@ -201,7 +243,11 @@ export class SearchController implements LiveSearch {
     ms: 0,
     byTrigger: {},
     actsByKind: {},
+    abandoned: 0,
+    dropped: 0,
   };
+  /** Package SLICE: the sliced search in progress, if any. */
+  private pending: Pending | null = null;
 
   private readonly valueParams: ValueParams;
   /** The generators with a T6 test (boat plans, package WP3). */
@@ -211,7 +257,12 @@ export class SearchController implements LiveSearch {
    *  do, so nothing here rides in a fork. */
   private readonly watch: NukeWatch | null;
 
-  constructor(private readonly o: ApexOptions) {
+  /** `now`: the slicer's clock (package SLICE; performance.now, or a fake
+   *  one in the tests). */
+  constructor(
+    private readonly o: ApexOptions,
+    private readonly now: () => number = () => performance.now(),
+  ) {
     validateSearchOptions(o);
     this.valueParams = {
       cbar: o.searchCbar,
@@ -278,6 +329,12 @@ export class SearchController implements LiveSearch {
     })) {
       ctx.log(line);
     }
+    // Package SLICE: a search in progress takes this tick's slice; no
+    // trigger is checked until it ends (one search at a time).
+    if (this.pending !== null) {
+      this.resume(ctx, host);
+      return;
+    }
     const obs = this.observe(ctx, host);
     const fired = this.triggers.check(obs);
     if (fired === null) return;
@@ -286,11 +343,44 @@ export class SearchController implements LiveSearch {
       out = this.search(ctx, host, obs, fired);
     } finally {
       // A search that threw still used its trigger (the error is rethrown
-      // after the live run): no error storm.
-      if (out === null) this.triggers.none(obs, fired);
-      else if (out.ran) this.triggers.searched(obs, fired, out.foreseen);
-      else if ("none" in out) this.triggers.none(obs, fired);
-      else this.triggers.refused(obs, fired, out.retryAt);
+      // after the live run): no error storm. A sliced search still running
+      // is settled when it ends (resume).
+      if (out === null || !("pending" in out)) this.settle(obs, fired, out);
+    }
+  }
+
+  /** The triggers' account of a try that ended. */
+  private settle(obs: TriggerObs, fired: Fired, out: Outcome | null): void {
+    if (out === null) this.triggers.none(obs, fired);
+    else if (out.ran) this.triggers.searched(obs, fired, out.foreseen);
+    else if ("none" in out) this.triggers.none(obs, fired);
+    else if ("pending" in out) return;
+    else this.triggers.refused(obs, fired, out.retryAt);
+  }
+
+  /** Package SLICE: one more slice of the pending search; at its end (the
+   *  rounds finished, or searchSliceMaxTicks passed) the try is settled. */
+  private resume(ctx: AgentContext, host: SearchHost): void {
+    const p = this.pending!;
+    const k = ctx.tick - p.t0;
+    let done = false;
+    let out: Outcome | null = null;
+    try {
+      if (!p.slicer.finished && k > this.o.searchSliceMaxTicks) {
+        done = true;
+        out = p.abandon(ctx, k);
+      } else if (p.slicer.run()) {
+        done = true;
+        out = p.finish(ctx, host);
+      }
+    } catch (e) {
+      done = true;
+      throw e;
+    } finally {
+      if (done) {
+        this.pending = null;
+        this.settle(p.obs, p.fired, out);
+      }
     }
   }
 
@@ -312,6 +402,14 @@ export class SearchController implements LiveSearch {
         checks: this.checks.checks,
         mismatches: this.checks.mismatches,
         ms: Math.round(s.ms),
+        ...(this.o.searchSliceMs > 0
+          ? {
+              sliceMs: this.o.searchSliceMs,
+              abandoned: s.abandoned,
+              dropped: s.dropped,
+              pending: this.pending !== null,
+            }
+          : {}),
       })}`,
     );
   }
@@ -397,7 +495,10 @@ export class SearchController implements LiveSearch {
     return known;
   }
 
-  /** One try of a search at `fired`. */
+  /** One try of a search at `fired`. Package SLICE: with searchSliceMs > 0
+   *  the rounds run in slices over the following live ticks (`pending`);
+   *  the try then ends at the tick they finish (finish) or are given up
+   *  (abandon), and its outcome is settled with the triggers then. */
   private search(
     ctx: AgentContext,
     host: SearchHost,
@@ -409,6 +510,7 @@ export class SearchController implements LiveSearch {
     const wm = host.wm();
     if (wm === null) return { ran: false, none: true };
     const start = performance.now();
+    const sliced = o.searchSliceMs > 0;
     const sv: SearchView = {
       ctx,
       host,
@@ -457,8 +559,8 @@ export class SearchController implements LiveSearch {
               ...[...known].filter(([id]) => !b.attackers.has(id)),
             ]),
           };
-    const listsOf = (b: BaseView) =>
-      r1.map((g) => g.generate(sv, withKnown(b)));
+    const listsOf = (view: SearchView, b: BaseView) =>
+      r1.map((g) => g.generate(view, withKnown(b)));
     // A low-priority trigger may not spend the last searchReserve.
     const reserve = fired.low ? o.searchReserve : 0;
     const room = () => this.budget.room(t) - reserve;
@@ -470,7 +572,7 @@ export class SearchController implements LiveSearch {
     const first = phi.first + o.searchH1;
     const empty: BaseView = { h: 0, attackers: new Map(), snaps: [] };
     const pre = roundOneCandidates(
-      listsOf(empty),
+      listsOf(sv, empty),
       o.searchStackGate,
       o.searchMaxCands,
     );
@@ -506,6 +608,23 @@ export class SearchController implements LiveSearch {
         ms: performance.now() - f0,
       };
     };
+    // Package SLICE: a sliced search opens its candidates' rollouts at
+    // later live ticks, so what they start from is taken now, at t0: the
+    // live budget's mirror (cloned per rollout) and a copy of the live
+    // policy per plan known now (`pre`; a plan the base's attackers add
+    // later, or round 2b's, gets a copy of the live policy as it is then:
+    // counted as `late`). Unsliced, both are made at each open, as today.
+    const mirror0 = sliced ? BudgetMirror.fromContext(ctx) : null;
+    const copies = new Map<string, { steps: string; copy: RolloutCopy }>();
+    let late = 0;
+    if (sliced) {
+      for (const c of pre) {
+        copies.set(c.name, {
+          steps: JSON.stringify(c.steps),
+          copy: host.forRolloutWith({ steps: c.steps, replace: true }),
+        });
+      }
+    }
     const runners: Runner[] = [];
     const spent = () => runners.reduce((a, r) => a + r.cost(), 0);
     const open = (
@@ -513,13 +632,23 @@ export class SearchController implements LiveSearch {
       spec: RolloutSpec,
       send?: { h: number; target: string },
       alliances?: boolean,
+      cand?: Candidate,
     ): Runner => {
       const { f, phi: cost, ms } = fork();
+      let policy: RolloutPolicy | null = null;
+      if (cand !== undefined && sliced) {
+        const made = copies.get(cand.name);
+        copies.delete(cand.name);
+        if (made !== undefined && made.steps === JSON.stringify(cand.steps)) {
+          policy = made.copy;
+        } else late++;
+      }
       const r = new Runner({
         name,
         fork: f,
-        policy: host.forRolloutWith(spec),
-        budget: BudgetMirror.fromContext(ctx),
+        policy: policy ?? host.forRolloutWith(spec),
+        budget:
+          mirror0 === null ? BudgetMirror.fromContext(ctx) : mirror0.clone(),
         gameID: ctx.gameID,
         clientID: ctx.clientID,
         phi: cost,
@@ -541,130 +670,255 @@ export class SearchController implements LiveSearch {
           ? { h: c.lastSend, target: c.target }
           : undefined,
         c.isBreak,
+        c,
       );
 
     // The base plays what live plays if no plan is adopted: the pending
     // steps (no replace).
     const base = open("base", {});
-    base.advance(o.searchH1);
-    const all = roundOneCandidates(
-      listsOf({ h: base.h, attackers: base.attackers, snaps: base.snaps }),
-      o.searchStackGate,
-      o.searchMaxCands,
-    );
-    let cands = all;
-    let level = 0;
-    if (this.budget.capped && all.length > 0) {
-      const d = degrade(all, cm, room() - base.cost(), focus);
-      if (d.kept.length === 0) {
-        // Nothing fits after the base's first round: a refusal (the base's
-        // checks still hold: it is what live plays).
-        const te = base.cost();
+    // Package SLICE: the generators of a sliced search read the world at
+    // t0 (a fork of it, never stepped; not charged), not the live game at
+    // the tick they happen to run in.
+    const world0 = sliced ? source!.fork() : null;
+    const me0 =
+      world0 === null ? ctx.me : world0.game.playerByClientID(ctx.clientID)!;
+    const svAll: SearchView =
+      world0 === null ? sv : { ...sv, game: world0.game, me: me0 };
+
+    const self = this;
+    /** The rounds: the base's first round, the candidates, the budget's
+     *  degrade, round 2b's generator and Rounds' generator. */
+    const body = function* (): Generator<void, Ready, void> {
+      yield* advanceSteps(base, o.searchH1);
+      const all = roundOneCandidates(
+        listsOf(svAll, {
+          h: base.h,
+          attackers: base.attackers,
+          snaps: base.snaps,
+        }),
+        o.searchStackGate,
+        o.searchMaxCands,
+      );
+      let cands = all;
+      let level = 0;
+      if (self.budget.capped && all.length > 0) {
+        const d = degrade(all, cm, room() - base.cost(), focus);
+        if (d.kept.length === 0) {
+          // Nothing fits after the base's first round: a refusal (the
+          // base's checks still hold: it is what live plays).
+          const te = base.cost();
+          self.budget.charge(te);
+          self.stats.te += te;
+          self.addChecks(t, base.snaps, base.h);
+          return {
+            refused: self.refuse(
+              ctx,
+              fired,
+              te + cheapest(all, cm, focus),
+              why,
+              te,
+            ),
+          };
+        }
+        level = d.level;
+        cands = d.kept;
+      }
+
+      // Round 2b's generators, within what the budget has left.
+      const r2b = generatorsFor("r2b", self.kinds);
+      const names = new Set(cands.map((c) => c.name));
+      const defend =
+        r2b.length === 0
+          ? undefined
+          : (b: BaseView): Candidate[] => {
+              const out: Candidate[] = [];
+              let left = room() - spent();
+              for (const c of r2b.flatMap((g) =>
+                g.generate(svAll, withKnown(b)),
+              )) {
+                if (names.has(c.name)) continue;
+                const cost = phi.each + b.h;
+                if (self.budget.capped && cost > left) break;
+                left -= cost;
+                names.add(c.name);
+                out.push(c);
+              }
+              return out;
+            };
+
+      const need = actMargin(
+        me0.numTilesOwned(),
+        o.searchMargin,
+        o.searchMarginAbs,
+      );
+      const p: RoundsParams = {
+        H1: o.searchH1,
+        prune: o.searchPrune,
+        H: o.searchH,
+        HStrong: o.searchHStrong,
+        strongShare: o.searchStrongShare,
+        HBreak: [...o.searchHBreak].sort((a, b) => a - b),
+        HBreakGated: o.searchHBreakGated,
+        keep: o.searchKeepFinalists,
+        dip: o.searchDip,
+        need,
+        rival: o.searchRival,
+        value: self.valueParams,
+        grid: HORIZON_GRID,
+        minContact: o.searchMinContact,
+        tiles0: me0.numTilesOwned(),
+        lossShare: DEFEND_LOSS,
+        afford: self.budget.capped
+          ? (more) => room() - spent() >= more
+          : undefined,
+        gateVeto: o.searchGateVeto,
+      };
+      const res = yield* roundsSteps(p, base, cands, openCand, defend);
+      return { res, cands, level };
+    };
+
+    /** Plays the choice at the tick the rounds finished (t0 + k). */
+    const finish = (
+      ctx1: AgentContext,
+      host1: SearchHost,
+      ready: Ready,
+      wall: () => number,
+    ): Outcome => {
+      if ("refused" in ready) return ready.refused;
+      const { res, cands, level } = ready;
+      const tk = ctx1.tick;
+      const k = tk - t;
+      const te = spent();
+      this.budget.charge(te);
+      const chosen = res.chosen;
+      const act = chosen !== null && o.searchMode === "act";
+      let played = false;
+      let dropped: string | null = null;
+      if (act) {
+        if (k === 0) {
+          host1.adopt({ steps: chosen.cand.steps, replace: true });
+          played = true;
+        } else if (!o.searchSliceRebase) {
+          dropped = "stale";
+        } else {
+          // Package SLICE: the plan, k ticks late: its steps re-based to
+          // now, unless its target changed state since t0 (read in the
+          // t0 world and live) or its first step's condition no longer
+          // holds.
+          const id = chosen.cand.target;
+          const r = rebasePlan(
+            chosen.cand,
+            k,
+            id === null ? null : targetState(world0!.game, me0, id),
+            id === null ? null : targetState(ctx1.game, ctx1.me, id),
+            (x) =>
+              ctx1.game.hasPlayer(x) &&
+              ctx1.me.isAlliedWith(ctx1.game.player(x)),
+          );
+          if ("drop" in r) dropped = r.drop;
+          else {
+            host1.adopt({ steps: r.steps, replace: true });
+            played = true;
+          }
+        }
+      }
+      if (played) {
+        this.checks.invalidate(tk);
+        this.triggers.acted(tk);
+        this.stats.acts++;
+        const kind = chosen!.cand.kind;
+        this.stats.actsByKind[kind] = (this.stats.actsByKind[kind] ?? 0) + 1;
+      } else if (dropped !== null) this.stats.dropped++;
+      const pick = played ? chosen!.roll : base;
+      if (played && k > 0) {
+        // The live game sends the plan k ticks after its rollout did: the
+        // rollout's checkpoints do not apply (the base's no longer either).
+        ctx1.log(`search-slice ${t} k=${k} checks=none`);
+      } else {
+        this.addChecks(t, pick.snaps, played ? chosen!.h! : base.h);
+      }
+      const foreseen = [...pick.attackers].map(([id, a]) => ({
+        id,
+        at: t + a.h,
+      }));
+
+      // The logs.
+      const ms = wall();
+      this.stats.searches++;
+      this.stats.byTrigger[fired.name] =
+        (this.stats.byTrigger[fired.name] ?? 0) + 1;
+      this.stats.te += te;
+      this.stats.ms += ms;
+      const shown = chosen ?? res.best;
+      const vb = shown?.vb ?? res.baseAt.get(o.searchH) ?? NaN;
+      const r = (x: number) =>
+        Number.isFinite(x) ? String(Math.round(x)) : "-";
+      const name = chosen === null ? "base" : chosen.cand.name;
+      ctx1.log(
+        `search ${t} ${fired.name} cands=${cands.length} ` +
+          `chosen=${dropped === null ? name : "base"} ` +
+          `gain=${res.best === null ? "-" : r(res.best.gain)} base=${r(vb)} ` +
+          `h=${shown?.h ?? o.searchH} te=${Math.round(te)} ms=${Math.round(ms)} ` +
+          `level=${DEGRADE[level]}` +
+          (o.searchMode === "plans" ? " mode=plans" : "") +
+          (res.gate !== null
+            ? ` gate=${res.gate.a ? "a" : ""}${res.gate.b ? "b" : ""}${res.gate.a || res.gate.b ? "" : "-"}`
+            : "") +
+          (sliced ? ` k=${k} late=${late}` : "") +
+          (dropped !== null ? ` picked=${name} dropped=${dropped}` : "") +
+          (o.searchClock > 0 ? "" : ` ${why}`),
+      );
+      ctx1.log(
+        `search-feat ${JSON.stringify(this.features(ctx1, host1, fired, dropped === null ? chosen : null, res.best, level))}`,
+      );
+      ctx1.log(`search-rows ${JSON.stringify(this.rows(t, base, res.judged))}`);
+      return { ran: true, foreseen };
+    };
+
+    const gen = body();
+    if (!sliced) {
+      // Today's search: the rounds whole, in this tick.
+      let ready: Ready;
+      for (;;) {
+        const r = gen.next();
+        if (r.done) {
+          ready = r.value;
+          break;
+        }
+      }
+      return finish(ctx, host, ready, () => performance.now() - start);
+    }
+
+    // Package SLICE: the first slice now, the rest at the next live ticks.
+    const slicer = new Slicer<Ready>(gen, o.searchSliceMs, this.now);
+    const preMs = performance.now() - start;
+    const wall = () => preMs + slicer.ms;
+    if (slicer.run()) return finish(ctx, host, slicer.result!, wall);
+    this.pending = {
+      t0: t,
+      obs,
+      fired,
+      slicer,
+      finish: (ctx1, host1) => finish(ctx1, host1, slicer.result!, wall),
+      abandon: (ctx1, k) => {
+        // Given up: what it spent is charged; live follows the base, whose
+        // snaps so far still predict it.
+        const te = spent();
         this.budget.charge(te);
         this.stats.te += te;
+        this.stats.abandoned++;
         this.addChecks(t, base.snaps, base.h);
-        return this.refuse(ctx, fired, te + cheapest(all, cm, focus), why, te);
-      }
-      level = d.level;
-      cands = d.kept;
-    }
-
-    // Round 2b's generators, within what the budget has left.
-    const r2b = generatorsFor("r2b", this.kinds);
-    const names = new Set(cands.map((c) => c.name));
-    const defend =
-      r2b.length === 0
-        ? undefined
-        : (b: BaseView): Candidate[] => {
-            const out: Candidate[] = [];
-            let left = room() - spent();
-            for (const c of r2b.flatMap((g) => g.generate(sv, withKnown(b)))) {
-              if (names.has(c.name)) continue;
-              const cost = phi.each + b.h;
-              if (this.budget.capped && cost > left) break;
-              left -= cost;
-              names.add(c.name);
-              out.push(c);
-            }
-            return out;
-          };
-
-    const need = actMargin(
-      ctx.me.numTilesOwned(),
-      o.searchMargin,
-      o.searchMarginAbs,
-    );
-    const p: RoundsParams = {
-      H1: o.searchH1,
-      prune: o.searchPrune,
-      H: o.searchH,
-      HStrong: o.searchHStrong,
-      strongShare: o.searchStrongShare,
-      HBreak: [...o.searchHBreak].sort((a, b) => a - b),
-      HBreakGated: o.searchHBreakGated,
-      keep: o.searchKeepFinalists,
-      dip: o.searchDip,
-      need,
-      rival: o.searchRival,
-      value: this.valueParams,
-      grid: HORIZON_GRID,
-      minContact: o.searchMinContact,
-      tiles0: ctx.me.numTilesOwned(),
-      lossShare: DEFEND_LOSS,
-      afford: this.budget.capped
-        ? (more) => room() - spent() >= more
-        : undefined,
-      gateVeto: o.searchGateVeto,
+        ctx1.log(
+          `search ${t} ${fired.name} skipped=slice k=${k} te=${Math.round(te)} ` +
+            `ms=${Math.round(wall())} ${why}`,
+        );
+        return {
+          ran: true,
+          foreseen: [...base.attackers].map(([id, a]) => ({ id, at: t + a.h })),
+        };
+      },
     };
-    const res = runRounds(p, base, cands, openCand, defend);
-
-    // Play the choice.
-    const te = spent();
-    this.budget.charge(te);
-    const chosen = res.chosen;
-    const act = chosen !== null && o.searchMode === "act";
-    if (act) {
-      host.adopt({ steps: chosen.cand.steps, replace: true });
-      this.checks.invalidate(t);
-      this.triggers.acted(t);
-      this.stats.acts++;
-      const kind = chosen.cand.kind;
-      this.stats.actsByKind[kind] = (this.stats.actsByKind[kind] ?? 0) + 1;
-    }
-    const pick = act ? chosen.roll : base;
-    this.addChecks(t, pick.snaps, act ? chosen.h! : base.h);
-    const foreseen = [...pick.attackers].map(([id, a]) => ({
-      id,
-      at: t + a.h,
-    }));
-
-    // The logs.
-    const ms = performance.now() - start;
-    this.stats.searches++;
-    this.stats.byTrigger[fired.name] =
-      (this.stats.byTrigger[fired.name] ?? 0) + 1;
-    this.stats.te += te;
-    this.stats.ms += ms;
-    const shown = chosen ?? res.best;
-    const vb = shown?.vb ?? res.baseAt.get(o.searchH) ?? NaN;
-    const r = (x: number) => (Number.isFinite(x) ? String(Math.round(x)) : "-");
-    ctx.log(
-      `search ${t} ${fired.name} cands=${cands.length} ` +
-        `chosen=${chosen === null ? "base" : chosen.cand.name} ` +
-        `gain=${res.best === null ? "-" : r(res.best.gain)} base=${r(vb)} ` +
-        `h=${shown?.h ?? o.searchH} te=${Math.round(te)} ms=${Math.round(ms)} ` +
-        `level=${DEGRADE[level]}` +
-        (o.searchMode === "plans" ? " mode=plans" : "") +
-        (res.gate !== null
-          ? ` gate=${res.gate.a ? "a" : ""}${res.gate.b ? "b" : ""}${res.gate.a || res.gate.b ? "" : "-"}`
-          : "") +
-        (o.searchClock > 0 ? "" : ` ${why}`),
-    );
-    ctx.log(
-      `search-feat ${JSON.stringify(this.features(ctx, host, fired, chosen, res.best, level))}`,
-    );
-    ctx.log(`search-rows ${JSON.stringify(this.rows(t, base, res.judged))}`);
-    return { ran: true, foreseen };
+    return { ran: false, pending: true };
   }
 
   /** The checks of the rollout live follows, forked at `t0` and judged at
