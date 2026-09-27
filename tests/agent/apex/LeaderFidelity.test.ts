@@ -15,16 +15,31 @@
  * end). The lines are all 0 there (the allies' other neighbours hold more
  * than a third of their troops), so this pins the carrying of the guard's
  * state, not a binding floor (LeaderBetrayal.test.ts pins that).
+ *
+ * Review F1: a third window, at live tick 2,702 (2 ticks after a decision,
+ * so the next decision falls on the strike's tick), gives the live policy
+ * (setDirective) and the copy (forRolloutWith steps) the search's break
+ * plan on a bordering ally: break now, strike with half the purse next
+ * tick. The guard re-floors between decisions and carries the pending
+ * break in its memory; the copy plays it exactly as live does.
  */
 import { AgentContext, AgentIntent } from "../../../src/agent/Agent";
-import type { LeaderMemory } from "../../../src/agent/agents/apex/LeaderHook";
+import {
+  BREAK_LAG,
+  type LeaderMemory,
+} from "../../../src/agent/agents/apex/LeaderHook";
 import {
   LiveSearch,
   RolloutCopy,
   SearchHost,
 } from "../../../src/agent/agents/apex/policy";
+import type { DirectiveStep } from "../../../src/agent/agents/apex/state";
 import { GameFork } from "../../../src/agent/Fork";
 import { BudgetMirror, stepRollout } from "../../../src/agent/lib/Lookahead";
+import {
+  attackStep,
+  breakStep,
+} from "../../../src/agent/lib/search/cands/core";
 import { GameMapType, Player } from "../../../src/core/game/Game";
 import { snapshotGame } from "../../../src/core/snapshot/GameSnapshot";
 import { diffSnapshots } from "../../util/Snapshot";
@@ -32,6 +47,8 @@ import { ApexArena, apexArena, gameHash } from "../util/ApexArena";
 
 const WINDOW = 300;
 const WINDOWS = [900, 2400];
+/** The break plan's window (review F1). */
+const BREAK_AT = 2702;
 
 /** Forks at the next live tick and keeps what each tick sent. */
 class ForkingSearch implements LiveSearch {
@@ -57,13 +74,21 @@ interface Rollout {
 }
 
 /** Forks and copies the policy at the start of the live tick the arena is
- *  at, then the live policy acts on it. */
-function start(arena: ApexArena, search: ForkingSearch): Rollout {
+ *  at, then the live policy acts on it; with `plan`, both play its steps
+ *  (the copy from forRolloutWith, live from setDirective, as the search
+ *  adopts a plan). */
+function start(
+  arena: ApexArena,
+  search: ForkingSearch,
+  plan?: (t: number) => DirectiveStep[],
+): Rollout {
   const made: { r: Rollout | null } = { r: null };
   search.action = (ctx, host) => {
     const fork = ctx.fork();
     const mirror = BudgetMirror.fromContext(ctx);
-    const copy = host.forRolloutWith({});
+    const steps = plan?.(ctx.tick) ?? [];
+    const copy = host.forRolloutWith({ steps });
+    if (steps.length > 0) host.setDirective(steps);
     const me = fork.game.playerByClientID(ctx.clientID);
     if (me === null) throw new Error("no player in the fork");
     made.r = { fork, me, copy, mirror };
@@ -80,7 +105,7 @@ describe("WP10b leader guard: rollout fidelity on World", () => {
     console.warn = () => {};
   });
 
-  test(`copies made at ticks ${WINDOWS.join(", ")} with the guard on play the live game exactly for ${WINDOW} ticks`, async () => {
+  test(`copies made at ticks ${WINDOWS.join(", ")} with the guard on, and at ${BREAK_AT} with a break plan, play the live game exactly for ${WINDOW} ticks`, async () => {
     const search = new ForkingSearch();
     const arena = await apexArena({
       gameID: "G0avyeoz",
@@ -90,13 +115,40 @@ describe("WP10b leader guard: rollout fidelity on World", () => {
     });
     const gameID = arena.gameStart.gameID;
     let sent = 0;
-    for (const t0 of WINDOWS) {
+    let broke: string | null = null;
+    for (const t0 of [...WINDOWS, BREAK_AT]) {
       if (arena.game.ticks() !== t0) {
         if (t0 !== WINDOWS[0]) arena.act();
         arena.playTo(t0);
       }
       expect(arena.inFlight()).toEqual([]);
-      const { fork, me, copy, mirror } = start(arena, search);
+      // The break plan: the first bordering ally of the guard's lines.
+      const plan =
+        t0 === BREAK_AT
+          ? (t: number) => {
+              const l = (arena.state.leader as LeaderMemory).lines[0];
+              broke = l.id;
+              return [
+                breakStep(l.id, t),
+                attackStep(l.id, l.smallID, t + 1, 0.5),
+              ];
+            }
+          : undefined;
+      if (t0 === BREAK_AT) {
+        expect(t0 - arena.state.timers.lastThink).toBe(2);
+      }
+      const { fork, me, copy, mirror } = start(arena, search, plan);
+      if (t0 === BREAK_AT) {
+        // The run of the break's tick re-floored with the break pending.
+        const mem = arena.state.leader as LeaderMemory;
+        expect(mem.at).toBe(t0);
+        expect(mem.pending).toEqual({
+          traitor: true,
+          leaving: [broke],
+          until: t0 + BREAK_LAG,
+        });
+        expect(mem.lines.some((l) => l.rule === "traitor")).toBe(true);
+      }
       const live = arena.host.me();
       let firstIntentDiff: string | null = null;
       let firstHashDiff: number | null = null;
@@ -148,5 +200,9 @@ describe("WP10b leader guard: rollout fidelity on World", () => {
     }
     // The windows were not quiet: the copies matched a playing policy.
     expect(sent).toBeGreaterThan(10);
+    // The plan went through: we broke with the ally, and turned traitor.
+    expect(broke).not.toBeNull();
+    const live = arena.host.me();
+    expect(live.isAlliedWith(arena.game.player(broke!))).toBe(false);
   }, 900_000);
 });
