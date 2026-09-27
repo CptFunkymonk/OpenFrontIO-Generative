@@ -15,9 +15,12 @@ import { SnapshotWriter } from "./SnapshotContext";
 import { readVersioned, SnapshotError } from "./SnapshotType";
 
 /**
- * Structural clone: a copy of a game that is exactly what
- * `restoreGame(snapshotGame(game))` gives, made without the byte encoding and
- * without rebuilding what the map already holds.
+ * Structural clone: an exact copy of a game, the game `restoreGame(
+ * snapshotGame(game))` gives, made without the byte encoding and without
+ * rebuilding what the map already holds. Stepped with the same intents, a
+ * clone stays identical to its game, tick for tick; so does a restore,
+ * except with water nukes (the water graph, below), where only the clone
+ * does.
  *
  * A snapshot restore costs time in proportion to the map and the owned
  * land: every owned tile is listed, encoded, decoded, hashed into a TileSet
@@ -40,15 +43,21 @@ import { readVersioned, SnapshotError } from "./SnapshotType";
  *   fallout and defense bits. A restore rebuilds the same arrays: it writes
  *   the owners from the players' tile sets, which the simulation keeps in
  *   step with the map (GameImpl.conquer and relinquish).
- * - The water components and graph are copied while a restore would build
- *   the same: the minimap still has the map file's water and the graph was
- *   never rebuilt. Otherwise they are built and restored from the record, as
- *   a restore does (`WaterManager` constructor).
+ * - The water components and graph are copied as the game holds them, the
+ *   graph with its path cache (`WaterManager` constructor). A restore
+ *   rebuilds the graph from the components instead, which is the same graph
+ *   only until water is added: then the game routes on its stale graph until
+ *   the throttled rebuild, and an incremental rebuild orders the edges
+ *   differently from a full one, so ship routes can break ties differently
+ *   (WaterManager.restoreSnapshot). The graph is not in the snapshot, so the
+ *   clone's snapshot bytes are the restore's all the same.
  *
  * The tests (tests/core/snapshot/GameClone.test.ts) hold a clone to a
- * restore: the same object graph, the same snapshot bytes, the same map
- * arrays, the same hashes and bytes for 600 ticks with nukes and ships in
- * flight, and chains of clones on a straight run's track for a whole game.
+ * restore: the same object graph (the water graph aside, which is held to
+ * the game's), the same snapshot bytes, the same map arrays, the same hashes
+ * and bytes for 600 ticks with nukes and ships in flight; and to the game:
+ * chains of clones on a straight run's track through a whole game, with
+ * water nukes too.
  */
 
 /**
@@ -61,18 +70,41 @@ export interface CloneDeps {
 }
 
 /**
+ * What changes when a game's big parts do, which a clone reads from the game
+ * itself (GameCloneSource): its tick, and the counters that tile ownership,
+ * fallout and water edits advance (conquer, relinquish, setFallout,
+ * setWater, and the water conversions of a tick).
+ */
+interface BigPartsStamp {
+  tick: number;
+  territory: number;
+  water: number;
+  miniWater: number;
+}
+
+function bigPartsStamp(g: GameImpl): BigPartsStamp {
+  return {
+    tick: g.ticks(),
+    territory: g.territoryVersion(),
+    water: g.map().waterVersion(),
+    miniWater: g.miniMap().waterVersion(),
+  };
+}
+
+/**
  * A game's state taken once, between ticks, and cloned any number of times.
  * The records are written once; each clone copies them and the maps anew,
  * so clones share nothing with each other or with the game.
  *
  * The big parts are read from the game itself when a clone is made, so
- * every clone must be made before the game ticks again (checked). To clone
- * the same state later, keep a clone and take a source from it.
+ * every clone must be made before the game ticks again, and before anything
+ * changes its territory or water between ticks (both checked). To clone the
+ * same state later, keep a clone and take a source from it.
  */
 export class GameCloneSource {
   private constructor(
     private readonly game: GameImpl,
-    private readonly tick: number,
+    private readonly stamp: BigPartsStamp,
     private readonly gameConfig: GameConfig,
     private readonly records: SnapshotRecords,
     private readonly tileSets: ReadonlyMap<Uint32Array, TileSet>,
@@ -85,7 +117,7 @@ export class GameCloneSource {
     const records = writeSnapshotRecords(g, w);
     return new GameCloneSource(
       g,
-      g.ticks(),
+      bigPartsStamp(g),
       // Canonical (schema) key order, as the snapshot stores it.
       GameConfigSchema.parse(g.config().gameConfig()),
       records,
@@ -95,15 +127,25 @@ export class GameCloneSource {
 
   /** The tick the source was taken at. */
   ticks(): number {
-    return this.tick;
+    return this.stamp.tick;
   }
 
   /** A new, independent game in the source's state. */
   clone(deps: CloneDeps): Game {
     const g = this.game;
-    if (g.ticks() !== this.tick) {
+    const now = bigPartsStamp(g);
+    if (now.tick !== this.stamp.tick) {
       throw new SnapshotError(
-        `clone source taken at tick ${this.tick}, but the game is at tick ${g.ticks()}`,
+        `clone source taken at tick ${this.stamp.tick}, but the game is at tick ${now.tick}`,
+      );
+    }
+    if (
+      now.territory !== this.stamp.territory ||
+      now.water !== this.stamp.water ||
+      now.miniWater !== this.stamp.miniWater
+    ) {
+      throw new SnapshotError(
+        `clone source taken at tick ${this.stamp.tick}: the game's territory or water changed since`,
       );
     }
     const data = copySnapshotData(

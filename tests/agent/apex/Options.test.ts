@@ -194,14 +194,18 @@ describe("apex options", () => {
 });
 
 describe("apex controllers", () => {
-  test("every controller but Spawn has a boolean enable flag", () => {
+  test("every controller but Spawn and Search has a boolean enable flag", () => {
     const files = fs
       .readdirSync(path.join(APEX_DIR, "controllers"))
       .filter((f) => f.endsWith("Controller.ts"))
       .map((f) => f.slice(0, -"Controller.ts".length).toLowerCase());
+    // The SearchController (package WP2) is the policy's LiveSearch, not a
+    // Controller: o.search gives it to the policy, off until an A/B adopts
+    // it.
     expect(files.sort()).toEqual(
-      ["spawn", ...Object.keys(CONTROLLER_FLAGS)].sort(),
+      ["search", "spawn", ...Object.keys(CONTROLLER_FLAGS)].sort(),
     );
+    expect(APEX_DEFAULTS.search).toBe(false);
     for (const flag of Object.values(CONTROLLER_FLAGS)) {
       expect(typeof APEX_DEFAULTS[flag], flag).toBe("boolean");
       expect(APEX_DEFAULTS[flag], flag).toBe(true);

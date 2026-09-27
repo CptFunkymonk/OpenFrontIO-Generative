@@ -77,14 +77,23 @@ export interface Received {
   /** Each launch `attacks` counts, in order: the first MAX_ATTACK_RECORDS. */
   launches?: ReceivedLaunch[];
   launchesDropped?: number;
+  /** Each boat attack that began on our land, at its landing, in order:
+   *  the first MAX_ATTACK_RECORDS (boat is true). A ship that sank, turned
+   *  back or landed elsewhere has none; one bound elsewhere that landed on
+   *  a tile we took meanwhile has one but no launch. Added after launches,
+   *  so a file can have those without these. */
+  landings?: ReceivedLaunch[];
+  landingsDropped?: number;
   /** Each atom bomb, hydrogen bomb and MIRV `nukes` counts (its warheads
    *  are only counted), the first MAX_ATTACK_RECORDS. */
   nukeLog?: ReceivedNuke[];
 }
 
-/** An attack launched at a seat, as `Received.attacks` counts it. */
+/** An attack launched at a seat, as `Received.attacks` counts it, or a
+ *  boat attack's landing (Received.landings). */
 export interface ReceivedLaunch {
-  /** A land attack's first tick; a boat's when it set sail. */
+  /** A land attack's first tick; a boat's when it set sail (in launches)
+   *  or when it landed (in landings). */
   tick: number;
   /** type is a PlayerType. */
   by: { name: string; type: string };
@@ -601,6 +610,11 @@ export class IncomingLog {
    *  MAX_ATTACK_RECORDS; `launchesDropped` counts the rest. */
   readonly launches: LaunchEntry[] = [];
   launchesDropped = 0;
+  /** Boat attacks at the tick they appeared on our land, the first
+   *  MAX_ATTACK_RECORDS; `landingsDropped` counts the rest. Not counted in
+   *  `attacks`, which took each boat when it sailed. */
+  readonly landings: LaunchEntry[] = [];
+  landingsDropped = 0;
   /** After each observe: troops each attacker's attacks on us held the tick
    *  before, plus those of its attacks on us that appeared in this one. */
   readonly opposing = new Map<number, number>();
@@ -629,7 +643,21 @@ export class IncomingLog {
     for (const s of sightings) {
       if (this.last.has(s.id)) continue;
       counters.add(s.attacker);
-      if (s.boat) continue;
+      if (s.boat) {
+        const landing = {
+          tick,
+          attacker: s.attacker,
+          type: s.attackerType,
+          troops: Math.round(s.troops),
+          boat: true,
+        };
+        if (this.landings.length < MAX_ATTACK_RECORDS) {
+          this.landings.push(landing);
+        } else {
+          this.landingsDropped++;
+        }
+        continue;
+      }
       const absorbed = vanished.get(s.attacker) ?? 0;
       vanished.delete(s.attacker);
       this.launched(s.attackerType, Math.max(0, s.troops - absorbed), {
@@ -897,6 +925,13 @@ export class ArenaRecorder {
           boat: l.boat,
         })),
         launchesDropped: s.incoming.launchesDropped,
+        landings: s.incoming.landings.map((l) => ({
+          tick: l.tick,
+          by: by(l.attacker),
+          troops: l.troops,
+          boat: true,
+        })),
+        landingsDropped: s.incoming.landingsDropped,
         nukeLog: s.nukeLog.map((n) => ({ ...n, by: by(n.by) })),
       },
       attacks: s.log.records,

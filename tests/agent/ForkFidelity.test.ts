@@ -29,7 +29,9 @@
  * Forks come in two kinds with the same contract: a snapshot restore
  * (ctx.fork(), new GameFork with bytes) and a structural clone
  * (GameFork.clone, ForkSource and forkMany: one take of the game, any number
- * of forks). The last tests hold the clones to the same standard.
+ * of forks). The last tests hold the clones to the same standard, and check
+ * that forks branched from a fork (GameFork.clones, GameFork.source) carry
+ * the intents it still has to replay (GameFork.replay).
  */
 import path from "path";
 import { Agent, AgentContext, AgentIntent } from "../../src/agent/Agent";
@@ -48,6 +50,7 @@ import {
   GameFork,
   TerrainSource,
 } from "../../src/agent/Fork";
+import { Lookahead } from "../../src/agent/lib/Lookahead";
 import {
   Difficulty,
   Game,
@@ -767,16 +770,136 @@ describe("fork fidelity (H10)", () => {
         [fork!, ...many].map((f) => ({ fork: f })),
         WORLD_LOCKSTEP_TICKS,
       );
+      // Timings are logged, not asserted: the suite shares its machine.
       console.log(
         `World tick ${WORLD_FORK_TICK}: fork by snapshot and restore ` +
           `${median(restoreMs).toFixed(0)} ms, by structural clone ` +
           `${median(cloneMs).toFixed(0)} ms, ${manyMs.toFixed(0)} ms each ` +
           `for 3 from one take (medians of 3)`,
       );
-      expect(median(cloneMs)).toBeLessThan(median(restoreMs));
       for (const x of [r, ...rm]) {
         expect(x.firstDivergence).toBeNull();
         expect(x.snapshotDiffs).toEqual([]);
+      }
+    },
+    TIMEOUT,
+  );
+
+  test.each([1, 3])(
+    "intents queued with GameFork.replay run in their turn's step, and forks branched before it carry them (latency %i)",
+    async (latency) => {
+      const forks: GameFork[] = [];
+      const arena = await newArena({
+        gameID: `FORKRPL${latency}`,
+        map: GameMapType.Onion,
+        latencyTicks: latency,
+        wrap: forkingAgent(WARMUP_TICKS, latency, 1, forks),
+      });
+      arena.play(WARMUP_TICKS);
+      const [fork] = forks;
+      const forkTick = arena.game.ticks();
+      // Every turn in flight at the fork, queued for the turn it runs in.
+      const turns = [...arena.queue.keys()]
+        .filter((t) => t >= forkTick)
+        .sort((a, b) => a - b);
+      expect(turns).toEqual(
+        Array.from({ length: latency }, (_, i) => forkTick + i),
+      );
+      for (const t of turns) fork.replay(unstamped(arena.queue.get(t)!), t);
+      expect([...fork.queued().keys()]).toEqual(turns);
+      const inFlight = new Set(arena.inFlight());
+      const notInFlight = (real: StampedIntent[]) =>
+        real.filter((x) => !inFlight.has(x));
+
+      // Branched before the fork's first step: both ways carry the queue.
+      const [branch] = fork.clones(1);
+      const fromSource = fork.source().fork();
+      for (const f of [branch, fromSource]) {
+        expect(f.queued()).toEqual(fork.queued());
+      }
+      const { results } = lockstep(
+        arena,
+        [fork, branch, fromSource].map((f) => ({
+          fork: f,
+          intentsFor: (_: number, real: StampedIntent[]) => notInFlight(real),
+        })),
+        LOCKSTEP_TICKS / 2,
+      );
+      for (const r of results) {
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
+      }
+      expect(fork.queued().size).toBe(0);
+      expect(() => fork.replay([], forkTick)).toThrow(/already ran/);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "a Lookahead fork with a replay branches only with its replay: refused or carried, never dropped",
+    async () => {
+      // Lookahead.fork(ctx, sent) puts the intents sent this tick into the
+      // fork's first step. Branched before that step, the branch must get
+      // them too, or refuse; losing them silently is the failure (the
+      // branch would play a game without the agent's last send).
+      const la = new Lookahead({ msPer10s: 1e9, wallBudgetMs: 1e9 });
+      let fork: GameFork | null = null;
+      let refused: string | null = null;
+      let early: GameFork[] = [];
+      const arena = await newArena({
+        gameID: "FORKLKAH",
+        map: GameMapType.Onion,
+        wrap: (inner) => ({
+          name: "lookahead",
+          tick(ctx) {
+            // At the fork tick the attack is the only send, so it is all
+            // the replay has to hold (Lookahead.fork's contract).
+            if (ctx.tick !== WARMUP_TICKS) return inner.tick(ctx);
+            const troops = Math.floor(ctx.me.troops() / 5);
+            const attack: AgentIntent = {
+              type: "attack",
+              targetID: null,
+              troops,
+            };
+            expect(ctx.send(attack)).toBe("ok");
+            fork = la.fork(ctx, [attack]);
+            try {
+              early = fork!.clones(1);
+            } catch (e) {
+              refused = String(e);
+            }
+          },
+        }),
+      });
+      arena.play(WARMUP_TICKS);
+      expect(fork).not.toBeNull();
+      const f = fork as unknown as GameFork;
+      if (refused !== null) expect(refused).toMatch(/replay/);
+      // Everything the fork is given comes through its own step; the attack
+      // is in flight, so the lockstep gives what is not.
+      const inFlight = new Set(arena.inFlight());
+      expect(inFlight.size).toBeGreaterThan(0);
+      const notInFlight = (real: StampedIntent[]) =>
+        real.filter((x) => !inFlight.has(x));
+      const first = lockstep(
+        arena,
+        [f, ...early].map((x) => ({
+          fork: x,
+          intentsFor: (_: number, real: StampedIntent[]) => notInFlight(real),
+        })),
+        1,
+      );
+      for (const r of first.results) expect(r.firstDivergence).toBeNull();
+      // After its first step the fork branches freely.
+      const late = f.clones(1);
+      const { results } = lockstep(
+        arena,
+        [f, ...early, ...late].map((x) => ({ fork: x })),
+        LOCKSTEP_TICKS / 4,
+      );
+      for (const r of results) {
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
       }
     },
     TIMEOUT,

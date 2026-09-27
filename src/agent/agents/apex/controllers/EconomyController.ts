@@ -8,6 +8,7 @@ import {
   UnitType,
 } from "../../../../core/game/Game";
 import { TileRef } from "../../../../core/game/GameMap";
+import { CityGate, cityGate } from "../../../lib/GoldPolicy";
 import { Bomb, NukeModel, NukeReason } from "../../../lib/NukeModel";
 import { Prio } from "../../../lib/Scheduler";
 import type { ApexOptions } from "../options";
@@ -48,6 +49,13 @@ import type { ApexState } from "../state";
 // their border and delete them (TribeExecution.ts:99-106), and nations
 // attack tribes that hold structures first (AiAttackBehavior.ts:285-287).
 // Gold is not in the Purse: in M2 the economy is its only spender.
+// Package WP8 (o.goldPolicy, lib/GoldPolicy.ts): from o.goldFrom on, when
+// the nuke rule of this check (the structure policy's exposedSite, or
+// planCityModel) refuses every site it tried, an arm other than "exposure"
+// may still buy, under its gate: the gold above o.goldReserve, the sites
+// the arm allows, and (o.goldGuard) a line on our City levels. So an arm
+// only adds buys to today's rule. Sites, upgrades first, o.cityMaxLevel
+// and o.citySpread are this check's as above.
 
 /** Grid points sampled over the bounding box of our land (the border's
  *  box, widened to the map edge where our land reaches it). */
@@ -80,8 +88,15 @@ export type CityAction =
     }
   | { kind: "build"; tile: TileRef; cost: bigint; depth: number };
 
-/** Why a check does nothing (logs and tests). */
-export type CityIdle = "off" | "policy" | "gold" | "exposed" | "noSite";
+/** Why a check does nothing (logs and tests). "guard": the gold arm's
+ *  level line (lib/GoldPolicy, o.goldGuard) leaves no room. */
+export type CityIdle =
+  | "off"
+  | "policy"
+  | "gold"
+  | "exposed"
+  | "noSite"
+  | "guard";
 
 /** What planCity reads of ApexOptions. */
 export type CityOptions = Pick<
@@ -415,32 +430,82 @@ export function citySites(
 /**
  * One §3.8 check: what to buy now, or why nothing. Pure in the game (only
  * getters, canBuild and canUpgradeUnit); the caller offers the intent.
+ * With `gate` (package WP8, lib/GoldPolicy.cityGate: the gold arm, which
+ * the controller asks when this check without it refuses as "exposed") the
+ * gate replaces the structure policy's nuke rule and the model's: it
+ * spends gate.budget, only at the sites (and cities) it allows, holds at
+ * most gate.maxLevels City levels, and raises a city only to its
+ * gate.cityRoom.
  */
 export function planCity(
   game: Game,
   me: Player,
   o: CityOptions,
   nukes?: NukePlan,
+  gate?: CityGate,
 ): CityAction | CityIdle {
   if (!o.cities) return "off";
   if (o.structurePolicy === "never") return "policy";
-  const gold = me.gold();
+  const gold = gate === undefined ? me.gold() : gate.budget;
   const cost = game.config().unitInfo(UnitType.City).cost(game, me);
   if (gold < cost) return "gold";
-  if (o.nukeModel && nukes !== undefined && o.structurePolicy === "exposure") {
+  if (
+    gate === undefined &&
+    o.nukeModel &&
+    nukes !== undefined &&
+    o.structurePolicy === "exposure"
+  ) {
     return planCityModel(game, me, o, nukes, gold, cost);
   }
-  const exposure = o.structurePolicy === "exposure";
+  const exposure = gate === undefined && o.structurePolicy === "exposure";
+  // Levels the gate's line lets us add (unitCount: finished levels and
+  // cities under construction).
+  const room =
+    gate === undefined
+      ? Infinity
+      : gate.maxLevels - me.unitCount(UnitType.City);
+  if (room < 1) return "guard";
   const maxLevel = levelCap(o);
   let exposed = false;
+  const refused = (t: TileRef): boolean =>
+    exposure
+      ? exposedSite(game, me, t, o.exposureWide)
+      : gate !== undefined && !gate.allows(t);
   if (o.cityUpgradeFirst) {
-    const up = upgradeTarget(game, me, o.cityMinDepth, maxLevel);
+    // A gate's refusals depend on the site ("model", goldHydroCap), so it
+    // picks among the cities it allows.
+    const accept =
+      gate === undefined
+        ? undefined
+        : (c: Unit) => {
+            if (
+              gate.allows(c.tile()) &&
+              gate.cityRoom(c.tile(), c) > c.level()
+            ) {
+              return true;
+            }
+            exposed = true;
+            return false;
+          };
+    const up = upgradeTarget(game, me, o.cityMinDepth, maxLevel, accept);
     if (up !== null) {
-      if (exposure && exposedSite(game, me, up.unit.tile(), o.exposureWide)) {
+      if (exposure && refused(up.unit.tile())) {
         exposed = true;
       } else {
-        const room = maxLevel - up.unit.level();
-        const { amount, cost: total } = affordableLevels(game, me, gold, room);
+        const lv = up.unit.level();
+        const levels = Math.min(
+          maxLevel - lv,
+          room,
+          gate === undefined
+            ? Infinity
+            : gate.cityRoom(up.unit.tile(), up.unit) - lv,
+        );
+        const { amount, cost: total } = affordableLevels(
+          game,
+          me,
+          gold,
+          levels,
+        );
         return {
           kind: "upgrade",
           unitId: up.unit.id(),
@@ -465,7 +530,7 @@ export function planCity(
         ? site.depth
         : borderDepth(game, me, spawn, site.depth);
     if (depth < o.cityMinDepth) continue;
-    if (exposure && exposedSite(game, me, spawn, o.exposureWide)) {
+    if (refused(spawn) || (gate !== undefined && gate.cityRoom(spawn) < 1)) {
       exposed = true;
       continue;
     }
@@ -1137,20 +1202,38 @@ export class EconomyController implements Controller {
         : undefined;
     if (nukes !== undefined && o.hubDoom) this.doom(v, s, nukes);
     if (nukes !== undefined && this.sam(v, s, nukes)) return;
-    const plan = planCity(v.game, v.me, o, nukes);
+    // Package WP8: the gold arm (lib/GoldPolicy) only adds to today's rule:
+    // from o.goldFrom on it is asked when today's rule refuses every site
+    // it tried ("exposed"), and its gate (reserve, sites, level line)
+    // governs that buy only.
+    const today = planCity(v.game, v.me, o, nukes);
+    const gate =
+      today === "exposed"
+        ? (cityGate(v.game, v.me, o, v.tick, v.nukes) ?? undefined)
+        : undefined;
+    const plan =
+      gate === undefined ? today : planCity(v.game, v.me, o, nukes, gate);
     if (typeof plan === "string") {
+      const minute =
+        Math.floor(v.tick / 600) !== Math.floor(s.timers.lastCity / 600);
       // Once a minute (the first check in it), why a threat blocks cities.
-      if (
-        nukes !== undefined &&
-        nukes.threats.length > 0 &&
-        Math.floor(v.tick / 600) !== Math.floor(s.timers.lastCity / 600)
-      ) {
+      if (nukes !== undefined && nukes.threats.length > 0 && minute) {
         v.log?.(
           `${v.tick} city ${plan}: threats ${threatList(nukes)} ` +
             `sam=${planSam(v.game, v.me, o, nukes) as string}` +
             (nukes.doomed === true ? ` doom=${s.economy.doomBy ?? "-"}` : "") +
             ` gold=${v.me.gold()}`,
         );
+      }
+      // And why the gold arm holds gold back, unless we are simply short
+      // ("reserve": the gold is there, above it it is not).
+      if (gate !== undefined && minute) {
+        const price = v.game
+          .config()
+          .unitInfo(UnitType.City)
+          .cost(v.game, v.me);
+        if (plan !== "gold") v.log?.(gateText(v, gate, plan));
+        else if (v.me.gold() >= price) v.log?.(gateText(v, gate, "reserve"));
       }
       s.timers.lastCity = v.tick;
       return;
@@ -1184,13 +1267,15 @@ export class EconomyController implements Controller {
     s.timers.lastCity = v.tick;
     const levels = finishedCityLevels(v.me);
     const gold = v.me.gold();
+    const arm = gate === undefined ? "" : ` arm=${gate.arm}`;
     if (plan.kind === "upgrade") {
       v.log?.(
         `${v.tick} city upgrade #${plan.unitId} L${plan.level}+${plan.amount} ` +
           `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels + plan.amount}` +
           (nukes !== undefined && nukes.threats.length > 0
             ? ` threats ${threatList(nukes)}`
-            : ""),
+            : "") +
+          arm,
       );
     } else {
       v.log?.(
@@ -1198,7 +1283,8 @@ export class EconomyController implements Controller {
           `depth=${plan.depth} cost=${plan.cost} gold=${gold} levels=${levels}` +
           (nukes !== undefined && nukes.threats.length > 0
             ? ` threats ${threatList(nukes)}`
-            : ""),
+            : "") +
+          arm,
       );
     }
   }
@@ -1258,6 +1344,18 @@ export class EconomyController implements Controller {
     );
     return true;
   }
+}
+
+/** Why the gold arm holds its gold back, for a log line: the idle reason
+ *  (or "reserve"), the nations it refuses sites for, our gold against the
+ *  budget, and our City levels against its line. */
+function gateText(v: View, gate: CityGate, why: string): string {
+  const line = Number.isFinite(gate.maxLevels) ? `${gate.maxLevels}` : "-";
+  return (
+    `${v.tick} gold ${gate.arm} ${why}: [${gate.blockers.join(",")}] ` +
+    `gold=${v.me.gold()} budget=${gate.budget} ` +
+    `levels=${v.me.unitCount(UnitType.City)}/${line}`
+  );
 }
 
 /** A SamKiller for a log line: name, why, projected gold against the line. */

@@ -463,6 +463,16 @@ describe("IncomingLog", () => {
       },
     ]);
     expect(log.launchesDropped).toBe(0);
+    // The boat's attack is listed where it appeared, as a landing.
+    expect(log.landings).toEqual([
+      {
+        tick: 60,
+        attacker: 3,
+        type: PlayerType.Nation,
+        troops: 25,
+        boat: true,
+      },
+    ]);
     // Past the cap they are counted, not listed.
     for (let i = log.launches.length; i < MAX_ATTACK_RECORDS + 3; i++) {
       log.launched(PlayerType.Nation, 1, { tick: i, attacker: 3, boat: false });
@@ -470,6 +480,32 @@ describe("IncomingLog", () => {
     expect(log.launches).toHaveLength(MAX_ATTACK_RECORDS);
     expect(log.launchesDropped).toBe(3);
     expect(log.attacks.nation).toBe(2 + MAX_ATTACK_RECORDS + 3 - 3);
+  });
+
+  test("lists each boat attack when it lands, counted once at sea", () => {
+    const log = new IncomingLog();
+    const boat = (id: string, troops: number) => ({
+      id,
+      attacker: 7,
+      attackerType: PlayerType.Nation,
+      troops,
+      boat: true,
+    });
+    log.observe([boat("x", 500.4)], 10);
+    log.observe([boat("x", 450)], 11);
+    log.observe([boat("x", 400), boat("y", 90)], 12);
+    expect(log.landings.map((l) => [l.tick, l.troops])).toEqual([
+      [10, 500],
+      [12, 90],
+    ]);
+    // Counted when they sailed (the recorder's unit updates), not here.
+    expect(log.attacks.nation).toBe(0);
+    expect(log.launches).toEqual([]);
+    for (let i = 0; i < MAX_ATTACK_RECORDS; i++) {
+      log.observe([boat(`z${i}`, 1)], 100 + i);
+    }
+    expect(log.landings).toHaveLength(MAX_ATTACK_RECORDS);
+    expect(log.landingsDropped).toBe(2);
   });
 });
 
@@ -558,6 +594,16 @@ describe("ArenaRecorder", () => {
       },
     ]);
     expect(received.launchesDropped).toBe(0);
+    // And when it landed: its attack on b's land began later.
+    expect(received.landings).toHaveLength(1);
+    expect(received.landings![0]).toMatchObject({
+      by: { name: "seat a", type: PlayerType.Human },
+      boat: true,
+    });
+    expect(received.landings![0].tick).toBeGreaterThan(attacks[1].startTick);
+    expect(received.landings![0].troops).toBeLessThanOrEqual(5000);
+    expect(received.landingsDropped).toBe(0);
+    expect(recorder.records(0).received.landings).toEqual([]);
     expect(received.eliminatedBy).toEqual({
       name: "seat a",
       type: PlayerType.Human,
@@ -831,6 +877,13 @@ describe("arena records", () => {
       expect(rec.nukeLog!.length).toBe(
         rec.nukes.atom + rec.nukes.hydrogen + rec.nukes.mirv,
       );
+      // Boat attacks at their landing, in order.
+      expect(rec.landingsDropped).toBe(0);
+      for (const [i, l] of rec.landings!.entries()) {
+        expect(l.boat).toBe(true);
+        if (i > 0)
+          expect(l.tick).toBeGreaterThanOrEqual(rec.landings![i - 1].tick);
+      }
       expect(rec.attacks.human).toBe(0);
       const nukes = Object.values(rec.nukes).reduce((x, y) => x + y, 0);
       expect(rec.firstNukeTick === null).toBe(nukes === 0);

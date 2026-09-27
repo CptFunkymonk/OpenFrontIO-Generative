@@ -3,14 +3,19 @@ import os from "os";
 import path from "path";
 import type { ArenaGameResult } from "../../src/agent/arena/ArenaGame";
 import {
+  cutShort,
+  FLOW_MINUTES,
   flowTable,
+  gameWon,
   goldAt,
   LOG_LINES_KEPT,
   lostBefore,
+  nationAttackTicks,
   nationBefore,
   nationReached,
   outBefore,
   peakRegrowth,
+  PRICE_MIN_TILES,
   quantile,
   readRun,
   regrowth,
@@ -127,16 +132,23 @@ describe("seatFlow", () => {
       strike(4200, PlayerType.Bot, false, 5000, 500),
     ],
     received: {
-      attacks: { nation: 5, bot: 1, human: 1 },
+      attacks: { nation: 6, bot: 1, human: 1 },
       nukes: { atom: 2, hydrogen: 1, mirv: 1, mirvWarhead: 350 },
       launches: [
         launch(2000, NATION),
         launch(3100, NATION), // with the first strike: piles on
+        // A boat sails after it: it counts where it lands, if it does.
+        { ...launch(3150, NATION), boat: true },
         launch(3200, PlayerType.Bot),
         launch(3400, NATION), // 300 ticks after it: still
         launch(3401, NATION), // one tick too late
         launch(5050, PlayerType.Human),
         launch(5100, NATION), // after the second strike
+      ],
+      landings: [
+        { ...launch(3350, NATION), boat: true }, // piles on the first
+        { ...launch(3360, PlayerType.Bot), boat: true },
+        { ...launch(5200, NATION), boat: true }, // and the second
       ],
       nukeLog: [
         nuke(4000, "atom", 0.1),
@@ -154,12 +166,16 @@ describe("seatFlow", () => {
     expect(f.idleShare).toBe(15 / 20);
     // (5 × 300 × r − (1M − 420k)) ÷ (16,000 − 10,000) tiles.
     expect(f.allInPrice).toBeCloseTo((1500 * r - 580_000) / 6000, 9);
+    expect(f.allInCost! / f.allInTiles!).toBe(f.allInPrice);
+    expect(f.allInTiles).toBe(6000);
     // Only land attacks on nations are strikes; a running one has no price.
     expect(f.strikes).toBe(2);
+    expect(f.strikesEnded).toBe(1);
     expect(f.strikeTroopsLost).toBe(50_000);
     expect(f.strikeTilesGained).toBe(1000);
-    // Two nation attacks follow the first strike, one the second.
-    expect(f.pileOns).toBe(3);
+    // Nation attacks on our land: three follow the first strike (two land
+    // attacks, a boat's landing), two the second; the boat at sea none.
+    expect(f.pileOns).toBe(5);
   });
 
   test("a game that ended in the window: its last sample is off the grid", () => {
@@ -188,9 +204,34 @@ describe("seatFlow", () => {
     const flat = seat({ timeline: timeline(9000, () => ({ tiles: 500 })) });
     expect(seatFlow(game(flat), 0)).toMatchObject({
       allInPrice: null,
+      allInCost: null,
+      allInTiles: null,
       utilization: 0,
       idleShare: 1,
     });
+    // More than PRICE_MIN_TILES net tiles, as srate.py: a seat that barely
+    // grew would "pay" its whole regrowth for a tile. At home 420k of 1M
+    // it regrows r a tick, so 6,000 ticks of it buy the tiles gained.
+    const grew = (gain: number) =>
+      seat({
+        timeline: timeline(9300, (tick) => ({
+          troops: 420_000,
+          tiles: 5000 + (tick >= 9000 ? gain : 0),
+        })),
+      });
+    expect(PRICE_MIN_TILES).toBe(1000);
+    expect(seatFlow(game(grew(1000)), 0).allInPrice).toBeNull();
+    expect(seatFlow(game(grew(1001)), 0).allInPrice).toBeCloseTo(
+      (6000 * r) / 1001,
+      6,
+    );
+    // flowmetrics.py priced any gain: minTiles 0, one tile at 6,000 r.
+    const f = seatFlow(game(grew(1)), 0, FLOW_MINUTES, 0);
+    expect(f.allInPrice).toBeCloseTo(6000 * r, 6);
+    expect([f.allInCost, f.allInTiles]).toEqual([
+      expect.closeTo(6000 * r, 6),
+      1,
+    ]);
     // Out before minute 5: nothing in the window.
     const dead = seat({ timeline: timeline(9000, () => ({ alive: false })) });
     expect(seatFlow(game(dead), 0)).toMatchObject({
@@ -202,35 +243,117 @@ describe("seatFlow", () => {
 
   test("pile-ons of older runs: apex's `def why` lines, else unknown", () => {
     const strikes = [strike(3100, NATION, false, 1, 1)];
-    const logged = (lines: string[], nationAttacks: number) =>
+    const noNukes = { atom: 0, hydrogen: 0, mirv: 0, mirvWarhead: 0 };
+    const logged = (
+      lines: string[] | undefined,
+      nationAttacks: number,
+      more: Partial<SummarySeat> = {},
+    ) =>
       seatFlow(
         game(
           seat({
             attacks: strikes,
             received: {
               attacks: { nation: nationAttacks, bot: 0, human: 0 },
-              nukes: { atom: 0, hydrogen: 0, mirv: 0, mirvWarhead: 0 },
+              nukes: noNukes,
             },
             logs: lines,
+            ...more,
           }),
         ),
         0,
       ).pileOns;
-    expect(
-      logged(
-        [
-          "[3150] 3150 def in Pakistan 1000 land ~10 tiles",
-          "[3150] 3150 def why Pakistan T=1 [juicy]",
-          "[3500] 3500 def why Pakistan T=1 [juicy]",
-        ],
-        2,
-      ),
-    ).toBe(1);
-    // apex logged no `def why`: its nation attacks never landed.
+    const why = [
+      "[3150] 3150 def in Pakistan 1000 land ~10 tiles",
+      "[3150] 3150 def why Pakistan T=1 [juicy]",
+      "[3500] 3500 def why Pakistan T=1 [juicy]",
+    ];
+    expect(logged(why, 2)).toBe(1);
+    // apex before its `def why` lines logged `def in` alone: its nation
+    // attacks are not timed, so unknown (not "none", as it was read).
+    expect(logged(["[3150] 3150 def in Pakistan 1000 land"], 1)).toBeNull();
+    // apex since it logs ships at sea: a ship and no `def why`, so the
+    // nation's one attack never landed.
     expect(logged(["[3000] 3000 def boat Oman 1000 to 1,1"], 1)).toBe(0);
     // An agent without apex's lines: known only if no nation attacked.
     expect(logged(["[3000] something"], 1)).toBeNull();
     expect(logged([], 0)).toBe(0);
+    // Stored stats stand for the log: none timed, or none landed.
+    const stored = (defWhy: number[] | null) => ({
+      lines: 1,
+      truncated: false,
+      defWhy,
+      search: null,
+    });
+    expect(logged(undefined, 1, { logStats: stored(null) })).toBeNull();
+    expect(logged(undefined, 1, { logStats: stored([]) })).toBe(0);
+    expect(logged(undefined, 1, { logStats: stored([3200]) })).toBe(1);
+    // A log AgentHost cut may have lost later `def why` lines.
+    const cut = [...why, ...Array<string>(LOG_LINES_KEPT).fill("[9000] x")];
+    expect(logged(cut, 2)).toBeNull();
+
+    // Recorded with launches but before landings: the land launches when
+    // no nation came by boat, else the `def why` lines, else unknown.
+    const launched = (boat: boolean, lines: string[]) =>
+      logged(lines, 2, {
+        received: {
+          attacks: { nation: 2, bot: 0, human: 0 },
+          nukes: noNukes,
+          launches: [launch(3200, NATION), { ...launch(3300, NATION), boat }],
+          launchesDropped: 0,
+        },
+      });
+    expect(launched(false, [])).toBe(2);
+    expect(launched(true, [])).toBeNull();
+    expect(launched(true, why)).toBe(1);
+    // With landings: the recorder alone (not the log's one), each boat
+    // where it landed, not where it sailed.
+    const landed = logged(why, 2, {
+      received: {
+        attacks: { nation: 2, bot: 0, human: 0 },
+        nukes: noNukes,
+        launches: [
+          launch(3200, NATION),
+          { ...launch(3000, NATION), boat: true },
+        ],
+        launchesDropped: 0,
+        landings: [{ ...launch(3350, NATION), boat: true }],
+        landingsDropped: 0,
+      },
+    });
+    expect(landed).toBe(2);
+    // A list the recorder cut is not complete.
+    expect(
+      logged([], 2, {
+        received: {
+          attacks: { nation: 2, bot: 0, human: 0 },
+          nukes: noNukes,
+          launches: [launch(3200, NATION)],
+          launchesDropped: 1,
+          landings: [],
+          landingsDropped: 0,
+        },
+      }),
+    ).toBeNull();
+  });
+
+  test("the attacks the pile-ons read, in order", () => {
+    const s = seat({
+      received: {
+        attacks: { nation: 3, bot: 0, human: 0 },
+        nukes: { atom: 0, hydrogen: 0, mirv: 0, mirvWarhead: 0 },
+        launches: [
+          launch(900, NATION),
+          { ...launch(100, NATION), boat: true },
+          launch(400, PlayerType.Bot),
+        ],
+        landings: [
+          { ...launch(500, NATION), boat: true },
+          { ...launch(600, PlayerType.Bot), boat: true },
+        ],
+      },
+    });
+    expect(nationAttackTicks(s)).toEqual([500, 900]);
   });
 
   test("gold at minutes 10, 15 and 20: the sample then, the seat alive", () => {
@@ -370,31 +493,72 @@ describe("nations", () => {
     expect(nationReached(none, 0.8)).toBeNull();
 
     // Before minute 20, paired in compare: a nation held half, or won.
-    expect(nationBefore(g, 0, 0.5, 20)).toBe(true);
-    expect(nationBefore(g, 0, 0.8, 20)).toBe(true);
-    expect(nationBefore(g, 0, 0.5, 12)).toBe(false);
-    expect(nationBefore(none, 0, 0.5, 20)).toBe(false);
+    expect(nationBefore(g, 0.5, 20)).toBe(true);
+    expect(nationBefore(g, 0.8, 20)).toBe(true);
+    expect(nationBefore(g, 0.5, 12)).toBe(false);
+    expect(nationBefore(none, 0.5, 20)).toBe(false);
     // Capped before minute 20 with no nation there yet: unknown.
     const capped = { ...none, ticks: 6000, gameMinutes: 10 };
-    expect(nationBefore(capped, 0, 0.5, 20)).toBeNull();
-    expect(nationBefore(game(seat()), 0, 0.5, 20)).toBeNull();
+    expect(nationBefore(capped, 0.5, 20)).toBeNull();
+    expect(nationBefore(game(seat()), 0.5, 20)).toBeNull();
+    // We won at minute 9: no nation can get there after.
+    const won = game(seat({ result: "win" }), 5400, {
+      winner: { type: PlayerType.Human },
+      leaders: leaders([5400, [[PlayerType.Human, 0.8]]]),
+    });
+    expect(nationBefore(won, 0.5, 20)).toBe(false);
+
+    // Out at minute 8, the arena stopped there (no --play-out): what the
+    // nations did next is unknown, unless one had got there already.
+    const stopped = game(
+      seat({ result: "loss", eliminatedAtTick: 4800 }),
+      4800,
+      {
+        winner: null,
+        leaders: leaders([4500, [[NATION, 0.55]]], [4800, [[NATION, 0.6]]]),
+      },
+    );
+    expect(cutShort(stopped)).toBe(true);
+    expect(nationBefore(stopped, 0.5, 20)).toBe(true);
+    expect(nationBefore(stopped, 0.8, 20)).toBeNull();
+    // The same with --play-out: the game ran on to the cap.
+    const played = { ...stopped, ticks: 12000, gameMinutes: 20 };
+    expect(cutShort(played)).toBe(false);
+    expect(nationBefore(played, 0.8, 20)).toBe(false);
+    expect([cutShort(g), cutShort(none), cutShort(won)]).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    expect(cutShort({ ...none, error: "boom" })).toBe(true);
 
     const s = summarize(
       "x",
-      [g, fast, none, game(seat())].map((x) => ({ r: x, seat: 0 })),
+      [g, fast, none, game(seat()), stopped].map((x) => ({ r: x, seat: 0 })),
       0,
     );
-    // The last game records neither leaders nor a winner: not known.
-    expect(s.nationHalf).toEqual({
-      games: 2,
-      known: 3,
-      medianMinute: (12 + 7400 / 600) / 2,
-    });
+    // The fourth game records neither leaders nor a winner: not known. The
+    // stopped one knows half the land (a nation held it), not the win.
+    // Minutes 12, 12.3 and 7.5.
+    expect(s.nationHalf).toEqual({ games: 3, known: 4, medianMinute: 12 });
     expect(s.nationWin).toEqual({
       games: 2,
       known: 3,
       medianMinute: (15 + 7400 / 600) / 2,
     });
+  });
+
+  test("a win: the winner, or a seat's result in a hand-made game", () => {
+    expect(gameWon(game(seat(), 12000, { winner: { type: NATION } }))).toBe(
+      true,
+    );
+    expect(gameWon(game(seat(), 12000, { winner: null }))).toBe(false);
+    expect(gameWon(game(seat({ result: "win" })))).toBe(true);
+    // Lost without being eliminated: another won.
+    expect(gameWon(game(seat({ result: "loss" })))).toBe(true);
+    expect(
+      gameWon(game(seat({ result: "loss", eliminatedAtTick: 600 }), 600)),
+    ).toBe(false);
   });
 });
 
@@ -405,7 +569,8 @@ describe("searches from the log", () => {
     "[2550] search-check 2400 +150 MISMATCH",
     "[3000] search 3000 T1 cands=3 chosen=base gain=0 base=120000 h=600 te=900 ms=4000",
     "[3000] search-check 2400 +600 ok",
-    "[3600] search 3600 T7 skipped budget",
+    "[3600] search 3600 T7 skipped=budget need=900 room=100",
+    "[3650] search-none 3650 T1",
     "[3601] 3601 def why Pakistan T=1 [juicy]",
     "[3700] 3700 def in Pakistan 1000 land",
     "[4000] search 4000 T2 cands=4 chosen=strike:xyz:0.5 gain=800 base=130000 h=600 te=1500 ms=6000",
@@ -425,6 +590,7 @@ describe("searches from the log", () => {
         searches: 4,
         byTrigger: { T3: 1, T1: 1, T2: 1, T7: 1 },
         skipped: 1,
+        none: 1,
         acts: 2,
         actsByKind: { break: 1, strike: 1 },
         gain: 2000.5,
@@ -459,6 +625,7 @@ describe("searches from the log", () => {
         searches: 2,
         byTrigger: { act3: 1, plans: 1 },
         skipped: 0,
+        none: 0,
         acts: 1,
         actsByKind: { break: 1 },
         gain: 500,
@@ -482,6 +649,20 @@ describe("searches from the log", () => {
       defWhy: null,
       search: null,
     });
+  });
+
+  test("apex's defence lines time nation attacks once it logs ships", () => {
+    const why = (lines: string[]) => seatLogStats(lines).defWhy;
+    expect(
+      why(["[10] 10 def why Oman T=1", "[20] 20 def in Oman 5 land"]),
+    ).toEqual([10]);
+    // A ship at sea logged, none landed: timed, none.
+    expect(why(["[10] 10 def boat Oman 50 to 1,1"])).toEqual([]);
+    // apex before 92ebf90 logged `def in` (and absorb, recall) only.
+    expect(
+      why(["[20] 20 def in Oman 5 land", "[21] 21 def absorb x"]),
+    ).toBeNull();
+    expect(why([])).toBeNull();
   });
 
   test("a game log splits by seat", () => {
@@ -523,17 +704,42 @@ describe("searches from the log", () => {
       format: "mixed",
       searches: 5,
       skipped: 1,
+      none: 1,
       acts: 3,
       actsByKind: { break: 1, strike: 2 },
       gain: 2100.5,
       ms: 29000,
       checks: 3,
       mismatches: 1,
+      truncated: 0,
     });
     expect(s.R).toBeCloseTo(29000 / (10_000 + 1000));
     expect(s.rangeR).toEqual([2.6, 3]);
     expect(s.ticksR).toBeCloseTo(5500 / 12000);
     expect(summarize("x", rows.slice(2), 0).search).toBeNull();
+  });
+
+  test("a log cut at the host's cap: its checks may miss mismatches", () => {
+    const cut = [
+      ...SEARCH,
+      ...Array.from({ length: LOG_LINES_KEPT }, (_, i) => `[${5000 + i}] tn`),
+    ];
+    const rows = [cut, SEARCH].map((logs) => ({
+      r: game(seat({ logs }), 12000, { wallMs: 36_000 }),
+      seat: 0,
+    }));
+    const s = summarize("x", rows, 0);
+    expect(s.search).toMatchObject({ games: 2, mismatches: 2, truncated: 1 });
+    expect(s.truncatedLogs).toBe(1);
+    const cells = flowTable([s])
+      .split("\n")
+      .map((l) => l.split("|").map((c) => c.trim()));
+    expect(cells[2][cells[0].indexOf("checks")]).toBe(
+      "6, 2 mismatches (1 log cut: more may be missing)",
+    );
+    expect(cells[2][cells[0].indexOf("searches")]).toBe(
+      "8 (2 skipped, 2 with no candidate)",
+    );
   });
 });
 

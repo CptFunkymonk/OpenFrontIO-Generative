@@ -13,24 +13,32 @@
  * many pairs are the same game on both sides; mean Δprogress, Δpeak land,
  * Δland at minutes 10, 15 and 20 and Δsurvival, each with a seeded bootstrap
  * 95% interval, the median, the better/worse/tie split and a sign test on
- * it; out before minute 20, lost before it any cause and top 3 at minute 10
- * as paired counts with sign tests; the M4 plan's metrics (troop flow,
- * strikes, pile-ons, bombs, gold, searches, R, checkpoint mismatches) paired
- * the same way; the milestone metrics of both; breakdowns by map category
- * and by map; the games B lost most in, with the command that reruns each
- * with images; and which code each side ran, with a warning when it had
- * local changes or is not HEAD. A game that crashed, or stopped early on an
- * error, on either side, or whose seat had agent errors or never spawned, is
- * left out of the pairs and warned of. Writes compare.md and compare.json
- * into --out (default: B's directory) and prints compare.md.
+ * it; out before minute 20, lost before it any cause, top 3 at minute 10
+ * and agent errors as paired counts with sign tests; the M4 plan's metrics
+ * (troop flow, strikes, pile-ons, bombs, gold, searches, R, checkpoint
+ * mismatches) paired the same way, prices pooled; the milestone metrics of
+ * both; breakdowns by the M4 plan's map kinds (land, water, few-nation), by
+ * map category and by map; the games B lost most in, with the command that
+ * reruns each with images; and which code each side ran, with a warning
+ * when it had local changes or is not HEAD. A game that crashed, or stopped
+ * early on an error, on either side, or whose seat never spawned, is left
+ * out of the pairs and warned of; so, with --drop-errors, is one whose seat
+ * had agent errors. Writes compare.md and compare.json into --out (default:
+ * B's directory) and prints compare.md.
  */
 import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { maps as MAP_INFO, mapCategoryOrder } from "../../core/game/Game";
+import {
+  GameMapType,
+  maps as MAP_INFO,
+  mapCategoryOrder,
+} from "../../core/game/Game";
+import type { MapManifest } from "../../core/game/TerrainMapLoader";
 import { PseudoRandom } from "../../core/PseudoRandom";
 import { isMain } from "./Cli";
+import { NodeMapLoader } from "./NodeMapLoader";
 import {
   amount,
   CrashedGame,
@@ -39,6 +47,7 @@ import {
   FLOW_MINUTES,
   GOLD_MINUTES,
   goldAt,
+  LOG_LINES_KEPT,
   logStatsOf,
   lostBefore,
   mean,
@@ -47,6 +56,7 @@ import {
   outBefore,
   pct,
   PILE_ON_TICKS,
+  PRICE_MIN_TILES,
   progress,
   provenance,
   readRun,
@@ -126,20 +136,44 @@ export function bootstrapMeanCI(
   resamples = BOOTSTRAP_RESAMPLES,
   seed = BOOTSTRAP_SEED,
 ): [number, number] | null {
-  const n = values.length;
+  return bootstrapCI(
+    values.length,
+    (pick) => {
+      let sum = 0;
+      for (const i of pick) sum += values[i];
+      return sum / pick.length;
+    },
+    resamples,
+    seed,
+  );
+}
+
+/**
+ * Percentile bootstrap 95% interval of a statistic of n paired items:
+ * `stat` gets each resample's n indices, drawn with replacement from a
+ * PseudoRandom seeded with `seed` (bootstrapMeanCI draws the same). A
+ * resample whose statistic is not finite (a ratio over nothing) is left
+ * out; null for no items, or when fewer than half the resamples count.
+ */
+export function bootstrapCI(
+  n: number,
+  stat: (pick: Uint32Array) => number,
+  resamples = BOOTSTRAP_RESAMPLES,
+  seed = BOOTSTRAP_SEED,
+): [number, number] | null {
   if (n === 0) return null;
   const rng = new PseudoRandom(seed);
-  const means = new Float64Array(resamples);
+  const pick = new Uint32Array(n);
+  const stats: number[] = [];
   for (let r = 0; r < resamples; r++) {
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += values[rng.nextInt(0, n)];
-    means[r] = sum / n;
+    for (let i = 0; i < n; i++) pick[i] = rng.nextInt(0, n);
+    const v = stat(pick);
+    if (Number.isFinite(v)) stats.push(v);
   }
-  means.sort();
-  return [
-    means[Math.floor(0.025 * resamples)],
-    means[Math.ceil(0.975 * resamples) - 1],
-  ];
+  if (stats.length * 2 < resamples) return null;
+  const sorted = Float64Array.from(stats).sort();
+  const k = sorted.length;
+  return [sorted[Math.floor(0.025 * k)], sorted[Math.ceil(0.975 * k) - 1]];
 }
 
 // ── Entrants and pairing ─────────────────────────────────────────────────
@@ -213,11 +247,21 @@ export function sideCrashes(run: Run, entrant: number): CrashedGame[] {
   return run.crashes.filter((c) => c.entrant === null || c.entrant === entrant);
 }
 
+/** Why a game did not pair: its maps differ, it stopped on an error, a
+ *  seat is not valid (invalidSeat), it crashed, or a side lacks it. */
+export type UnpairedKind =
+  | "maps"
+  | "errored"
+  | "invalid"
+  | "crashed"
+  | "missing";
+
 /** A game that could not be paired, and why. */
 export interface Unpaired {
   gameID: string;
   game: number;
   map: string;
+  kind: UnpairedKind;
   reason: string;
   /** Each side's job index for the game, null where it has none. */
   a: number | null;
@@ -231,14 +275,20 @@ export interface Pairing {
   duplicates: string[];
 }
 
-/** Why a side's seat cannot stand in a pair though its game ran: agent
- *  errors (its play may have been cut or skewed) or no spawn (it never
- *  played). Empty if it can. A seat recorded before spawnTiles is taken as
- *  spawned. */
-export function invalidSeat(g: SideGame): string[] {
+/**
+ * Why a side's seat cannot stand in a pair though its game ran: it never
+ * spawned (it never played: counted, it would survive the whole game), or,
+ * with `dropErrors`, agent errors (its play may have been cut or skewed).
+ * Empty if it can. A seat recorded before spawnTiles is taken as spawned.
+ * Agent errors stay in the pairs by default: they are the agent's own
+ * failures, and dropping them would hide an exception that loses games.
+ */
+export function invalidSeat(g: SideGame, dropErrors = false): string[] {
   const s = g.game.seats[g.seat];
   const why: string[] = [];
-  if (s.stats.errors > 0) why.push(`${s.stats.errors} agent error(s)`);
+  if (dropErrors && s.stats.errors > 0) {
+    why.push(`${s.stats.errors} agent error(s)`);
+  }
   if (s.spawnTiles === 0) why.push("no spawn");
   return why;
 }
@@ -249,15 +299,17 @@ export function invalidSeat(g: SideGame): string[] {
  * not pair. Neither does a game that crashed on a side (its other side's
  * game, or the crash alone if it crashed on both) or stopped early on an
  * error there: its result is cut short, and would count as a quick loss.
- * Nor a game where a side's seat had agent errors or never spawned
- * (invalidSeat).
+ * Nor a game where a side's seat never spawned, or with `dropErrors` had
+ * agent errors (invalidSeat).
  */
 export function pairGames(
   a: readonly SideGame[],
   b: readonly SideGame[],
   aCrashes: readonly CrashedGame[] = [],
   bCrashes: readonly CrashedGame[] = [],
+  opts: { dropErrors?: boolean } = {},
 ): Pairing {
+  const invalid = (g: SideGame) => invalidSeat(g, opts.dropErrors ?? false);
   const duplicates: string[] = [];
   const byID = (games: readonly SideGame[]) => {
     const m = new Map<string, SideGame>();
@@ -290,30 +342,34 @@ export function pairGames(
     const missing = (side: "A" | "B", crashed: Map<string, CrashedGame>) =>
       `${crashed.has(id) ? "crashed" : "not"} in ${side}`;
     let reason: string;
+    let kind: UnpairedKind;
     if (x !== undefined && y !== undefined) {
+      const [wx, wy] = [invalid(x), invalid(y)];
       if (x.game.map !== y.game.map) {
+        kind = "maps";
         reason = `maps differ: ${x.game.map} in A, ${y.game.map} in B`;
       } else if (failed(x) || failed(y)) {
+        kind = "errored";
         reason = `errored in ${failed(x) ? (failed(y) ? "both" : "A") : "B"}`;
-      } else if (invalidSeat(x).length > 0 || invalidSeat(y).length > 0) {
+      } else if (wx.length > 0 || wy.length > 0) {
+        kind = "invalid";
         reason = [
-          ...(invalidSeat(x).length > 0
-            ? [`${invalidSeat(x).join(", ")} in A`]
-            : []),
-          ...(invalidSeat(y).length > 0
-            ? [`${invalidSeat(y).join(", ")} in B`]
-            : []),
+          ...(wx.length > 0 ? [`${wx.join(", ")} in A`] : []),
+          ...(wy.length > 0 ? [`${wy.join(", ")} in B`] : []),
         ].join("; ");
       } else {
         pairs.push({ a: x, b: y });
         continue;
       }
     } else if (x === undefined && y === undefined) {
+      kind = "crashed";
       reason =
         aCrashed.has(id) && bCrashed.has(id)
           ? "crashed in both"
           : `${missing("A", aCrashed)}, ${missing("B", bCrashed)}`;
     } else {
+      const crashed = x === undefined ? aCrashed : bCrashed;
+      kind = crashed.has(id) ? "crashed" : "missing";
       reason =
         x === undefined ? missing("A", aCrashed) : missing("B", bCrashed);
     }
@@ -322,6 +378,7 @@ export function pairGames(
       gameID: id,
       game: g.game,
       map: g.map,
+      kind,
       reason,
       a: x?.game.index ?? aCrashed.get(id)?.index ?? null,
       b: y?.game.index ?? bCrashed.get(id)?.index ?? null,
@@ -332,6 +389,62 @@ export function pairGames(
   pairs.sort((p, q) => order(p.a.game, q.a.game));
   unpaired.sort(order);
   return { pairs, unpaired, duplicates };
+}
+
+// ── Map kinds ────────────────────────────────────────────────────────────
+
+/** A map with less than this share of its tiles land is a water map: 20 of
+ *  the 127 maps with nations (docs/11-roadmap.md H9). */
+export const WATER_LAND_SHARE = 0.25;
+/** A game with this many nations or fewer is a few-nation game: the duels
+ *  and the 3- and 4-nation maps, 7 of the 127. */
+export const FEW_NATIONS = 4;
+/** The M4 plan's split of every A/B (plan.md §3), in report order. */
+export const MAP_KINDS = ["land", "water", "few-nation"] as const;
+
+const MAPS_DIR = path.join(ROOT, "resources", "maps");
+const landShares = new Map<string, number | null>();
+
+/** The share of a map's tiles that are land, from its manifest under
+ *  `mapsDir`; null for a map without one. */
+export function mapLandShare(map: string, mapsDir = MAPS_DIR): number | null {
+  const key = `${mapsDir}\n${map}`;
+  const known = landShares.get(key);
+  if (known !== undefined) return known;
+  const share = (() => {
+    try {
+      const file = path.join(
+        mapsDir,
+        NodeMapLoader.dirName(map as GameMapType),
+        "manifest.json",
+      );
+      const m = (JSON.parse(fs.readFileSync(file, "utf8")) as MapManifest).map;
+      return m.num_land_tiles / (m.width * m.height);
+    } catch {
+      return null;
+    }
+  })();
+  landShares.set(key, share);
+  return share;
+}
+
+/**
+ * A game's kinds, as the M4 plan splits every A/B: "water" on a map under
+ * WATER_LAND_SHARE land, "few-nation" with FEW_NATIONS nations or fewer in
+ * the game, "land" for neither. A game can be water and few-nation (Four
+ * Islands); "unknown" for a map without a manifest that is not few-nation.
+ */
+export function mapKinds(
+  map: string,
+  nations: number | null,
+  mapsDir = MAPS_DIR,
+): string[] {
+  const share = mapLandShare(map, mapsDir);
+  const kinds: string[] = [];
+  if (share !== null && share < WATER_LAND_SHARE) kinds.push("water");
+  if (nations !== null && nations <= FEW_NATIONS) kinds.push("few-nation");
+  if (kinds.length === 0) kinds.push(share === null ? "unknown" : "land");
+  return kinds;
 }
 
 // ── The report ───────────────────────────────────────────────────────────
@@ -354,7 +467,9 @@ export interface Outcome {
   land: { at10: number | null; at15: number | null; at20: number | null };
   /** Won; out before minute 20; lost before it, any cause (a nation's win
    *  counts); top 3 by land at minute 10; a nation held half the land, or
-   *  won, before minute 20. Null where the game cannot tell. */
+   *  won, before minute 20 (unknown in a game the arena stopped earlier,
+   *  every seat out); the seat had agent errors. Null where the game
+   *  cannot tell. */
   events: {
     win: boolean;
     outBefore20: boolean | null;
@@ -362,17 +477,23 @@ export interface Outcome {
     top3At10: boolean | null;
     nationHalfBefore20: boolean | null;
     nationWonBefore20: boolean | null;
+    agentErrors: boolean;
   };
   /** The M4 plan's per-game metrics (DIAGNOSTICS by key), null where the
-   *  game does not record what they need. */
+   *  game does not record what they need. A price is troops ÷ tiles (null
+   *  over no tiles), with its [troops, tiles] in `ratios`. */
   diagnostics: Record<string, number | null>;
+  ratios: Record<string, [number, number] | null>;
 }
 
 export interface PairRow {
   game: number;
   gameID: string;
   map: string;
+  /** The map list's categories (featured, world, asia, ...). */
   categories: string[];
+  /** The M4 plan's kinds (mapKinds): land, water, few-nation. */
+  kinds: string[];
   /** The two sides played the same game: equal timelines and outcomes. */
   identical: boolean;
   a: Outcome;
@@ -386,6 +507,10 @@ export interface PairRow {
 export interface DeltaStats {
   /** Pairs where both sides know the metric. */
   pairs: number;
+  /** A price (pairedRatioStats): meanA and meanB are pooled, Σ troops ÷
+   *  Σ tiles over the pairs, meanDelta their difference and ci95 its
+   *  bootstrap over the pairs. The median and the counts stay per game. */
+  pooled: boolean;
   meanA: number;
   meanB: number;
   meanDelta: number;
@@ -415,7 +540,8 @@ export interface EventStats {
   signTestP: number;
 }
 
-/** Paired results over a subset of games: a map category or one map. */
+/** Paired results over a subset of games: a map kind, a map category or
+ *  one map. */
 export interface Breakdown {
   name: string;
   games: number;
@@ -424,9 +550,14 @@ export interface Breakdown {
   progressA: number;
   progressB: number;
   meanDelta: number;
+  /** Bootstrap 95% interval of meanDelta; null for one map's row. */
+  ci95: [number, number] | null;
+  /** Δprogress beyond PROGRESS_TOLERANCE either way, as the headline
+   *  counts them, and the sign test on those. */
   better: number;
   worse: number;
   ties: number;
+  signTestP: number;
 }
 
 export interface SideInfo {
@@ -456,6 +587,9 @@ export interface CompareReport {
   /** The checkout the report was made in. */
   head: { commit: string | null; dirty: boolean | null };
   warnings: string[];
+  /** Seats with agent errors were left out (--drop-errors); by default
+   *  they stay in the pairs. */
+  dropErrors: boolean;
   paired: number;
   /** Paired games the two sides played identically (PairRow.identical). */
   identical: number;
@@ -478,12 +612,15 @@ export interface CompareReport {
     top3At10: EventStats;
     nationHalfBefore20: EventStats;
     nationWonBefore20: EventStats;
+    agentErrors: EventStats;
   };
   /** The M4 plan's metrics, paired, in DIAGNOSTICS order. */
   diagnostics: { key: string; name: string; stats: DeltaStats }[];
   bootstrap: { resamples: number; seed: number };
   /** The arena summary of each side over the paired games only. */
   milestones: { a: EntrantSummary; b: EntrantSummary };
+  /** By the M4 plan's kinds (MAP_KINDS order). */
+  kinds: Breakdown[];
   categories: Breakdown[];
   /** B's worst first. */
   maps: Breakdown[];
@@ -498,20 +635,35 @@ export interface Side {
 }
 
 /** Differences within this much count as ties: 0.1 points of land, as the
- *  M4 plan's paired tables (paired19.py) count them. */
+ *  M4 plan's paired tables (paired19.py) count them. Every land and
+ *  progress count of the report uses it (the breakdowns and the worst
+ *  games too); reports before it counted only exact zeros as ties. */
 export const SHARE_TOLERANCE = 0.001;
 /** The same for progress, which is peak land ÷ 0.8 short of a win. */
 export const PROGRESS_TOLERANCE = SHARE_TOLERANCE / 0.8;
 
-/** A per-game metric of the M4 plan (plan.md §2.10), paired in the report. */
-export interface Diagnostic {
+interface DiagnosticBase {
   key: string;
   name: string;
   /** How a value and a difference show in compare.md. */
   show: (v: number) => string;
   diff: (v: number) => string;
-  value: (g: SideGame, flow: SeatFlow) => number | null;
 }
+
+/** A per-game metric of the M4 plan (plan.md §2.10), paired in the report:
+ *  a value, or a price's troops and tiles, which pair pooled
+ *  (pairedRatioStats). */
+export type Diagnostic = DiagnosticBase &
+  (
+    | {
+        value: (g: SideGame, flow: SeatFlow) => number | null;
+        ratio?: undefined;
+      }
+    | {
+        ratio: (g: SideGame, flow: SeatFlow) => [number, number] | null;
+        value?: undefined;
+      }
+  );
 
 const fixed = (digits: number) => (v: number) => v.toFixed(digits);
 const signedFixed = (digits: number) => (v: number) => signed(v, digits);
@@ -519,11 +671,12 @@ const signedAmount = (v: number) =>
   `${v < 0 ? "-" : "+"}${amount(Math.abs(v))}`;
 const points = (v: number) => `${signed(v * 100, 1)} pp`;
 
-/** A seat's searches as its log records them: none (0) for a log without
- *  one, null without a log. */
+/** A seat's searches as its log records them: none (null) for a log without
+ *  one; undefined (unknown) without a log, or for one AgentHost cut at
+ *  LOG_LINES_KEPT, whose later lines are lost. */
 function searchOf(g: SideGame) {
   const log = logStatsOf(g.game.seats[g.seat]);
-  return log === undefined ? undefined : log.search;
+  return log === undefined || log.truncated ? undefined : log.search;
 }
 
 export const DIAGNOSTICS: readonly Diagnostic[] = [
@@ -543,10 +696,13 @@ export const DIAGNOSTICS: readonly Diagnostic[] = [
   },
   {
     key: "allInPrice",
-    name: `all-in price m${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]}`,
+    name: `all-in price m${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]} (pooled)`,
     show: fixed(0),
     diff: signedFixed(0),
-    value: (_, f) => f.allInPrice,
+    ratio: (_, f) =>
+      f.allInCost === null || f.allInTiles === null
+        ? null
+        : [f.allInCost, f.allInTiles],
   },
   {
     key: "strikes",
@@ -558,11 +714,13 @@ export const DIAGNOSTICS: readonly Diagnostic[] = [
   },
   {
     key: "strikePrice",
-    name: "strike price",
+    name: "strike price (pooled)",
     show: fixed(1),
     diff: signedFixed(1),
-    value: (_, f) =>
-      f.strikeTilesGained > 0 ? f.strikeTroopsLost / f.strikeTilesGained : null,
+    ratio: (g, f) =>
+      g.game.seats[g.seat].attacks === undefined || f.strikesEnded === 0
+        ? null
+        : [f.strikeTroopsLost, f.strikeTilesGained],
   },
   {
     key: "pileOnsPerStrike",
@@ -670,9 +828,29 @@ export const DIAGNOSTICS: readonly Diagnostic[] = [
   },
 ];
 
+/** A price from its parts: troops ÷ tiles; the highest (Infinity) for
+ *  troops lost and no tile gained; null for neither. */
+export function priceOf(parts: readonly [number, number]): number | null {
+  const [troops, tiles] = parts;
+  if (tiles > 0) return troops / tiles;
+  return troops > 0 ? Infinity : null;
+}
+
 function outcome(g: SideGame, capMinutes: number | null): Outcome {
   const s = g.game.seats[g.seat];
   const flow = seatFlow(g.game, g.seat);
+  const diagnostics: Record<string, number | null> = {};
+  const ratios: Record<string, [number, number] | null> = {};
+  for (const d of DIAGNOSTICS) {
+    if (d.ratio !== undefined) {
+      const parts = d.ratio(g, flow);
+      ratios[d.key] = parts;
+      diagnostics[d.key] =
+        parts === null || parts[1] <= 0 ? null : parts[0] / parts[1];
+    } else {
+      diagnostics[d.key] = d.value(g, flow);
+    }
+  }
   return {
     index: g.game.index,
     result: s.result,
@@ -696,12 +874,12 @@ function outcome(g: SideGame, capMinutes: number | null): Outcome {
       outBefore20: outBefore(g.game, g.seat, 20),
       lostBefore20: lostBefore(g.game, g.seat, 20),
       top3At10: top3At(g.game, g.seat, 10),
-      nationHalfBefore20: nationBefore(g.game, g.seat, 0.5, 20),
-      nationWonBefore20: nationBefore(g.game, g.seat, 0.8, 20),
+      nationHalfBefore20: nationBefore(g.game, 0.5, 20),
+      nationWonBefore20: nationBefore(g.game, 0.8, 20),
+      agentErrors: s.stats.errors > 0,
     },
-    diagnostics: Object.fromEntries(
-      DIAGNOSTICS.map((d) => [d.key, d.value(g, flow)]),
-    ),
+    diagnostics,
+    ratios,
   };
 }
 
@@ -734,11 +912,70 @@ export function pairedStats(
   const worse = deltas.filter((d) => d < -tolerance).length;
   return {
     pairs: known.length,
+    pooled: false,
     meanA: mean(known.map(([a]) => a)),
     meanB: mean(known.map(([, b]) => b)),
     meanDelta: mean(deltas),
     medianDelta: median(deltas),
     ci95: bootstrapMeanCI(deltas),
+    better,
+    worse,
+    ties: deltas.length - better - worse,
+    signTestP: signTest(better, worse),
+  };
+}
+
+type Parts = readonly [number, number];
+
+/**
+ * Paired statistics of a price, given each side's [troops, tiles] a game,
+ * over the pairs where both sides have a price (priceOf). A mean of
+ * per-game ratios is ruled by the games with the fewest tiles, so A and B
+ * are pooled, Σ troops ÷ Σ tiles, B − A is their difference and its
+ * interval a bootstrap over the pairs. The median difference, the
+ * higher/lower/tie counts and the sign test compare the games' own prices,
+ * a series of strikes that took no land the highest.
+ */
+export function pairedRatioStats(
+  values: readonly (readonly [Parts | null, Parts | null])[],
+): DeltaStats {
+  const known = values.filter(
+    (v): v is readonly [Parts, Parts] =>
+      v[0] !== null &&
+      v[1] !== null &&
+      priceOf(v[0]) !== null &&
+      priceOf(v[1]) !== null,
+  );
+  const pooled = (side: 0 | 1, pick?: Uint32Array): number => {
+    let troops = 0;
+    let tiles = 0;
+    const add = (i: number) => {
+      troops += known[i][side][0];
+      tiles += known[i][side][1];
+    };
+    if (pick === undefined) known.forEach((_, i) => add(i));
+    else for (const i of pick) add(i);
+    return tiles > 0 ? troops / tiles : troops > 0 ? Infinity : NaN;
+  };
+  const deltas = known.map(([a, b]) => {
+    const [pa, pb] = [priceOf(a)!, priceOf(b)!];
+    return pa === pb ? 0 : pb - pa;
+  });
+  const better = deltas.filter((d) => d > 0).length;
+  const worse = deltas.filter((d) => d < 0).length;
+  const [meanA, meanB] = [pooled(0), pooled(1)];
+  const mid = median(deltas);
+  return {
+    pairs: known.length,
+    pooled: true,
+    meanA,
+    meanB,
+    meanDelta: meanB - meanA,
+    medianDelta: mid === null || Number.isNaN(mid) ? null : mid,
+    ci95: bootstrapCI(
+      known.length,
+      (pick) => pooled(1, pick) - pooled(0, pick),
+    ),
     better,
     worse,
     ties: deltas.length - better - worse,
@@ -776,8 +1013,16 @@ function deltaStats(
   );
 }
 
-function breakdown(name: string, rows: readonly PairRow[]): Breakdown {
+/** Paired progress over `rows`, ties within PROGRESS_TOLERANCE as in the
+ *  headline; with `interval`, the bootstrap interval of the mean Δ. */
+function breakdown(
+  name: string,
+  rows: readonly PairRow[],
+  interval: boolean,
+): Breakdown {
   const d = rows.map((r) => r.delta.progress);
+  const better = d.filter((x) => x > PROGRESS_TOLERANCE).length;
+  const worse = d.filter((x) => x < -PROGRESS_TOLERANCE).length;
   return {
     name,
     games: rows.length,
@@ -786,9 +1031,11 @@ function breakdown(name: string, rows: readonly PairRow[]): Breakdown {
     progressA: mean(rows.map((r) => r.a.progress)),
     progressB: mean(rows.map((r) => r.b.progress)),
     meanDelta: mean(d),
-    better: d.filter((x) => x > 0).length,
-    worse: d.filter((x) => x < 0).length,
-    ties: d.filter((x) => x === 0).length,
+    ci95: interval ? bootstrapMeanCI(d) : null,
+    better,
+    worse,
+    ties: d.length - better - worse,
+    signTestP: signTest(better, worse),
   };
 }
 
@@ -872,7 +1119,8 @@ function codeWarnings(
 
 /**
  * The paired report of B against A. `head` is the checkout's provenance
- * (default: this repository's), `root` where git and rerun paths start.
+ * (default: this repository's), `root` where git and rerun paths start;
+ * `dropErrors` leaves out the games where a seat had agent errors.
  */
 export function compareRuns(
   a: Side,
@@ -880,10 +1128,12 @@ export function compareRuns(
   opts: {
     head?: CompareReport["head"];
     root?: string;
+    dropErrors?: boolean;
   } = {},
 ): CompareReport {
   const root = opts.root ?? ROOT;
   const head = opts.head ?? provenance(root);
+  const dropErrors = opts.dropErrors ?? false;
   const info = (s: Side): SideInfo => ({
     dir: s.run.dir,
     label: entrantLabels(s.run)[s.entrant] ?? `entrant ${s.entrant}`,
@@ -903,6 +1153,7 @@ export function compareRuns(
     sideGames(b.run, b.entrant),
     sideCrashes(a.run, a.entrant),
     sideCrashes(b.run, b.entrant),
+    { dropErrors },
   );
   const capA = a.run.config?.maxMinutes ?? null;
   const capB = b.run.config?.maxMinutes ?? null;
@@ -918,6 +1169,7 @@ export function compareRuns(
           "unknown",
         ]),
       ],
+      kinds: mapKinds(x.game.map, x.game.nationsInGame ?? null),
       identical: identicalGames(x, y),
       a: oa,
       b: ob,
@@ -955,16 +1207,16 @@ export function compareRuns(
       );
     }
   }
-  const stopped = pairing.unpaired.flatMap((u) => {
-    const why = (s: Side, index: number | null, name: string) => {
-      const e = s.run.games.find((g) => g.index === index)?.error ?? null;
-      return e === null ? [] : [`in ${name} ${e.split("\n")[0]}`];
-    };
-    const sides = [...why(a, u.a, "A"), ...why(b, u.b, "B")];
-    return sides.length === 0
-      ? []
-      : [`game ${u.game} (${u.map}) ${sides.join(", ")}`];
-  });
+  const stopped = pairing.unpaired
+    .filter((u) => u.kind === "errored")
+    .map((u) => {
+      const why = (s: Side, index: number | null, name: string) => {
+        const e = s.run.games.find((g) => g.index === index)?.error ?? null;
+        return e === null ? [] : [`in ${name} ${e.split("\n")[0]}`];
+      };
+      const sides = [...why(a, u.a, "A"), ...why(b, u.b, "B")];
+      return `game ${u.game} (${u.map}) ${sides.join(", ")}`;
+    });
   if (stopped.length > 0) {
     warnings.push(
       `${stopped.length} game(s) stopped early on an error and are left out ` +
@@ -972,30 +1224,46 @@ export function compareRuns(
         `${stopped.join("; ")}.`,
     );
   }
-  const invalid = pairing.unpaired.flatMap((u) => {
-    const seatOf = (s: Side, index: number | null) =>
-      sideGames(s.run, s.entrant).find((g) => g.game.index === index);
-    const sides = (
-      [
-        ["A", seatOf(a, u.a)],
-        ["B", seatOf(b, u.b)],
-      ] as const
-    ).flatMap(([name, g]) =>
-      g === undefined || (g.game.error ?? null) !== null
-        ? []
-        : invalidSeat(g).length === 0
-          ? []
-          : [`${invalidSeat(g).join(", ")} in ${name}`],
-    );
-    return sides.length === 0
-      ? []
-      : [`game ${u.game} (${u.map}) ${sides.join(", ")}`];
-  });
+  const invalid = pairing.unpaired
+    .filter((u) => u.kind === "invalid")
+    .map((u) => `game ${u.game} (${u.map}) ${u.reason}`);
   if (invalid.length > 0) {
     warnings.push(
       `${invalid.length} game(s) are left out of the pairs because a seat ` +
-        `had agent errors or never spawned: ${invalid.join("; ")}.`,
+        `never spawned${dropErrors ? " or had agent errors (--drop-errors)" : ""}: ` +
+        `${invalid.join("; ")}.`,
     );
+  }
+  const seatOf = (g: SideGame) => g.game.seats[g.seat];
+  for (const [name, side] of [
+    ["A", "a"],
+    ["B", "b"],
+  ] as const) {
+    const hit = pairing.pairs.map((p) => p[side]);
+    const erred = hit.filter((g) => seatOf(g).stats.errors > 0);
+    if (erred.length > 0) {
+      const total = erred.reduce((n, g) => n + seatOf(g).stats.errors, 0);
+      const first = erred[0];
+      const text = (seatOf(first).stats.firstErrors ?? [])[0]?.split("\n")[0];
+      warnings.push(
+        `${name}'s seat had agent errors in ${erred.length} paired game(s), ` +
+          `${total} in all. They stay in the pairs as its own failures ` +
+          `(--drop-errors leaves them out)` +
+          (text === undefined
+            ? "."
+            : `; the first, game ${first.game.game} (${first.game.map}): ${text}.`),
+      );
+    }
+    const cut = hit.filter((g) => logStatsOf(seatOf(g))?.truncated === true);
+    if (cut.length > 0) {
+      warnings.push(
+        `${name}'s seat log reached AgentHost's ${LOG_LINES_KEPT}-line cap ` +
+          `in ${cut.length} paired game(s): the lines after it were not ` +
+          `kept, so its searches, acts, gain, R and checkpoint mismatches ` +
+          `there are unknown (a mismatch past the cap would not show), and ` +
+          `so are pile-ons read from \`def why\` lines.`,
+      );
+    }
   }
   if (pairing.duplicates.length > 0) {
     warnings.push(
@@ -1018,19 +1286,40 @@ export function compareRuns(
     const i = (mapCategoryOrder as readonly string[]).indexOf(c);
     return i < 0 ? mapCategoryOrder.length : i;
   };
-  const categories = [...new Set(rows.flatMap((r) => r.categories))]
-    .sort((x, y) => categoryOrder(x) - categoryOrder(y))
-    .map((c) =>
-      breakdown(
-        c,
-        rows.filter((r) => r.categories.includes(c)),
-      ),
-    );
+  const kindOrder = (k: string) => {
+    const i = (MAP_KINDS as readonly string[]).indexOf(k);
+    return i < 0 ? MAP_KINDS.length : i;
+  };
+  const split = (
+    names: readonly string[],
+    rank: (n: string) => number,
+    of: (r: PairRow) => readonly string[],
+  ) =>
+    [...new Set(names)]
+      .sort((x, y) => rank(x) - rank(y))
+      .map((n) =>
+        breakdown(
+          n,
+          rows.filter((r) => of(r).includes(n)),
+          true,
+        ),
+      );
+  const kinds = split(
+    rows.flatMap((r) => r.kinds),
+    kindOrder,
+    (r) => r.kinds,
+  );
+  const categories = split(
+    rows.flatMap((r) => r.categories),
+    categoryOrder,
+    (r) => r.categories,
+  );
   const maps = [...new Set(rows.map((r) => r.map))]
     .map((m) =>
       breakdown(
         m,
         rows.filter((r) => r.map === m),
+        false,
       ),
     )
     .sort(
@@ -1039,7 +1328,7 @@ export function compareRuns(
         (x.name < y.name ? -1 : x.name > y.name ? 1 : 0),
     );
   const worst = rows
-    .filter((r) => r.delta.progress < 0)
+    .filter((r) => r.delta.progress < -PROGRESS_TOLERANCE)
     .sort(
       (x, y) =>
         x.delta.progress - y.delta.progress ||
@@ -1068,6 +1357,7 @@ export function compareRuns(
     b: bi,
     head,
     warnings,
+    dropErrors,
     paired: rows.length,
     identical: rows.filter((r) => r.identical).length,
     wins: {
@@ -1087,19 +1377,26 @@ export function compareRuns(
       top3At10: event("top3At10"),
       nationHalfBefore20: event("nationHalfBefore20"),
       nationWonBefore20: event("nationWonBefore20"),
+      agentErrors: event("agentErrors"),
     },
     diagnostics: DIAGNOSTICS.map((d) => ({
       key: d.key,
       name: d.name,
-      stats: pairedStats(
-        rows.map((r) => [r.a.diagnostics[d.key], r.b.diagnostics[d.key]]),
-      ),
+      stats:
+        d.ratio !== undefined
+          ? pairedRatioStats(
+              rows.map((r) => [r.a.ratios[d.key], r.b.ratios[d.key]]),
+            )
+          : pairedStats(
+              rows.map((r) => [r.a.diagnostics[d.key], r.b.diagnostics[d.key]]),
+            ),
     })),
     bootstrap: { resamples: BOOTSTRAP_RESAMPLES, seed: BOOTSTRAP_SEED },
     milestones: {
       a: summarize(`A: ${ai.label}`, seatsOf("a"), 0),
       b: summarize(`B: ${bi.label}`, seatsOf("b"), 0),
     },
+    kinds,
     categories,
     maps,
     worst,
@@ -1115,6 +1412,16 @@ function signed(v: number, digits: number): string {
   const r = Number(v.toFixed(digits));
   return `${r < 0 ? "-" : "+"}${Math.abs(r).toFixed(digits)}`;
 }
+
+/** `f(v)` for a finite v; ∞ for a price over no tiles, "–" for none. */
+const finite =
+  (f: (v: number) => string, sign = false) =>
+  (v: number) =>
+    Number.isFinite(v)
+      ? f(v)
+      : Number.isNaN(v)
+        ? "–"
+        : `${v < 0 ? "-" : sign ? "+" : ""}∞`;
 
 const pValue = (p: number) =>
   p === 1 ? "1" : p < 0.0001 ? "< 0.0001" : p.toFixed(4);
@@ -1158,33 +1465,46 @@ function verdict(ci: [number, number] | null): string {
   return "no difference shown (the interval includes 0)";
 }
 
+/** How compare.md names each kind of unpaired game, in its order. */
+const UNPAIRED_NAMES: [UnpairedKind, string][] = [
+  ["crashed", "crashed"],
+  ["errored", "errored"],
+  ["invalid", "invalid seat"],
+  ["missing", "missing on a side"],
+  ["maps", "maps differ"],
+];
+
 export function compareMarkdown(r: CompareReport, root = ROOT): string {
   const side = (name: string, s: SideInfo) =>
     `- **${name}**: ${s.label} in ${shownDir(s.dir, root)} ` +
     `(${s.games} game(s)${s.crashed > 0 ? `, ${s.crashed} crashed` : ""}; ` +
     `seed ${s.seed ?? "?"}${s.suite === null ? "" : `, suite ${s.suite}`}; ` +
     `${s.commit === null ? "commit unknown" : `${short(s.commit)}${s.dirty ? " with local changes" : ""}`})`;
-  const ci = (d: DeltaStats, f: (v: number) => string) =>
-    d.ci95 === null ? "–" : `[${f(d.ci95[0])}, ${f(d.ci95[1])}]`;
+  const ci = (
+    d: { ci95: [number, number] | null },
+    f: (v: number) => string,
+  ) => (d.ci95 === null ? "–" : `[${f(d.ci95[0])}, ${f(d.ci95[1])}]`);
   const metric = (
     name: string,
     d: DeltaStats,
     each: (v: number) => string,
     diff: (v: number) => string,
-  ) =>
-    d.pairs === 0
+  ) => {
+    const [e, df] = [finite(each), finite(diff, true)];
+    return d.pairs === 0
       ? [name, "–", "–", "–", "–", "–", "–", "–", "0"]
       : [
           name,
-          each(d.meanA),
-          each(d.meanB),
-          diff(d.meanDelta),
-          ci(d, diff),
-          d.medianDelta === null ? "–" : diff(d.medianDelta),
+          e(d.meanA),
+          e(d.meanB),
+          df(d.meanDelta),
+          ci(d, df),
+          d.medianDelta === null ? "–" : df(d.medianDelta),
           `${d.better} / ${d.worse} / ${d.ties}`,
           pValue(d.signTestP),
           String(d.pairs),
         ];
+  };
   const event = (name: string, e: EventStats) => [
     name,
     String(e.a),
@@ -1218,7 +1538,9 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
       prog(x.progressA),
       prog(x.progressB),
       dProg(x.meanDelta),
+      ci(x, dProg),
       `${x.better} / ${x.worse} / ${x.ties}`,
+      pValue(x.signTestP),
     ]);
   const breakdownHeader = [
     "",
@@ -1228,8 +1550,15 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     "progress A",
     "progress B",
     "Δ",
+    "95% CI",
     "B better / worse / tie",
+    "sign test p",
   ];
+  const unpaired = UNPAIRED_NAMES.flatMap(([kind, name]) => {
+    const n = r.unpaired.filter((u) => u.kind === kind).length;
+    return n === 0 ? [] : [`${n} ${name}`];
+  });
+  const errors = r.events.agentErrors;
 
   const out: string[] = [
     `# ${r.b.label} (B) against ${r.a.label} (A)`,
@@ -1244,7 +1573,7 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
   }
   out.push(
     `**${r.paired} paired game${r.paired === 1 ? "" : "s"}** (A has ${r.a.games}, B ${r.b.games}; ` +
-      `${r.unpaired.length} unpaired). ` +
+      `${r.unpaired.length} unpaired${unpaired.length > 0 ? `: ${unpaired.join(", ")}` : ""}). ` +
       `Δprogress (B − A) ${dProg(r.progress.meanDelta)}, 95% CI ${ci(r.progress, dProg)}: ` +
       `${verdict(r.progress.ci95)}.` +
       (r.paired > 0 && r.paired < FEW_PAIRS
@@ -1256,6 +1585,11 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     "",
     `Identical games: ${r.identical} of ${r.paired} (the same result and ` +
       `timeline on both sides).`,
+    "",
+    r.dropErrors
+      ? `Agent errors: games where a seat had them are left out (--drop-errors).`
+      : `Agent errors: in ${errors.a} of A's paired games and ${errors.b} of ` +
+          `B's; they stay in the pairs (--drop-errors leaves them out).`,
     "",
     table(pairedHeader("B better / worse / tie"), [
       metric("progress", r.progress, prog, dProg),
@@ -1272,8 +1606,9 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
       `the final share for a game that ended earlier and 0 once out; ` +
       `survival counts a seat never eliminated as surviving the game, a ` +
       `winner the cap. Better and worse: B above or below A by more than ` +
-      `${(SHARE_TOLERANCE * 100).toFixed(1)} points of land (progress likewise); ` +
-      `the sign test is the exact two-sided binomial on those discordant pairs.`,
+      `${(SHARE_TOLERANCE * 100).toFixed(1)} points of land (progress likewise), ` +
+      `here and in the breakdowns below; the sign test is the exact ` +
+      `two-sided binomial on those discordant pairs.`,
     "",
     table(
       ["", "A", "B", "A only", "B only", "sign test p", "pairs"],
@@ -1283,11 +1618,14 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
         event("top 3 @10", r.events.top3At10),
         event("a nation ≥ 50% < 20 min", r.events.nationHalfBefore20),
         event("a nation won < 20 min", r.events.nationWonBefore20),
+        event("agent errors", r.events.agentErrors),
       ],
     ),
     "",
     `Counts of games. Lost before minute 20 counts a nation's win as a loss; ` +
-      `out before it only an elimination.`,
+      `out before it only an elimination. What the nations did is unknown ` +
+      `after a game the arena stopped with every seat out (no --play-out), ` +
+      `so such a pair counts only if a nation got there first.`,
     "",
     `## The M4 plan's metrics (paired games)`,
     "",
@@ -1307,14 +1645,28 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     `Means over the pairs where both sides record the metric. Flow over ` +
       `minutes ${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]} (Summary.ts seatFlow): ` +
       `utilization is regrowth ÷ peak regrowth, idle the share of samples ` +
-      `at ≥ 95% of the cap, the all-in price (regrowth − Δhome) ÷ Δtiles. ` +
-      `Strikes are land attacks on nations; a pile-on is a nation attack on ` +
-      `us within ${PILE_ON_TICKS} ticks after one. Searches, acts, gain and ` +
-      `R come from the agent's log.`,
+      `at ≥ 95% of the cap, the all-in price (regrowth − Δhome) ÷ Δtiles ` +
+      `for a seat that gained more than ${PRICE_MIN_TILES} net tiles. The ` +
+      `two prices are pooled: A and B are Σ troops ÷ Σ tiles over the ` +
+      `pairs, B − A their difference with a bootstrap over the pairs; the ` +
+      `median and the counts compare the games' own prices (strikes that ` +
+      `took no land the highest). Strikes are land attacks on nations; a ` +
+      `pile-on is a nation attack on our land (a boat's at its landing) ` +
+      `within ${PILE_ON_TICKS} ticks after one. Searches, acts, gain and R ` +
+      `come from the agent's log, unknown where AgentHost cut it.`,
     "",
     `## Milestones (paired games)`,
     "",
     summaryTable([r.milestones.a, r.milestones.b]),
+    "",
+    `## By map kind`,
+    "",
+    `The M4 plan's split: water, a map under ` +
+      `${(WATER_LAND_SHARE * 100).toFixed(0)}% land; few-nation, ` +
+      `${FEW_NATIONS} nations or fewer; land, the rest. A game can be water ` +
+      `and few-nation.`,
+    "",
+    table(breakdownHeader, breakdownRows(r.kinds)),
     "",
     `## By map category`,
     "",
@@ -1375,6 +1727,8 @@ directory can be given twice to compare two of its entrants.
 
   --entrant-a E   A's entrant, by label or index (needed if A_DIR has several)
   --entrant-b E   B's entrant, likewise
+  --drop-errors   Leave out the games where either seat had agent errors
+                  (by default they stay in, as that agent's own failures)
   --out DIR       Where to write compare.md and compare.json (default: B_DIR)
 `;
 
@@ -1384,6 +1738,7 @@ function main(): void {
   let entrantA: string | null = null;
   let entrantB: string | null = null;
   let out: string | null = null;
+  let dropErrors = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = () => {
@@ -1398,6 +1753,8 @@ function main(): void {
       entrantA = next();
     } else if (arg === "--entrant-b") {
       entrantB = next();
+    } else if (arg === "--drop-errors") {
+      dropErrors = true;
     } else if (arg === "--out") {
       out = path.resolve(next());
     } else if (arg.startsWith("--")) {
@@ -1418,7 +1775,7 @@ function main(): void {
     run: runB,
     entrant: selectEntrant(entrantLabels(runB), entrantB, "--entrant-b"),
   };
-  const report = compareRuns(a, b);
+  const report = compareRuns(a, b, { dropErrors });
   const md = compareMarkdown(report);
   const dir = out ?? runB.dir;
   fs.mkdirSync(dir, { recursive: true });

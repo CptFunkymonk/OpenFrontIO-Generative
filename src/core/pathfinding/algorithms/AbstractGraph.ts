@@ -140,10 +140,15 @@ export class AbstractGraph {
   }
 
   /**
-   * An independent copy of this built graph that reads `wc`, with an empty
-   * path cache: what AbstractGraphBuilder returns for the same water. Nodes,
-   * edges and clusters are copied, not shared. (The builder fills every
-   * array densely, by id and cluster key.)
+   * An independent copy of this graph that reads `wc` (a copy of this
+   * graph's components): nodes, edges and clusters in the same order, and
+   * the path cache with the same entries. Nothing is shared. (The builder
+   * fills every array densely, by id and cluster key.)
+   *
+   * The cache is copied because it is not always a pure function of the
+   * graph: after water is added and before the graph is rebuilt, a cached
+   * segment is the path from before the change, where a fresh search runs
+   * on the changed terrain.
    */
   cloneWith(wc: ConnectedComponents | null): AbstractGraph {
     const g = new AbstractGraph(
@@ -157,7 +162,12 @@ export class AbstractGraph {
     for (const c of this._clusters) {
       g._clusters.push({ ...c, nodeIds: c.nodeIds.slice() });
     }
-    g._initPathCache();
+    const cache = this._pathCache;
+    g._pathCache = new Array(cache.length);
+    for (let i = 0; i < cache.length; i++) {
+      const path = cache[i];
+      g._pathCache[i] = path ? path.slice() : null;
+    }
     if (wc !== null) g.setWaterComponents(wc);
     return g;
   }

@@ -1,3 +1,4 @@
+import { GOLD_POLICIES, GoldPolicyArm } from "../../lib/GoldPolicy";
 import { RaceFieldOptions } from "../../lib/RaceField";
 import { IntentClass, SchedulerOptions } from "../../lib/Scheduler";
 
@@ -1052,6 +1053,148 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  policy by ApexAgent): off, the policy never forks for a search. On
    *  without a LiveSearch, the policy throws at its first tick. */
   search: boolean;
+
+  // Package WP2, the SearchController (controllers/SearchController.ts,
+  // lib/search/; docs/14-m4-plan.md §2.3-2.6): from searchFrom on, at the
+  // triggers (or on a clock), fork the live game, roll the base and each
+  // candidate plan forward with an exact copy of the live policy, and play
+  // the plan whose value beats the base's by the margin. Off until an A/B
+  // adopts it. The act3 prototype is these defaults with
+  // {"searchClock":600,"searchR":0,"searchHBreak":[1200],
+  // "searchHBreakGated":0}; the plan's strong-target horizon and stack gate
+  // are {"searchHStrong":1200,"searchStackGate":true}.
+  /** "act": play the chosen plan. "plans": roll out and log, never act
+   *  (package WP4's log-only study). */
+  searchMode: string;
+  /** First live tick a search may run at. */
+  searchFrom: number;
+  /** 0: search at the triggers T1-T7 (lib/search/Triggers.ts). N > 0:
+   *  every N ticks from searchFrom, triggers off (act3's clock), and a
+   *  search runs even when no plan exists (its base feeds the checks). */
+  searchClock: number;
+  /** Candidate kinds, a comma list of strike, lapse, keep, break, ally,
+   *  boat (keep and boat: package WP3's generators). */
+  searchKinds: string;
+  /** Nations given strike, lapse or break candidates (act3 counts an
+   *  expiring ally with both a lapse and a break twice). */
+  searchK: number;
+  /** Contact pairs for a nation to count as bordering. */
+  searchMinContact: number;
+  /** Purse shares of the strikes and breaks (purse.available("strike") at
+   *  the send). */
+  searchFracs: number[];
+  /** Order the strikes by the stack gate: a stack below the target's
+   *  troops plus its attacks on us (minimumStack(T, answer, inc, 1)) goes
+   *  after every other plan, so the cut to searchMaxCands drops it first. */
+  searchStackGate: boolean;
+  /** Most candidates besides the base (round 1). */
+  searchMaxCands: number;
+  /** Round 1's horizon (ticks after the fork). */
+  searchH1: number;
+  /** Round 1 drops a plan more than this share below the base's tiles. */
+  searchPrune: number;
+  /** A plan is judged this many ticks after its last send ... */
+  searchH: number;
+  /** ... or this many when its target holds at least searchStrongShare of
+   *  our home troops at the send (= searchH: off). */
+  searchHStrong: number;
+  /** The strong target's troops as a share of our home troops. */
+  searchStrongShare: number;
+  /** The break round's steps (ticks after the fork): a break goes on to
+   *  the next step only while it leads the base by the margin; it is
+   *  judged at the last. */
+  searchHBreak: number[];
+  /** A break still leading at its last step goes on to this horizon when
+   *  the danger gate fires (an early alliance end in our traitor window,
+   *  or an undeterrable unallied neighbour the base world does not face);
+   *  0 = off. */
+  searchHBreakGated: number;
+  /** Round 2's finalists (non-break plans). */
+  searchKeepFinalists: number;
+  /** Act only if V beats the base's by max(searchMargin·tiles,
+   *  searchMarginAbs) ... */
+  searchMargin: number;
+  /** ... in tiles (V's unit). */
+  searchMarginAbs: number;
+  /** Drop a plan whose tiles fall more than this share below the base's
+   *  at a common checkpoint. */
+  searchDip: number;
+  /** Value V = tiles + β·(home + out)/c̄ − α·inc/c̄: c̄ (troops per
+   *  tile) ... */
+  searchCbar: number;
+  /** ... β, the weight of our home and outgoing troops ... */
+  searchBeta: number;
+  /** ... and α, of the nation attacks' troops on us. */
+  searchAlpha: number;
+  /** λ_now: the weight of the danger now at the horizon (package WP4
+   *  fits it; nonzero needs its DangerModel) ... */
+  searchDangerNow: number;
+  /** ... λ_cap: of the danger with both sides at their caps. */
+  searchDangerCap: number;
+  /** κ: a plan loses κ·(the top nation's tiles − the base's) at its
+   *  horizon. */
+  searchRival: number;
+  /** The share factor L0/Lh (land net of fallout) on V's tiles, for our
+   *  own bombs (M5). */
+  searchShare: boolean;
+  /** The budget: Σ search cost ≤ searchR·(t − searchFrom) + 3,000
+   *  live-tick equivalents (φ per fork from lib/search/phi.json, plus the
+   *  ticks advanced); 0 = no cap. */
+  searchR: number;
+  /** "restore": ctx.fork() for every rollout. "clone": one ctx.fork() per
+   *  search, and its structural clones (GameFork.source) for the rollouts;
+   *  the same games, several times cheaper forks. */
+  searchFork: string;
+  /** T1: a bordering ally expiring within this many ticks (and before the
+   *  web asks its extension); a lapse candidate needs as few left (498:
+   *  act3's, whose lapse struck within its first 600 ticks less 100). */
+  searchLapseLead: number;
+  /** T2: a search this many ticks after an act. */
+  searchChain: number;
+  /** T3: every this many ticks in stall. */
+  searchStallEvery: number;
+  /** T7: at least one search this often. */
+  searchFloorTicks: number;
+  /** T4: a nation attack on us of at least this share of our home troops. */
+  searchAttackMin: number;
+  /** Least ticks between two searches at the triggers. */
+  searchMinGap: number;
+  /** A break's foe-mark variant: no re-alliance with the broken ally for
+   *  900 ticks (the web re-allies broken nations). */
+  searchBreakFoe: boolean;
+
+  // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
+  // 1-2; lib/GoldPolicy.ts, EconomyController.planCity): when idle gold
+  // buys City levels. Pinned by tests/agent/mechanics/NukeStructures: an
+  // Impossible nation aims atom and hydrogen bombs only at our structures
+  // (a lone SAM draws a salvo), and never at an ally.
+  /** The gold arm: from goldFrom on, when the structure policy (or
+   *  nukeModel) above refuses every site, the arm may still buy, under its
+   *  gate; it only adds buys. "exposure": today's rule alone. "model": no
+   *  level at a site that a firing nation (NukeModel: its ladder names us
+   *  on the rung that answers now, a finished silo, the gold for its bomb)
+   *  can aim at. "allied": no level while a silo owner holding the atom's
+   *  price is not our ally (allies never aim at us; our finished SAMs
+   *  exempt the sites they cover). "free": no nuke gate. The SAM hub
+   *  (nukeModel) still runs first. */
+  goldPolicy: GoldPolicyArm;
+  /** First tick of the gold arm: minute 4 (the opening's cities stay
+   *  today's). */
+  goldFrom: number;
+  /** Gold the arm keeps back: one SAM's price, and more than a web gift
+   *  costs in the midgame (webFriendGold, offered before the economy
+   *  decides). */
+  goldReserve: number;
+  /** The arm never crosses the MIRV steamroll line (NationMIRVBehavior:
+   *  more than 8 City levels and 1.15x the runner-up's) or the richest
+   *  nation's dense-target line (more than 1/75 structure levels a tile,
+   *  at least 5). */
+  goldGuard: boolean;
+  /** The arm's buys keep the City levels one hydrogen bomb can take (our
+   *  cities within twice its outer radius of each other) at most this
+   *  many; 0 = off. quick@20 Mississippi ("free" without it): one
+   *  hydrogen bomb took 15 levels of cities 64 tiles apart. */
+  goldHydroCap: number;
 }
 
 function deepFreeze<T>(o: T): T {
@@ -1343,6 +1486,53 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
 
   // Search: package WP1 (the hook).
   search: false,
+
+  // Search: package WP2, the SearchController (the WP2 screen's S1: the
+  // triggers, the budget, the stepwise break round and its gate; the
+  // strong-target horizon and the stack gate unscreened, off).
+  searchMode: "act",
+  searchFrom: 2400,
+  searchClock: 0,
+  searchKinds: "strike,lapse,keep,break,ally,boat",
+  searchK: 2,
+  searchMinContact: 8,
+  searchFracs: [0.5, 1],
+  searchStackGate: false,
+  searchMaxCands: 8,
+  searchH1: 150,
+  searchPrune: 0.03,
+  searchH: 600,
+  searchHStrong: 600,
+  searchStrongShare: 0.9,
+  searchHBreak: [600, 1200],
+  searchHBreakGated: 1800,
+  searchKeepFinalists: 2,
+  searchMargin: 0.01,
+  searchMarginAbs: 300,
+  searchDip: 0.2,
+  searchCbar: 150,
+  searchBeta: 0.5,
+  searchAlpha: 0.5,
+  searchDangerNow: 0,
+  searchDangerCap: 0,
+  searchRival: 0,
+  searchShare: false,
+  searchR: 2.5,
+  searchFork: "restore",
+  searchLapseLead: 498,
+  searchChain: 600,
+  searchStallEvery: 1200,
+  searchFloorTicks: 1800,
+  searchAttackMin: 0.1,
+  searchMinGap: 300,
+  searchBreakFoe: false,
+
+  // Package WP8 GOLD.
+  goldPolicy: "exposure",
+  goldFrom: 2400,
+  goldReserve: 1_500_000,
+  goldGuard: true,
+  goldHydroCap: 0,
 } satisfies ApexOptions);
 
 /**
@@ -1406,6 +1596,8 @@ function checked(key: keyof ApexOptions, v: unknown): unknown {
       return oneOf(key, v, SPAWN_MODES);
     case "structurePolicy":
       return oneOf(key, v, STRUCTURE_POLICIES);
+    case "goldPolicy":
+      return oneOf(key, v, GOLD_POLICIES);
     case "webRank":
       return oneOf(key, v, WEB_RANKS);
     case "spawnGrowth": {

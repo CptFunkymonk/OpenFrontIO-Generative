@@ -1,4 +1,5 @@
 import { Agent, AgentContext, AgentOutcome } from "../../Agent";
+import { SearchController } from "./controllers/SearchController";
 import { ApexOptions, parseApexOptions } from "./options";
 import { ApexPolicy } from "./policy";
 import { createState } from "./state";
@@ -14,7 +15,12 @@ export class ApexAgent implements Agent {
   private readonly policy: ApexPolicy;
 
   constructor(private readonly o: ApexOptions = parseApexOptions()) {
-    this.policy = new ApexPolicy(o, createState());
+    // Package WP2: the live search, when o.search is on.
+    this.policy = new ApexPolicy(
+      o,
+      createState(),
+      o.search ? new SearchController(o) : null,
+    );
   }
 
   get options(): Readonly<Record<string, unknown>> {

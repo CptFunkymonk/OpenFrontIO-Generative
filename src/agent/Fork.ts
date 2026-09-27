@@ -89,17 +89,28 @@ export class TerrainSource {
  * what is already in motion (attacks, boats, nukes, the AI's own decisions,
  * which are part of the simulation) plus the intents you give it.
  *
- * Two ways to make one, with identical results:
+ * Two ways to make one:
  * - `new GameFork(source, snapshot, terrain, ...)` restores snapshot bytes of
  *   `source` onto fresh maps from `terrain`;
  * - `GameFork.clone(source, ...)` and `ForkSource` copy `source` directly
  *   (a structural clone, src/core/snapshot/GameClone.ts), several times
  *   faster on large maps, with no TerrainSource.
+ * Both give the snapshot's game and stay identical to `source` stepped with
+ * the same intents; with water nukes only the clone does (it keeps the
+ * game's own water graph, GameClone.ts).
+ *
+ * Intents the agent sent before forking that have not run yet belong in the
+ * fork's steps too (`replay`); forks made from a fork (`source`, `clones`)
+ * carry those still queued.
  */
 export class GameFork {
   private lastError: ErrorUpdate | null = null;
   private turnNumber: number;
   private readonly runner: GameRunner;
+  /** Intents sent as this agent ahead of a coming step, by turn (replay). */
+  private readonly pending = new Map<number, AgentIntent[]>();
+  /** Steps run so far (GameFork.prototype.step). */
+  private stepsRun = 0;
 
   /** Restores `snapshot`, taken of `source` at its current tick. */
   constructor(
@@ -162,12 +173,32 @@ export class GameFork {
 
   /**
    * Forks of this fork as it is now, from one take of its state: a
-   * ForkSource (by structural clone) on the fork's game. The fork itself
-   * can then step on; forks are made before it does (ForkSource checks).
-   * Use it to branch a rollout, or to clone a fork that ctx.fork() made.
+   * ForkSource (by structural clone) on the fork's game, whose forks also
+   * get the intents still queued here (`replay`). The fork itself can then
+   * step on; forks are made before it does (ForkSource checks). Use it to
+   * branch a rollout, or to clone a fork that ctx.fork() made.
+   *
+   * Throws if `step` was replaced on this fork and it has not stepped yet:
+   * what the replacement would add to its first step (the way Lookahead.fork
+   * used to replay intents) cannot be carried into other forks; queue such
+   * intents with `replay`.
    */
   source(): ForkSource {
-    return new ForkSource(this.game, this.gameStart, this.clientID);
+    if (
+      this.stepsRun === 0 &&
+      Object.prototype.hasOwnProperty.call(this, "step")
+    ) {
+      throw new Error(
+        "GameFork.source: step() is replaced on this fork, which has not stepped yet; " +
+          "forks made from it would miss what the replacement adds (use GameFork.replay)",
+      );
+    }
+    return new ForkSource(
+      this.game,
+      this.gameStart,
+      this.clientID,
+      this.pending,
+    );
   }
 
   /** `n` independent forks of this fork as it is now (see `source`). */
@@ -176,15 +207,46 @@ export class GameFork {
   }
 
   /**
-   * Executes one tick. `mine` are sent as this agent; `others` must already
-   * carry their sender's clientID.
+   * Queues `intents`, sent as this agent, ahead of whatever the step that
+   * runs `turn` is given; by default the next step. For intents in flight
+   * at the fork: sent on the live tick the fork was made at (or earlier)
+   * and not run yet, which at the arena's latency of 1 run in the fork's
+   * first step. Forks made from this one carry what is still queued.
+   */
+  replay(intents: readonly AgentIntent[], turn = this.turnNumber): void {
+    if (turn < this.turnNumber) {
+      throw new Error(
+        `GameFork.replay: turn ${turn} already ran (next is ${this.turnNumber})`,
+      );
+    }
+    if (intents.length === 0) return;
+    const list = this.pending.get(turn) ?? [];
+    list.push(...intents);
+    this.pending.set(turn, list);
+  }
+
+  /** The intents queued by `replay`, by turn, in turn order. */
+  queued(): ReadonlyMap<number, readonly AgentIntent[]> {
+    return new Map(
+      [...this.pending].sort(([a], [b]) => a - b).map(([t, l]) => [t, [...l]]),
+    );
+  }
+
+  /**
+   * Executes one tick. `mine` are sent as this agent, after what `replay`
+   * queued for this turn; `others` must already carry their sender's
+   * clientID.
    */
   step(mine: AgentIntent[] = [], others: StampedIntent[] = []): void {
+    const turn = this.turnNumber++;
+    const queued = this.pending.get(turn) ?? [];
+    this.pending.delete(turn);
     const intents: StampedIntent[] = [
-      ...mine.map((i) => ({ ...i, clientID: this.clientID })),
+      ...[...queued, ...mine].map((i) => ({ ...i, clientID: this.clientID })),
       ...others,
     ];
-    this.runner.addTurn({ turnNumber: this.turnNumber++, intents });
+    this.runner.addTurn({ turnNumber: turn, intents });
+    this.stepsRun++;
     this.lastError = null;
     if (!this.runner.executeNextTick()) {
       const err = this.lastError as ErrorUpdate | null;
@@ -207,23 +269,28 @@ function forkConfig(gameStart: GameStartInfo) {
 
 /**
  * Forks of one game at one tick: the game's state is taken once (its
- * snapshot records), and each fork is a structural clone of it, exactly
- * what restoring the game's snapshot gives. Forks share nothing with each
- * other or with the game.
+ * snapshot records), and each fork is a structural clone of it, the game a
+ * restore of its snapshot gives (GameClone.ts). Forks share nothing with
+ * each other or with the game.
  *
- * Every fork must be made before the game ticks again (`fork()` throws
- * otherwise); forks can be stepped in between. To fork the same state
- * later, keep a fork unstepped and make a ForkSource of its game.
+ * Every fork must be made before the game ticks again, or has its territory
+ * or water changed (`fork()` throws otherwise); forks can be stepped in
+ * between. To fork the same state later, keep a fork unstepped and make a
+ * ForkSource of it (GameFork.source).
  */
 export class ForkSource {
   private readonly source: GameCloneSource;
+  private readonly pending: ReadonlyMap<number, readonly AgentIntent[]>;
 
+  /** `pending`: intents each fork gets queued, by turn (GameFork.replay). */
   constructor(
     private readonly game: Game,
     private readonly gameStart: GameStartInfo,
     private readonly clientID: ClientID,
+    pending: ReadonlyMap<number, readonly AgentIntent[]> = new Map(),
   ) {
     this.source = GameCloneSource.take(game);
+    this.pending = new Map([...pending].map(([t, l]) => [t, [...l]]));
   }
 
   /** The tick the forks start at. */
@@ -233,7 +300,15 @@ export class ForkSource {
 
   fork(): GameFork {
     const game = this.source.clone({ config: forkConfig(this.gameStart) });
-    return new GameFork(this.game, game, null, this.gameStart, this.clientID);
+    const f = new GameFork(
+      this.game,
+      game,
+      null,
+      this.gameStart,
+      this.clientID,
+    );
+    for (const [turn, intents] of this.pending) f.replay(intents, turn);
+    return f;
   }
 
   forks(n: number): GameFork[] {
@@ -241,8 +316,8 @@ export class ForkSource {
   }
 }
 
-/** `n` independent forks of `game` at its current tick: one snapshot of
- *  its state, restored `n` times (see ForkSource). */
+/** `n` independent forks of `game` at its current tick: one take of its
+ *  state, cloned `n` times (see ForkSource). */
 export function forkMany(
   game: Game,
   gameStart: GameStartInfo,

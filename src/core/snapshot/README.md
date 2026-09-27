@@ -25,9 +25,10 @@ and executions) is about 2.7 MB raw and 1.2 MB gzipped. It takes about
 ## Structural clone
 
 `GameCloneSource.take(game)` then `.clone(deps)`, or `cloneGame(game, deps)`
-([GameClone.ts](GameClone.ts)), makes the game `restoreGame(snapshotGame(game))`
-would make, without the bytes. It is what forks use (`src/agent/Fork.ts`:
-`GameFork.clone`, `ForkSource`, `forkMany`).
+([GameClone.ts](GameClone.ts)), makes an exact copy of the game: the game
+`restoreGame(snapshotGame(game))` would make, without the bytes, except that
+it keeps the game's own water graph (below). It is what forks use
+(`src/agent/Fork.ts`: `GameFork.clone`, `ForkSource`, `forkMany`).
 
 - The small object graph goes through the same `snapshot()` and
   `restoreSnapshot()` as a restore. The records are copied with the codec's
@@ -45,20 +46,28 @@ would make, without the bytes. It is what forks use (`src/agent/Fork.ts`:
   - both maps (`GameMapImpl.clone`: terrain with its edits, owners, fallout
     and defense). A restore writes the owners from the players' tile sets,
     which the simulation keeps in step with the map;
-  - the water components and graph, while the minimap still has the map
-    file's water and the graph was never rebuilt (`WaterManager`'s `source`).
-    Otherwise they are built, and restored from the record, as a restore
-    does.
-- One take serves any number of clones, all made before the game ticks again
-  (checked). To clone a state later, keep a clone and take from it.
+  - the water components and the water graph with its path cache
+    (`WaterManager`'s `source`, `AbstractGraph.cloneWith`), always. A
+    restore rebuilds the graph from the components, which gives the game's
+    graph only until water nukes change the water (see Known gaps); the
+    graph is not in the snapshot, so the bytes agree either way.
+- One take serves any number of clones, all made before the game ticks
+  again, and before its territory or water changes between ticks (both
+  checked: the big parts are read when a clone is made). To clone a state
+  later, keep a clone and take from it.
 
-`tests/core/snapshot/GameClone.test.ts` holds a clone to a restore, in the
-variants of FullGameSnapshot.test.ts (free for all, water nukes, teams): the
-same object graph (`diffGraphs`), snapshot bytes and map arrays; the same
-hashes and bytes for 600 ticks with nukes and ships in flight; and chains of
-clones (every 100 ticks, and every tick of a window, from a restored game)
-that stay on the straight run's track to the end of the game. It also checks
-that a clone shares no writable object with its game or with another clone.
+`tests/core/snapshot/GameClone.test.ts` holds a clone to its game and to a
+restore, in the variants of FullGameSnapshot.test.ts (free for all, water
+nukes, teams): every 100 ticks through tick 2,000, the game's object graph
+(`diffGraphs`, caches and scratch aside) and a restore's (the water graph
+aside), snapshot bytes and map arrays; the same hashes and bytes for 600 ticks
+with nukes and ships in flight; chains of clones every 100 ticks that stay on
+the straight run's track through its winner (free for all, teams) or for
+3,000 ticks (water nukes), and at every tick of a window from a restored
+game; with water nukes, clones forked where a restore leaves the game's track
+(after incremental graph rebuilds, and while the graph is stale) that stay on
+it. It also checks that a clone shares no writable object or buffer with its
+game or with another clone, and that a source refuses once the game changed.
 
 When a class's snapshot changes, the clone follows by itself; a field that
 restore rebuilds from the map (not from the record) needs its clone
@@ -203,10 +212,21 @@ and that the original and restored games stay byte-identical tick by tick.
 
 ## Known gaps
 
-- For up to 20 ticks after a water nuke, the live game routes ships on a
-  stale water graph (`WaterManager` rebuilds it on a throttle). A restore
-  rebuilds the graph from the current water, so a ship that asks for a new
-  route inside that window can take a different one. The same applies to a
-  ship still counting down its rebuild stagger (`WaterPathFinder.fromState`).
+- With water nukes, a restore can route ships differently from the game,
+  where a structural clone does not (it copies the game's water graph):
+  - for up to 20 ticks after a water nuke, the game routes on a stale water
+    graph and on paths it cached before the change (`WaterManager` rebuilds
+    on a throttle), where a restore rebuilds the graph from the current
+    water;
+  - after a rebuild, which is incremental, the game's graph has the same
+    nodes and edges as a restore's full build but in another order, and
+    route searches break ties in edge order. On the scripted test game,
+    restores forked every 50 ticks and run 400 ticks left the game's track
+    at 14 of the 29 fork points from tick 1,600 on; clones at none.
+- A trade ship still counting down its rebuild stagger answers a query it
+  repeats exactly (the same two tiles) from its graph version's route memo
+  (`WaterPathMemo`), which can hold a route found before the rebuild; in a
+  clone or a restore the ship asks the current graph. Water nukes only; not
+  seen in any test.
 - Client-side state (GameView, renderer) is not stored. The client rebuilds
   from the restored game's first full update.

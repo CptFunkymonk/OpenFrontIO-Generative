@@ -3,12 +3,16 @@ import os from "os";
 import path from "path";
 import type { StandingPoint } from "../../src/agent/arena/ArenaGame";
 import {
+  bootstrapCI,
   bootstrapMeanCI,
   compareMarkdown,
   compareRuns,
   DIAGNOSTICS,
   entrantLabels,
   eventStats,
+  mapKinds,
+  mapLandShare,
+  pairedRatioStats,
   pairedStats,
   pairGames,
   rerunCommand,
@@ -17,7 +21,13 @@ import {
   signTest,
 } from "../../src/agent/arena/Compare";
 import { mergeRuns } from "../../src/agent/arena/Merge";
-import { mean, readRun, Run, StoredSeat } from "../../src/agent/arena/Summary";
+import {
+  LOG_LINES_KEPT,
+  mean,
+  readRun,
+  Run,
+  StoredSeat,
+} from "../../src/agent/arena/Summary";
 import { maps as MAP_INFO, PlayerType } from "../../src/core/game/Game";
 import { COMMIT, seat as storedSeat, writeRun } from "./util/SyntheticRuns";
 
@@ -115,6 +125,109 @@ describe("statistics", () => {
     expect(bootstrapMeanCI(sample, 10_000, 7)).not.toEqual(ci);
     expect(bootstrapMeanCI([])).toBeNull();
     expect(bootstrapMeanCI([-0.25])).toEqual([-0.25, -0.25]);
+  });
+
+  test("bootstrapCI: the mean's interval, any statistic, nothing finite", () => {
+    const sample = Array.from({ length: 20 }, (_, i) => i + 1);
+    const meanOf = (pick: Uint32Array) =>
+      [...pick].reduce((a, i) => a + sample[i], 0) / pick.length;
+    expect(bootstrapCI(sample.length, meanOf)).toEqual(bootstrapMeanCI(sample));
+    expect(bootstrapCI(0, meanOf)).toBeNull();
+    // A statistic over nothing (a ratio of zeros) is left out; with fewer
+    // than half the resamples left there is no interval.
+    expect(bootstrapCI(3, () => NaN)).toBeNull();
+    const some = bootstrapCI(3, (pick) => (pick[0] === 0 ? Infinity : 1))!;
+    expect(some).toEqual([1, 1]);
+  });
+
+  test("prices pair pooled: one tiny game does not rule the difference", () => {
+    // [troops, tiles]: A paid 100 a tile but 12,133 in a game it gained 21
+    // tiles; B paid 90 a tile throughout.
+    const values: [[number, number], [number, number]][] = [
+      [
+        [100_000, 1000],
+        [90_000, 1000],
+      ],
+      [
+        [200_000, 2000],
+        [180_000, 2000],
+      ],
+      [
+        [254_793, 21],
+        [9000, 100],
+      ],
+    ];
+    const d = pairedRatioStats(values);
+    expect(d.pooled).toBe(true);
+    expect(d.pairs).toBe(3);
+    expect(d.meanA).toBeCloseTo(554_793 / 3021, 9);
+    expect(d.meanB).toBeCloseTo(279_000 / 3100, 9);
+    expect(d.meanDelta).toBeCloseTo(279_000 / 3100 - 554_793 / 3021, 9);
+    // The mean of the per-game differences would be about -4,021.
+    expect(
+      pairedStats(values.map(([a, b]) => [a[0] / a[1], b[0] / b[1]])),
+    ).toMatchObject({ meanDelta: expect.closeTo(-12_063 / 3, -1) });
+    // Per game: -10, -10 and -12,043; B lower in all three.
+    expect(d.medianDelta).toBeCloseTo(-10, 9);
+    expect([d.better, d.worse, d.ties]).toEqual([0, 3, 0]);
+    expect(d.signTestP).toBe(0.25);
+    expect(d.ci95![0]).toBeLessThanOrEqual(d.meanDelta);
+    expect(d.ci95![1]).toBeGreaterThanOrEqual(d.meanDelta);
+    expect(pairedRatioStats(values)).toEqual(d);
+
+    // Strikes that took no land cost the most; nothing lost or gained is
+    // no price; a side without one leaves the pair out.
+    const e = pairedRatioStats([
+      [
+        [5000, 0],
+        [4000, 100],
+      ],
+      [
+        [0, 0],
+        [4000, 100],
+      ],
+      [null, [1, 1]],
+      [
+        [3000, 0],
+        [6000, 0],
+      ],
+    ]);
+    expect(e.pairs).toBe(2);
+    expect([e.better, e.worse, e.ties]).toEqual([0, 1, 1]);
+    expect(e.meanA).toBe(Infinity);
+    expect(e.meanB).toBe(10_000 / 100);
+    expect(e.medianDelta).toBe(-Infinity);
+    expect(pairedRatioStats([])).toMatchObject({
+      pairs: 0,
+      medianDelta: null,
+      ci95: null,
+    });
+  });
+});
+
+describe("map kinds", () => {
+  test("water under 25% land, few-nation up to 4 nations, else land", () => {
+    // From the manifests: Japan 7.7% land, Four Islands 23.0%, World 32.6%.
+    expect(mapLandShare("Japan")).toBeCloseTo(0.077, 3);
+    expect(mapLandShare("Four Islands")).toBeCloseTo(0.23, 3);
+    expect(mapKinds("Japan", 12)).toEqual(["water"]);
+    expect(mapKinds("Four Islands", 4)).toEqual(["water", "few-nation"]);
+    expect(mapKinds("Bering Strait", 2)).toEqual(["few-nation"]);
+    expect(mapKinds("World", 72)).toEqual(["land"]);
+    expect(mapKinds("World", 5)).toEqual(["land"]);
+    expect(mapKinds("World", null)).toEqual(["land"]);
+    // A map without a manifest: its kind unknown unless few-nation.
+    expect(mapLandShare("Atlantis")).toBeNull();
+    expect(mapKinds("Atlantis", 30)).toEqual(["unknown"]);
+    expect(mapKinds("Atlantis", 3)).toEqual(["few-nation"]);
+    expect(mapKinds("World", 72, tmp)).toEqual(["unknown"]);
+    // 20 of the 127 maps with nations are water (docs/11-roadmap.md H9).
+    const water = MAP_INFO.filter(
+      (m) =>
+        m.defaultNationCount > 0 &&
+        mapKinds(m.type, m.defaultNationCount).includes("water"),
+    );
+    expect(water).toHaveLength(20);
   });
 });
 
@@ -235,6 +348,7 @@ describe("entrants and pairing", () => {
         gameID: as[3].game.gameID,
         game: 3,
         map: "Onion",
+        kind: "crashed",
         reason: "crashed in B",
         a: 6,
         b: 3,
@@ -246,9 +360,9 @@ describe("entrants and pairing", () => {
     const moved = { ...bs[0], game: { ...bs[0].game, map: as[1].game.map } };
     const q = pairGames(as.slice(0, 2), [moved]);
     expect(q.pairs).toEqual([]);
-    expect(q.unpaired.map((u) => [u.game, u.reason])).toEqual([
-      [0, "maps differ: Onion in A, Iceland in B"],
-      [1, "not in B"],
+    expect(q.unpaired.map((u) => [u.game, u.kind, u.reason])).toEqual([
+      [0, "maps", "maps differ: Onion in A, Iceland in B"],
+      [1, "missing", "not in B"],
     ]);
     expect(pairGames([], bs.slice(0, 1)).unpaired[0].reason).toBe("not in A");
   });
@@ -352,6 +466,14 @@ describe("the report", () => {
     expect(r.categories.map((c) => c.name).sort()).toEqual(
       [...new Set(["Onion", "Iceland", "World"].flatMap(categories))].sort(),
     );
+    // Every made-up game has 3 nations: few-nation, and none is water.
+    expect(r.pairs.map((p) => p.kinds)).toEqual(
+      r.pairs.map(() => ["few-nation"]),
+    );
+    expect(r.kinds.map((k) => [k.name, k.games, k.better, k.worse])).toEqual([
+      ["few-nation", 5, 2, 2],
+    ]);
+    expect(r.kinds[0].ci95).toEqual(r.progress.ci95);
 
     // The games B lost most in, with each side's rerun of its own copy.
     expect(r.worst.map((w) => [w.game, w.a.index, w.b.index])).toEqual([
@@ -372,7 +494,13 @@ describe("the report", () => {
     ]);
 
     const md = compareMarkdown(r, tmp);
-    expect(md).toContain("**5 paired games** (A has 6, B 5; 1 unpaired)");
+    expect(md).toContain(
+      "**5 paired games** (A has 6, B 5; 1 unpaired: 1 crashed)",
+    );
+    expect(md).toContain(
+      "Agent errors: in 0 of A's paired games and 0 of B's; they stay in " +
+        "the pairs (--drop-errors leaves them out).",
+    );
     expect(md).toContain("Discordant: A only 1, B only 2; sign test p = 1.");
     expect(md).toContain("> **WARNING:** B ran on 0123456 with local changes");
     expect(md).toContain("| progress | 0.550 | 0.725 | +0.175 |");
@@ -450,7 +578,7 @@ describe("the report", () => {
       [4, "crashed in B", 4, 4],
     ]);
     const md = compareMarkdown(r);
-    expect(md).toContain("(A has 5, B 4; 2 unpaired)");
+    expect(md).toContain("(A has 5, B 4; 2 unpaired: 2 crashed)");
     expect(md).toContain("| 1 | Iceland |");
     expect(md).not.toContain("every game of both sides paired");
 
@@ -490,11 +618,12 @@ describe("the report", () => {
     expect(r.milestones.b.errored).toBe(0);
   });
 
-  test("seats with agent errors or no spawn are left out, loudly", () => {
+  test("a seat that never spawned is left out; agent errors stay in", () => {
     const args = ["--agent", "baseline", ...POOL];
     const stats = (errors: number) => ({
       ...storedSeat("baseline", 0).stats,
       errors,
+      firstErrors: errors > 0 ? ["tick 5: Error: boom\n    at x"] : [],
     });
     writeRun(dir("a"), args, {
       seat: (job) => ({
@@ -506,29 +635,86 @@ describe("the report", () => {
       seat: (job) => ({
         peakShare: 0.3,
         // Recorded before spawnTiles: taken as spawned.
-        ...(job.game === 1 ? { stats: stats(3) } : {}),
+        ...(job.game === 1 ? { stats: stats(3), peakShare: 0.01 } : {}),
         ...(job.game === 5 ? { stats: stats(1), spawnTiles: 0 } : {}),
       }),
     });
-    const r = compareRuns(
-      { run: readRun(dir("a")), entrant: 0 },
-      { run: readRun(dir("b")), entrant: 0 },
-      { head: { commit: COMMIT, dirty: false } },
-    );
-    expect(r.paired).toBe(3);
-    expect(r.unpaired.map((u) => [u.game, u.reason])).toEqual([
+    const compare = (dropErrors: boolean) =>
+      compareRuns(
+        { run: readRun(dir("a")), entrant: 0 },
+        { run: readRun(dir("b")), entrant: 0 },
+        { head: { commit: COMMIT, dirty: false }, dropErrors },
+      );
+    const r = compare(false);
+    // B's agent errors in game 1 are B's own failure: that game stays in.
+    expect(r.paired).toBe(4);
+    expect(r.unpaired.map((u) => [u.game, u.kind, u.reason])).toEqual([
+      [4, "invalid", "no spawn in A"],
+      [5, "invalid", "no spawn in B"],
+    ]);
+    expect(r.peakShare.worse).toBe(1);
+    expect(r.events.agentErrors).toEqual({
+      pairs: 4,
+      a: 0,
+      b: 1,
+      aOnly: 0,
+      bOnly: 1,
+      signTestP: 1,
+    });
+    expect(r.milestones.b.agentErrors).toBe(3);
+    expect(r.warnings).toEqual([
+      "2 game(s) are left out of the pairs because a seat never spawned: " +
+        "game 4 (Iceland) no spawn in A; game 5 (World) no spawn in B.",
+      "B's seat had agent errors in 1 paired game(s), 3 in all. They stay " +
+        "in the pairs as its own failures (--drop-errors leaves them out); " +
+        "the first, game 1 (Iceland): tick 5: Error: boom.",
+    ]);
+    const md = compareMarkdown(r);
+    expect(md).toContain("| 4 | Iceland |");
+    expect(md).toContain("(A has 6, B 6; 2 unpaired: 2 invalid seat)");
+    expect(md).toContain("in 0 of A's paired games and 1 of B's");
+    expect(md).toContain("| agent errors | 0 | 1 | 0 | 1 | 1 | 4 |");
+
+    // --drop-errors: B1's rule, for a harness fault that is not B's.
+    const d = compare(true);
+    expect(d.dropErrors).toBe(true);
+    expect(d.paired).toBe(3);
+    expect(d.unpaired.map((u) => [u.game, u.reason])).toEqual([
       [1, "3 agent error(s) in B"],
       [4, "no spawn in A"],
       [5, "1 agent error(s), no spawn in B"],
     ]);
-    expect(r.warnings).toEqual([
-      "3 game(s) are left out of the pairs because a seat had agent " +
-        "errors or never spawned: game 1 (Iceland) 3 agent error(s) in B; " +
-        "game 4 (Iceland) no spawn in A; game 5 (World) 1 agent error(s), " +
-        "no spawn in B.",
+    expect(d.warnings).toEqual([
+      "3 game(s) are left out of the pairs because a seat never spawned or " +
+        "had agent errors (--drop-errors): game 1 (Iceland) 3 agent " +
+        "error(s) in B; game 4 (Iceland) no spawn in A; game 5 (World) 1 " +
+        "agent error(s), no spawn in B.",
     ]);
-    expect(r.milestones.b.agentErrors).toBe(0);
-    expect(compareMarkdown(r)).toContain("| 4 | Iceland |");
+    expect(d.milestones.b.agentErrors).toBe(0);
+    expect(compareMarkdown(d)).toContain(
+      "Agent errors: games where a seat had them are left out (--drop-errors).",
+    );
+  });
+
+  test("a game one side lacks is not blamed on the other's errors", () => {
+    const stats = { ...storedSeat("baseline", 0).stats, errors: 2 };
+    const pool = ["--maps", "Onion,Iceland,World"];
+    writeRun(dir("a"), ["--agent", "baseline", ...pool, "--games", "6"], {
+      seat: (job) => (job.game === 5 ? { stats } : {}),
+    });
+    writeRun(dir("b"), ["--agent", "baseline", ...pool, "--games", "5"]);
+    for (const dropErrors of [false, true]) {
+      const r = compareRuns(
+        { run: readRun(dir("a")), entrant: 0 },
+        { run: readRun(dir("b")), entrant: 0 },
+        { head: { commit: COMMIT, dirty: false }, dropErrors },
+      );
+      expect(r.unpaired.map((u) => [u.game, u.kind, u.reason])).toEqual([
+        [5, "missing", "not in B"],
+      ]);
+      expect(r.warnings.filter((w) => /left out/.test(w))).toEqual([]);
+      expect(compareMarkdown(r)).toContain("1 unpaired: 1 missing on a side");
+    }
   });
 
   test("land by minute, events, identical games and the plan's metrics", () => {
@@ -673,13 +859,19 @@ describe("the report", () => {
     expect(r.land.at20).toMatchObject({ better: 2, worse: 1, ties: 3 });
     expect(r.land.at20.meanDelta).toBeCloseTo((0.2 + 0.0002 - 0.1 + 0.05) / 6);
     expect(r.land.at20.signTestP).toBe(1);
-    const once = { pairs: 6, a: 1, b: 0, aOnly: 1, bOnly: 0, signTestP: 1 };
+    // B's game 3 stopped when B was out at minute 12, with no nation at
+    // half the land: what the nations did then is unknown, so it does not
+    // count (it was counted "no nation" before).
+    expect(r.pairs[3].b.events.nationWonBefore20).toBeNull();
+    const once = { pairs: 5, a: 1, b: 0, aOnly: 1, bOnly: 0, signTestP: 1 };
+    const none = { pairs: 6, a: 0, b: 0, aOnly: 0, bOnly: 0, signTestP: 1 };
     expect(r.events).toEqual({
       outBefore20: { pairs: 6, a: 0, b: 1, aOnly: 0, bOnly: 1, signTestP: 1 },
       lostBefore20: { pairs: 6, a: 1, b: 1, aOnly: 1, bOnly: 1, signTestP: 1 },
       top3At10: { pairs: 6, a: 0, b: 2, aOnly: 0, bOnly: 2, signTestP: 0.5 },
       nationHalfBefore20: once,
       nationWonBefore20: once,
+      agentErrors: none,
     });
     expect(r.milestones.a).toMatchObject({
       eliminatedBefore20: 0,
@@ -720,7 +912,130 @@ describe("the report", () => {
     );
     expect(md).toContain("| bombs received | 0.0 | 0.5 | +0.5 |");
     expect(md).toContain("| searches | – | – | – | – | – | – | – | 0 |");
-    expect(md).toContain("| a nation won < 20 min | 1 | 0 | 1 | 0 | 1 | 6 |");
+    expect(md).toContain("| a nation won < 20 min | 1 | 0 | 1 | 0 | 1 | 5 |");
+  });
+
+  test("kinds, one tie rule, pooled prices and cut logs in a report", () => {
+    // g 0-5: Japan (water), World (land), Onion (3 nations), twice.
+    const pool = ["--maps", "Japan,World,Onion", "--each-map", "--repeat", "2"];
+    const nations: Record<string, number> = {
+      Japan: 12,
+      World: 72,
+      Onion: 3,
+    };
+    // Home 420k of a 1M cap all window: each game's all-in cost is 6,000
+    // ticks of regrowth r, bought `gain` net tiles.
+    const r = (10 + 420_000 ** 0.73 / 4) * 0.58;
+    const flow = (gain: number) =>
+      Array.from({ length: 31 }, (_, i) => ({
+        tick: 300 * (i + 1),
+        tiles: 10_000 + (300 * (i + 1) >= 9000 ? gain : 0),
+        share: 0.1,
+        troops: 420_000,
+        maxTroops: 1e6,
+        gold: 0,
+        alive: true,
+      }));
+    const peakA = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2];
+    // B: better, a tie by 0.04 points, worse, equal, 0.04 points short (a
+    // tie, not among the worst), equal.
+    const peakB = [0.3, 0.2004, 0.1, 0.2, 0.1996, 0.2];
+    const args = ["--agent", "baseline", ...pool];
+    const search = "[2400] 2400 search 2400 T1 cands=2 chosen=base ms=5";
+    const game = (job: { spec: { map: string } }) => ({
+      nationsInGame: nations[job.spec.map],
+    });
+    writeRun(dir("a"), args, {
+      seat: (job) => ({
+        peakShare: peakA[job.game],
+        timeline: flow(job.game === 1 ? 1100 : 2000),
+      }),
+      game,
+      // A's seat logged no search: 0 searches, known.
+      log: () => "## baseline (AGENT000)",
+    });
+    writeRun(dir("b"), args, {
+      seat: (job) => ({
+        peakShare: peakB[job.game],
+        timeline: flow(3000),
+      }),
+      game,
+      // B's log in game 5 reached AgentHost's cap.
+      log: (job) =>
+        [
+          "## baseline (AGENT000)",
+          search,
+          ...(job.game === 5
+            ? Array.from({ length: LOG_LINES_KEPT }, (_, i) => `[${i}] tn`)
+            : []),
+        ].join("\n"),
+    });
+    const rep = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(rep.pairs.map((p) => p.kinds)).toEqual([
+      ["water"],
+      ["land"],
+      ["few-nation"],
+      ["water"],
+      ["land"],
+      ["few-nation"],
+    ]);
+    // The headline's tie rule in every table.
+    expect(rep.progress).toMatchObject({ better: 1, worse: 1, ties: 4 });
+    expect(
+      rep.kinds.map((k) => [k.name, k.games, k.better, k.worse, k.ties]),
+    ).toEqual([
+      ["land", 2, 0, 0, 2],
+      ["water", 2, 1, 0, 1],
+      ["few-nation", 2, 0, 1, 1],
+    ]);
+    const sum = (key: "better" | "worse" | "ties") =>
+      rep.maps.reduce((n, m) => n + m[key], 0);
+    expect([sum("better"), sum("worse"), sum("ties")]).toEqual([1, 1, 4]);
+    expect(rep.maps.every((m) => m.ci95 === null)).toBe(true);
+    expect(rep.worst.map((w) => w.game)).toEqual([2]);
+
+    // Prices pooled: A bought 11,100 tiles with six games' cost, B 18,000.
+    const price = rep.diagnostics.find((d) => d.key === "allInPrice")!.stats;
+    expect(price).toMatchObject({ pooled: true, pairs: 6, better: 0 });
+    expect(price.meanA).toBeCloseTo((6 * 6000 * r) / 11_100, 6);
+    expect(price.meanB).toBeCloseTo((6 * 6000 * r) / 18_000, 6);
+    expect(rep.pairs[1].a.ratios.allInPrice).toEqual([
+      expect.closeTo(6000 * r, 6),
+      1100,
+    ]);
+    expect(rep.pairs[1].a.diagnostics.allInPrice).toBeCloseTo(
+      (6000 * r) / 1100,
+      6,
+    );
+
+    // B's cut log: its searches there are unknown, and warned of.
+    const searches = rep.diagnostics.find((d) => d.key === "searches")!.stats;
+    expect(rep.pairs.map((p) => p.b.diagnostics.searches)).toEqual([
+      1,
+      1,
+      1,
+      1,
+      1,
+      null,
+    ]);
+    expect(searches.pairs).toBe(5);
+    expect(rep.warnings).toEqual([
+      "B's seat log reached AgentHost's 2000-line cap in 1 paired game(s): " +
+        "the lines after it were not kept, so its searches, acts, gain, R " +
+        "and checkpoint mismatches there are unknown (a mismatch past the " +
+        "cap would not show), and so are pile-ons read from `def why` lines.",
+    ]);
+    const md = compareMarkdown(rep);
+    const kinds = md.slice(md.indexOf("## By map kind"));
+    expect(kinds.indexOf("| land |")).toBeLessThan(kinds.indexOf("| water |"));
+    expect(kinds.indexOf("| water |")).toBeLessThan(
+      kinds.indexOf("| few-nation |"),
+    );
+    expect(md).toContain("| all-in price m5-15 (pooled) |");
   });
 
   test("loud warnings: unknown, stale or dirty code, other settings", () => {

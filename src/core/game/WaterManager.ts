@@ -66,12 +66,17 @@ export class WaterManager {
   private _miniStampArr: Uint16Array | null = null;
   private _miniStamp: number = 0;
 
+  // A structural clone's manager (constructor `source`): the components and
+  // graph are copies of the source's, current as they are, so
+  // restoreSnapshot must not replace them.
+  private readonly copiedFromSource: boolean = false;
+
   /**
    * `source` (a structural clone of the game, snapshot/GameClone.ts): the
-   * manager of the game these maps were copied from. While its minimap
-   * still has the map file's water, its components and graph are exactly
-   * what building them here would compute, so they are copied instead (with
-   * a fresh path cache, and search scratch made when first needed).
+   * manager of the game these maps were copied from. Its components and
+   * water graph are copied as they are, the graph with its path cache (see
+   * copyGraphOf), so the clone routes ships exactly as the source does from
+   * here on. Search scratch is made when first needed.
    */
   constructor(
     private map: GameMap,
@@ -80,10 +85,11 @@ export class WaterManager {
     source?: WaterManager,
   ) {
     if (!disableNavMesh) {
-      const prebuilt = source?.prebuiltFor(miniMap) ?? null;
-      if (prebuilt !== null) {
-        this._miniWaterCC = prebuilt.components;
-        this._miniWaterGraph = prebuilt.graph;
+      const copied = source?.copyGraphOf(miniMap) ?? null;
+      if (copied !== null) {
+        this._miniWaterCC = copied.components;
+        this._miniWaterGraph = copied.graph;
+        this.copiedFromSource = true;
       } else {
         this._miniWaterCC = new ConnectedComponents(miniMap);
         this._miniWaterCC.initialize();
@@ -106,31 +112,24 @@ export class WaterManager {
   }
 
   /**
-   * Copies of the components and graph for a manager on `miniMap`, a copy of
-   * this manager's minimap; see the constructor. Null once water has been
-   * added to the minimap: the live components are then incremental and the
-   * graph may be stale, and a restore rebuilds both (restoreSnapshot), so a
-   * clone must too.
+   * Copies of this manager's components and water graph for a manager on
+   * `miniMap`, a copy of this manager's minimap; see the constructor. Null
+   * without a nav mesh.
    *
-   * A restore keeps a fresh labeling and a fresh graph exactly while the
-   * minimap's waterVersion is 0 (snapshot() stores no components then).
-   * Copying is exact only if this manager's own labeling and graph are
-   * still those first builds: no components were ever added
-   * (finalizeWaterChanges marks the graph dirty whenever it adds some) and
-   * the graph was never rebuilt. Otherwise the clone builds, as a restore
-   * does.
+   * They are copied whatever water has been added, because only the copy is
+   * exact: once the graph has been rebuilt (incrementally, from the old
+   * graph and the dirty tiles) it holds the same nodes and edges as a full
+   * build but not in the same order, and ship routes break ties in that
+   * order; and until a rebuild catches up with added water, the game routes
+   * on the stale graph and on paths cached before the change. A snapshot
+   * restore builds the graph afresh from the components (restoreSnapshot),
+   * so it can route differently from here on; the clone keeps the game's
+   * own. (The dirty flags and pending tiles come from the snapshot record.)
    */
-  private prebuiltFor(
+  private copyGraphOf(
     miniMap: GameMap,
   ): { components: ConnectedComponents; graph: AbstractGraph } | null {
-    if (
-      this.miniMap.waterVersion() > 0 ||
-      this._waterGraphDirty ||
-      this._waterGraphVersion > 0 ||
-      this._dirtyMiniTiles.size > 0 ||
-      this._miniWaterCC === null ||
-      this._miniWaterGraph === null
-    ) {
+    if (this._miniWaterCC === null || this._miniWaterGraph === null) {
       return null;
     }
     const components = this._miniWaterCC.cloneFor(miniMap);
@@ -167,9 +166,14 @@ export class WaterManager {
    * Applies a snapshot to a manager just constructed on the restored maps.
    *
    * The water graph is rebuilt from the restored components rather than
-   * stored. While the graph is dirty (up to WATER_GRAPH_REBUILD_INTERVAL
-   * ticks after a water nuke) the live game still routes on the stale graph,
-   * which a restore cannot reproduce.
+   * stored. A restore therefore cannot reproduce the live graph once water
+   * has been added: while the graph is dirty (up to
+   * WATER_GRAPH_REBUILD_INTERVAL ticks after a water nuke) the live game
+   * still routes on the stale graph and its cached paths, and after an
+   * incremental rebuild the live graph orders its edges differently from a
+   * full build, which changes how ship routes break ties. A structural
+   * clone's manager copied the source's components and graph instead
+   * (constructor `source`) and keeps them.
    */
   restoreSnapshot(s: WaterManagerState): void {
     this._waterGraphVersion = s.waterGraphVersion;
@@ -177,6 +181,7 @@ export class WaterManager {
     this._waterGraphLastRebuildTick = s.waterGraphLastRebuildTick;
     this._pendingWaterTiles = new Set(s.pendingWaterTiles);
     this._dirtyMiniTiles = new Set(s.dirtyMiniTiles);
+    if (this.copiedFromSource) return;
     if (s.components !== null && this._miniWaterCC !== null) {
       this._miniWaterCC.restoreSnapshot(s.components);
       this._miniWaterGraph = new AbstractGraphBuilder(
