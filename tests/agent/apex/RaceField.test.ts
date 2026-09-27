@@ -604,33 +604,45 @@ describe("spawn candidates", () => {
   );
 
   test(
-    "GiantWorldMap: grid, static arrival and candidates in under 1 s",
+    "GiantWorldMap: grid, static arrival and candidates in under 0.8 s of CPU",
     async () => {
       const { game, me } = await spawnGame(GameMapType.GiantWorldMap);
       const o = APEX_DEFAULTS;
-      let best = Infinity;
-      let parts = "";
-      for (let run = 0; run < 2; run++) {
-        const t0 = performance.now();
+      // This thread's CPU time, not wall time: the suite runs three files at
+      // once on four cores, and wall time also counts the time this thread
+      // waits for a core (best of 2: 1.1 s in the suite, 0.66 s alone). Best
+      // of 5: the first runs measure the JIT, not the code.
+      const cpuMs = () => {
+        const { user, system } = process.threadCpuUsage();
+        return (user + system) / 1000;
+      };
+      let best = { grid: Infinity, arrival: Infinity, candidates: Infinity };
+      let size = "";
+      for (let run = 0; run < 5; run++) {
+        const t0 = cpuMs();
         const grid = buildRaceGrid(game, o);
-        const t1 = performance.now();
+        const t1 = cpuMs();
         const arr = staticArrival(grid, game, o);
-        const t2 = performance.now();
+        const t2 = cpuMs();
         const cands = spawnCandidates(grid, arr, game, me, o);
-        const t3 = performance.now();
+        const t3 = cpuMs();
         expect(cands.length).toBeGreaterThan(0);
-        if (t3 - t0 < best) {
-          best = t3 - t0;
-          parts =
-            `grid ${(t1 - t0).toFixed(0)} ms, arrival ${(t2 - t1).toFixed(0)} ` +
-            `ms, candidates ${(t3 - t2).toFixed(0)} ms (cell ${grid.cell}, ` +
-            `${grid.cw}×${grid.ch})`;
-        }
+        best = {
+          grid: Math.min(best.grid, t1 - t0),
+          arrival: Math.min(best.arrival, t2 - t1),
+          candidates: Math.min(best.candidates, t3 - t2),
+        };
+        size = `cell ${grid.cell}, ${grid.cw}×${grid.ch}`;
       }
+      const total = best.grid + best.arrival + best.candidates;
       console.log(
-        `GiantWorldMap spawn search: ${best.toFixed(0)} ms: ${parts}`,
+        `GiantWorldMap spawn search: ${total.toFixed(0)} ms of CPU: grid ` +
+          `${best.grid.toFixed(0)} ms, arrival ${best.arrival.toFixed(0)} ms, ` +
+          `candidates ${best.candidates.toFixed(0)} ms (${size})`,
       );
-      expect(best).toBeLessThan(1000);
+      // 0.50-0.62 s on a 4-core cloud container, idle or beside the full
+      // suite; the search made twice as slow takes 1.0-1.1 s.
+      expect(total).toBeLessThan(800);
     },
     TIMEOUT,
   );
