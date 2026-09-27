@@ -34,7 +34,9 @@ import type {
   SendState,
 } from "../../../src/agent/lib/search/Runner";
 import {
+  NEAR_FORK,
   rebasePlan,
+  rebaseSteps,
   shiftSteps,
   Slicer,
 } from "../../../src/agent/lib/search/Slicer";
@@ -270,60 +272,162 @@ describe("search slices: re-basing a late plan", () => {
     { at: 2650, label: "renew", when: { unallied: "Z" } },
   ];
   const plan = cand("strike:Z", { steps });
-  const alive = { alive: true, allied: false, attacking: false };
+  const alive = {
+    alive: true,
+    allied: false,
+    expiresAt: null as number | null,
+    attacking: false,
+  };
+  const ally = { ...alive, allied: true, expiresAt: 3000 as number | null };
 
-  test("steps and foe marks shift by k; k = 0 leaves them", () => {
+  test("a fork-anchored plan's steps and foe marks shift by k; k = 0 leaves them", () => {
     expect(shiftSteps(steps, 0)).toEqual(steps);
     expect(shiftSteps(steps, 7)).toEqual([
       { at: 2407, label: "foe", foe: { id: "Z", until: 2907 } },
       { at: 2407, label: "attack" },
       { at: 2657, label: "renew", when: { unallied: "Z" } },
     ]);
-    const r = rebasePlan(plan, 7, alive, alive, () => false);
+    const r = rebasePlan(plan, 2400, 7, alive, alive, () => false);
     expect(r).toEqual({ steps: shiftSteps(steps, 7) });
+    expect(rebaseSteps("break", steps, 2400, 7)).toEqual(shiftSteps(steps, 7));
   });
 
-  test("a target that died, changed alliance state or began attacking us drops the plan", () => {
-    const now = (o: Partial<typeof alive>) => ({ ...alive, ...o });
+  test("an event-anchored plan (lapse, keep) keeps its absolute ticks; a step at t0 goes now; a past step drops it", () => {
+    // A lapse of an alliance ending at 3000, searched at 2400 (cands/core.ts):
+    // the foe mark now, the strike at the expiry + 2.
+    const lapse: DirectiveStep[] = [
+      { at: 2401, label: "foe", foe: { id: "Z", until: 3300 } },
+      { at: 3002, label: "attack" },
+    ];
+    expect(rebaseSteps("lapse", lapse, 2400, 150)).toEqual([
+      { at: 2551, label: "foe", foe: { id: "Z", until: 3300 } },
+      { at: 3002, label: "attack" },
+    ]);
+    // A step within NEAR_FORK of the fork tick means "now".
+    const keep: DirectiveStep[] = [
+      { at: 2400, label: "unfoe", foe: { id: "Z", until: 2399 } },
+      { at: 2700, label: "extend", when: { allied: "Z" } },
+      { at: 3005, label: "renew", when: { unallied: "Z" } },
+    ];
+    expect(rebaseSteps("keep", keep, 2400, 150)).toEqual([
+      { at: 2550, label: "unfoe", foe: { id: "Z", until: 2549 } },
+      { at: 2700, label: "extend", when: { allied: "Z" } },
+      { at: 3005, label: "renew", when: { unallied: "Z" } },
+    ]);
+    // The extension's tick passed during the search: the plan is stale.
+    expect(rebaseSteps("keep", keep, 2400, 301)).toBeNull();
     expect(
-      rebasePlan(plan, 3, alive, now({ alive: false }), () => false),
-    ).toEqual({ drop: "died" });
+      rebasePlan(
+        cand("keep:Z", { steps: keep }),
+        2400,
+        301,
+        ally,
+        ally,
+        () => true,
+      ),
+    ).toEqual({ drop: "past" });
+    // The lapse's strike tick passed too (and the alliance lapsed: unallied
+    // comes first when the target's state is known).
+    expect(rebaseSteps("lapse", lapse, 2400, 700)).toBeNull();
     expect(
-      rebasePlan(plan, 3, alive, now({ allied: true }), () => false),
-    ).toEqual({ drop: "allied" });
+      rebasePlan(
+        cand("lapse:Z", { steps: lapse }),
+        2400,
+        700,
+        ally,
+        ally,
+        () => true,
+      ),
+    ).toEqual({ drop: "past" });
     expect(
-      rebasePlan(plan, 3, now({ allied: true }), alive, () => false),
+      rebasePlan(
+        cand("lapse:Z", { steps: lapse }),
+        2400,
+        700,
+        ally,
+        alive,
+        () => false,
+      ),
     ).toEqual({ drop: "unallied" });
+    // Adopted 150 ticks late with the alliance unchanged: the mark goes
+    // now, the strike still at the term (not 150 ticks after it).
     expect(
-      rebasePlan(plan, 3, alive, now({ attacking: true }), () => false),
-    ).toEqual({ drop: "attacked" });
+      rebasePlan(
+        cand("lapse:Z", { steps: lapse }),
+        2400,
+        150,
+        ally,
+        ally,
+        () => true,
+      ),
+    ).toEqual({
+      steps: [
+        { at: 2551, label: "foe", foe: { id: "Z", until: 3300 } },
+        { at: 3002, label: "attack" },
+      ],
+    });
+    // A step NEAR_FORK or more after the fork is an event's tick.
+    expect(rebaseSteps("keep", [{ at: 2400 + NEAR_FORK }], 2400, 5)).toEqual([
+      { at: 2400 + NEAR_FORK },
+    ]);
+    expect(
+      rebaseSteps("keep", [{ at: 2400 + NEAR_FORK - 1 }], 2400, 5),
+    ).toEqual([{ at: 2400 + NEAR_FORK + 4 }]);
+  });
+
+  test("a target that died, changed alliance state, was extended or began attacking us drops the plan", () => {
+    const now = (o: Partial<typeof alive>) => ({ ...alive, ...o });
+    const r = (b: typeof alive, n: typeof alive) =>
+      rebasePlan(plan, 2400, 3, b, n, () => false);
+    expect(r(alive, now({ alive: false }))).toEqual({ drop: "died" });
+    expect(r(alive, now({ allied: true, expiresAt: 3000 }))).toEqual({
+      drop: "allied",
+    });
+    expect(r(ally, alive)).toEqual({ drop: "unallied" });
+    // The alliance's term moved (the web extended it during the search).
+    expect(r(ally, { ...ally, expiresAt: 4200 })).toEqual({ drop: "extended" });
+    expect("steps" in r(ally, { ...ally })).toBe(true);
+    expect(r(alive, now({ attacking: true }))).toEqual({ drop: "attacked" });
     // Attacking us already at the search: not a change.
     const atk = now({ attacking: true });
-    expect("steps" in rebasePlan(plan, 3, atk, atk, () => false)).toBe(true);
+    expect("steps" in r(atk, atk)).toBe(true);
     // No target: nothing to compare.
     expect(
       "steps" in
-        rebasePlan(cand("keep", { steps }), 3, null, null, () => false),
+        rebasePlan(cand("keep", { steps }), 2400, 3, null, null, () => false),
     ).toBe(true);
   });
 
-  test("a first step whose `when` no longer holds live: the window passed", () => {
-    const renew = cand("lapse:Z", {
+  test("a step due now whose `when` no longer holds live: the window passed", () => {
+    const renew = cand("ally:Z", {
       steps: [{ at: 2400, label: "renew", when: { unallied: "Z" } }],
     });
-    expect(rebasePlan(renew, 5, alive, alive, (id) => id === "Z")).toEqual({
+    const isZ = (id: string) => id === "Z";
+    expect(rebasePlan(renew, 2400, 5, alive, alive, isZ)).toEqual({
       drop: "window",
     });
-    expect("steps" in rebasePlan(renew, 5, alive, alive, () => false)).toBe(
-      true,
-    );
+    expect(
+      "steps" in rebasePlan(renew, 2400, 5, alive, alive, () => false),
+    ).toBe(true);
     const brk = cand("break:Z", {
       steps: [{ at: 2400, label: "break", when: { allied: "Z" } }],
     });
-    const ally = { ...alive, allied: true };
-    expect(rebasePlan(brk, 5, ally, ally, () => false)).toEqual({
+    expect(rebasePlan(brk, 2400, 5, ally, ally, () => false)).toEqual({
       drop: "window",
     });
+    // Not only the first step: a keep's extension due now (its gift step
+    // went first) is checked too; a step due later is left to its send.
+    const keep = cand("keep:Z", {
+      steps: [
+        { at: 2400, label: "gift" },
+        { at: 2400, label: "extend", when: { allied: "Z" } },
+        { at: 3005, label: "renew", when: { unallied: "Z" } },
+      ],
+    });
+    expect(rebasePlan(keep, 2400, 5, ally, ally, () => false)).toEqual({
+      drop: "window",
+    });
+    expect("steps" in rebasePlan(keep, 2400, 5, ally, ally, isZ)).toBe(true);
   });
 });
 
@@ -413,5 +517,44 @@ describe("search slices: live", () => {
     // the rollout did).
     expect(lines1).toContain(`search-slice 2200 k=${k} checks=none`);
     expect(lines1.some((m) => m.startsWith("search-check 2200 "))).toBe(false);
+  }, 900_000);
+
+  test("a sliced search past searchSliceMaxTicks is given up (charged, no act); a trigger firing meanwhile waits; the next runs", async () => {
+    // Two rollout ticks per slice: the rounds cannot finish in 400 ticks.
+    // From 2,700 on the clock stands still: a slice runs to the end.
+    const o = { ...OPTIONS, searchSliceMs: 2, searchSliceMaxTicks: 400 };
+    let clock = 0;
+    let still = false;
+    const game = await apexArena({
+      gameID: gameIDFor("quick", 4),
+      map: GameMapType.Onion,
+      options: o,
+      search: new SearchController(parseApexOptions(o), () =>
+        still ? 0 : clock++,
+      ),
+    });
+    game.play(2700);
+    still = true;
+    game.play(101);
+    const lines = game.host.logs.map(msg);
+    const searches = lines.filter((m) => /^search \d+ /.test(m));
+    expect(searches[0]).toMatch(
+      /^search 2200 clock skipped=slice k=401 te=\d+ ms=\d+/,
+    );
+    // The clock trigger of 2,500 fired while the search was pending: held
+    // (no second search ran, none was refused for budget); the one of
+    // 2,800 ran whole in its tick.
+    expect(searches.some((m) => m.startsWith("search 2500 "))).toBe(false);
+    expect(searches[1]).toMatch(
+      /^search 2800 clock cands=\d+ chosen=\S+ .* k=0 /,
+    );
+    // The given-up search played nothing: no directive before 2,800, no
+    // search-slice line for it.
+    expect(lines.some((m) => m.startsWith("search-slice 2200 "))).toBe(false);
+    const sent = game.host.logs
+      .map((l) => /^\[\d+\] (\d+) directive attack /.exec(l))
+      .filter((m) => m !== null)
+      .map((m) => Number(m![1]));
+    expect(sent.every((t) => t >= 2800)).toBe(true);
   }, 900_000);
 });

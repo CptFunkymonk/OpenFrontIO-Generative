@@ -14,6 +14,7 @@ import {
 import { mirvThreatState, NUKE_KINDS } from "../../../lib/search/cands/nuke";
 import { NukeWatch } from "../../../lib/search/cands/nukeWatch";
 import { Checkpoints } from "../../../lib/search/Checkpoints";
+import { freezeHost, withSteps } from "../../../lib/search/FrozenHost";
 import {
   BaseView,
   Candidate,
@@ -99,6 +100,11 @@ export const FORESIGHT_TICKS = 300;
 export const NAVAL_HOME = 0.8;
 export const NAVAL_FOR = 600;
 export const NAVAL_EVERY = 1200;
+
+/** Package SLICE: blank policy copies a sliced search takes at its trigger
+ *  tick beyond one per round-1 candidate and the base, for the plans the
+ *  base's attackers and round 2b add (FrozenHost.ts). */
+export const POOL_SPARES = 4;
 
 const MODES = ["act", "plans"] as const;
 /** The plan's candidate kinds (§2.4); generators may add their own. */
@@ -223,9 +229,22 @@ interface Pending {
   slicer: Slicer<Ready>;
   /** Plays the choice at this tick (the rounds finished). */
   finish: (ctx: AgentContext, host: SearchHost) => Outcome;
-  /** Gives the search up at this tick, `k` ticks after t0. */
-  abandon: (ctx: AgentContext, k: number) => Outcome;
+  /** Gives the search up at this tick, `k` ticks after t0, for `why`
+   *  (the log's skipped=): the cap, or a pre-empting trigger. */
+  abandon: (ctx: AgentContext, k: number, why: string) => Outcome;
 }
+
+/** Package SLICE (review D5): the triggers that pre-empt a pending sliced
+ *  search (its work is given up, `skipped=preempted`, and theirs starts in
+ *  the same tick): an alliance's window, an attack seen or foreseen, a
+ *  nuke threat. Any other trigger waits (Triggers.refused, retried at the
+ *  next tick) until the search ends. */
+export const PREEMPTS: ReadonlySet<string> = new Set([
+  "end",
+  "attack",
+  "foresight",
+  "nuke",
+]);
 
 export class SearchController implements LiveSearch {
   readonly name = "search";
@@ -329,14 +348,23 @@ export class SearchController implements LiveSearch {
     })) {
       ctx.log(line);
     }
-    // Package SLICE: a search in progress takes this tick's slice; no
-    // trigger is checked until it ends (one search at a time).
-    if (this.pending !== null) {
-      this.resume(ctx, host);
-      return;
-    }
     const obs = this.observe(ctx, host);
     const fired = this.triggers.check(obs);
+    // Package SLICE: a search in progress takes this tick's slice (one
+    // search at a time). The triggers are still watched (review D5): a
+    // high-priority one pre-empts it, any other waits for the next tick.
+    if (this.pending !== null) {
+      if (fired === null) {
+        this.resume(ctx, host);
+        return;
+      }
+      if (!PREEMPTS.has(fired.name) || fired.low) {
+        this.triggers.refused(obs, fired, t + 1);
+        this.resume(ctx, host);
+        return;
+      }
+      this.end(ctx, `preempted:${fired.name}`);
+    }
     if (fired === null) return;
     let out: Outcome | null = null;
     try {
@@ -363,13 +391,14 @@ export class SearchController implements LiveSearch {
   private resume(ctx: AgentContext, host: SearchHost): void {
     const p = this.pending!;
     const k = ctx.tick - p.t0;
+    if (!p.slicer.finished && k > this.o.searchSliceMaxTicks) {
+      this.end(ctx, "slice");
+      return;
+    }
     let done = false;
     let out: Outcome | null = null;
     try {
-      if (!p.slicer.finished && k > this.o.searchSliceMaxTicks) {
-        done = true;
-        out = p.abandon(ctx, k);
-      } else if (p.slicer.run()) {
+      if (p.slicer.run()) {
         done = true;
         out = p.finish(ctx, host);
       }
@@ -377,11 +406,28 @@ export class SearchController implements LiveSearch {
       done = true;
       throw e;
     } finally {
-      if (done) {
-        this.pending = null;
-        this.settle(p.obs, p.fired, out);
-      }
+      if (done) this.settled(p, ctx.tick, out);
     }
+  }
+
+  /** Package SLICE: the pending search given up at this tick for `why`. */
+  private end(ctx: AgentContext, why: string): void {
+    const p = this.pending!;
+    let out: Outcome | null = null;
+    try {
+      out = p.abandon(ctx, ctx.tick - p.t0, why);
+    } finally {
+      this.settled(p, ctx.tick, out);
+    }
+  }
+
+  /** The pending search ended at `tk`: settled with the triggers as a try
+   *  at t0 (their clocks of information age count from the state it
+   *  read), but the next try waits the gap from tk (review D7). */
+  private settled(p: Pending, tk: number, out: Outcome | null): void {
+    this.pending = null;
+    this.settle(p.obs, p.fired, out);
+    this.triggers.lastTry = Math.max(this.triggers.lastTry, tk);
   }
 
   gameOver(ctx: AgentContext, outcome: AgentOutcome): void {
@@ -509,7 +555,9 @@ export class SearchController implements LiveSearch {
     const t = ctx.tick;
     const wm = host.wm();
     if (wm === null) return { ran: false, none: true };
-    const start = performance.now();
+    // The search's clock (performance.now, or the tests' fake one): the
+    // logs' ms, and the pre-phase's share of the first slice.
+    const start = this.now();
     const sliced = o.searchSliceMs > 0;
     const sv: SearchView = {
       ctx,
@@ -608,23 +656,31 @@ export class SearchController implements LiveSearch {
         ms: performance.now() - f0,
       };
     };
-    // Package SLICE: a sliced search opens its candidates' rollouts at
-    // later live ticks, so what they start from is taken now, at t0: the
-    // live budget's mirror (cloned per rollout) and a copy of the live
-    // policy per plan known now (`pre`; a plan the base's attackers add
-    // later, or round 2b's, gets a copy of the live policy as it is then:
-    // counted as `late`). Unsliced, both are made at each open, as today.
+    // Package SLICE: a sliced search opens its rollouts at later live
+    // ticks, so what they start from is taken now, at t0: the live budget's
+    // mirror (cloned per rollout), a pool of blank copies of the live
+    // policy (one per rollout, given its plan's steps when it opens:
+    // FrozenHost.withSteps; a search that opens more rollouts than the
+    // pool holds copies the live policy then, counted as `late`), and the
+    // host the generators read (freezeHost). Unsliced, the copies are made
+    // at each open and the generators read the live host, as today.
     const mirror0 = sliced ? BudgetMirror.fromContext(ctx) : null;
-    const copies = new Map<string, { steps: string; copy: RolloutCopy }>();
-    let late = 0;
+    const pool: RolloutCopy[] = [];
     if (sliced) {
-      for (const c of pre) {
-        copies.set(c.name, {
-          steps: JSON.stringify(c.steps),
-          copy: host.forRolloutWith({ steps: c.steps, replace: true }),
-        });
-      }
+      const n = 1 + o.searchMaxCands + POOL_SPARES;
+      for (let i = 0; i < n; i++) pool.push(host.forRolloutWith());
     }
+    const host0 = sliced ? freezeHost(host, t) : host;
+    let late = 0;
+    const copyFor = (spec: RolloutSpec): RolloutPolicy => {
+      if (!sliced) return host.forRolloutWith(spec);
+      const blank = pool.pop();
+      if (blank === undefined) {
+        late++;
+        return host.forRolloutWith(spec);
+      }
+      return spec.steps === undefined ? blank : withSteps(blank, spec.steps);
+    };
     const runners: Runner[] = [];
     const spent = () => runners.reduce((a, r) => a + r.cost(), 0);
     const open = (
@@ -632,21 +688,12 @@ export class SearchController implements LiveSearch {
       spec: RolloutSpec,
       send?: { h: number; target: string },
       alliances?: boolean,
-      cand?: Candidate,
     ): Runner => {
       const { f, phi: cost, ms } = fork();
-      let policy: RolloutPolicy | null = null;
-      if (cand !== undefined && sliced) {
-        const made = copies.get(cand.name);
-        copies.delete(cand.name);
-        if (made !== undefined && made.steps === JSON.stringify(cand.steps)) {
-          policy = made.copy;
-        } else late++;
-      }
       const r = new Runner({
         name,
         fork: f,
-        policy: policy ?? host.forRolloutWith(spec),
+        policy: copyFor(spec),
         budget:
           mirror0 === null ? BudgetMirror.fromContext(ctx) : mirror0.clone(),
         gameID: ctx.gameID,
@@ -670,26 +717,33 @@ export class SearchController implements LiveSearch {
           ? { h: c.lastSend, target: c.target }
           : undefined,
         c.isBreak,
-        c,
       );
 
     // The base plays what live plays if no plan is adopted: the pending
-    // steps (no replace).
-    const base = open("base", {});
-    // Package SLICE: the generators of a sliced search read the world at
-    // t0 (a fork of it, never stepped; not charged), not the live game at
-    // the tick they happen to run in.
-    const world0 = sliced ? source!.fork() : null;
-    const me0 =
-      world0 === null ? ctx.me : world0.game.playerByClientID(ctx.clientID)!;
-    const svAll: SearchView =
-      world0 === null ? sv : { ...sv, game: world0.game, me: me0 };
+    // steps (no replace). Package SLICE: the generators of a sliced search
+    // read the world at t0 (a fork of it, never stepped; not charged) and
+    // the host frozen at t0, not the live ones at the tick they happen to
+    // run in. Both forks are made in the generator, after a yield each
+    // (review D6): a slice whose tick already spent its time on the
+    // pre-phase leaves them to the next ticks.
+    let base: Runner | null = null;
+    let world0: GameFork | null = null;
+    let me0 = ctx.me;
+    let svAll: SearchView = sv;
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias -- a generator function has no lexical this
     const self = this;
     /** The rounds: the base's first round, the candidates, the budget's
      *  degrade, round 2b's generator and Rounds' generator. */
     const body = function* (): Generator<void, Ready, void> {
+      if (sliced) yield;
+      base = open("base", {});
+      if (sliced) {
+        yield;
+        world0 = source!.fork();
+        me0 = world0.game.playerByClientID(ctx.clientID)!;
+        svAll = { ...sv, game: world0.game, me: me0, host: host0 };
+      }
       yield* advanceSteps(base, o.searchH1);
       const all = roundOneCandidates(
         listsOf(svAll, {
@@ -809,6 +863,7 @@ export class SearchController implements LiveSearch {
           const id = chosen.cand.target;
           const r = rebasePlan(
             chosen.cand,
+            t,
             k,
             id === null ? null : targetState(world0!.game, me0, id),
             id === null ? null : targetState(ctx1.game, ctx1.me, id),
@@ -830,13 +885,13 @@ export class SearchController implements LiveSearch {
         const kind = chosen!.cand.kind;
         this.stats.actsByKind[kind] = (this.stats.actsByKind[kind] ?? 0) + 1;
       } else if (dropped !== null) this.stats.dropped++;
-      const pick = played ? chosen!.roll : base;
+      const pick = played ? chosen!.roll : base!;
       if (played && k > 0) {
         // The live game sends the plan k ticks after its rollout did: the
         // rollout's checkpoints do not apply (the base's no longer either).
         ctx1.log(`search-slice ${t} k=${k} checks=none`);
       } else {
-        this.addChecks(t, pick.snaps, played ? chosen!.h! : base.h);
+        this.addChecks(t, pick.snaps, played ? chosen!.h! : base!.h);
       }
       const foreseen = [...pick.attackers].map(([id, a]) => ({
         id,
@@ -872,7 +927,9 @@ export class SearchController implements LiveSearch {
       ctx1.log(
         `search-feat ${JSON.stringify(this.features(ctx1, host1, fired, dropped === null ? chosen : null, res.best, level))}`,
       );
-      ctx1.log(`search-rows ${JSON.stringify(this.rows(t, base, res.judged))}`);
+      ctx1.log(
+        `search-rows ${JSON.stringify(this.rows(t, base!, res.judged))}`,
+      );
       return { ran: true, foreseen };
     };
 
@@ -887,35 +944,38 @@ export class SearchController implements LiveSearch {
           break;
         }
       }
-      return finish(ctx, host, ready, () => performance.now() - start);
+      return finish(ctx, host, ready, () => this.now() - start);
     }
 
     // Package SLICE: the first slice now, the rest at the next live ticks.
     const slicer = new Slicer<Ready>(gen, o.searchSliceMs, this.now);
-    const preMs = performance.now() - start;
+    const preMs = this.now() - start;
     const wall = () => preMs + slicer.ms;
-    if (slicer.run()) return finish(ctx, host, slicer.result!, wall);
+    if (slicer.run(preMs)) return finish(ctx, host, slicer.result!, wall);
     this.pending = {
       t0: t,
       obs,
       fired,
       slicer,
       finish: (ctx1, host1) => finish(ctx1, host1, slicer.result!, wall),
-      abandon: (ctx1, k) => {
+      abandon: (ctx1, k, skipped) => {
         // Given up: what it spent is charged; live follows the base, whose
-        // snaps so far still predict it.
+        // snaps so far (if it ran at all) still predict it.
         const te = spent();
         this.budget.charge(te);
         this.stats.te += te;
         this.stats.abandoned++;
-        this.addChecks(t, base.snaps, base.h);
+        if (base !== null) this.addChecks(t, base.snaps, base.h);
         ctx1.log(
-          `search ${t} ${fired.name} skipped=slice k=${k} te=${Math.round(te)} ` +
+          `search ${t} ${fired.name} skipped=${skipped} k=${k} te=${Math.round(te)} ` +
             `ms=${Math.round(wall())} ${why}`,
         );
         return {
           ran: true,
-          foreseen: [...base.attackers].map(([id, a]) => ({ id, at: t + a.h })),
+          foreseen:
+            base === null
+              ? []
+              : [...base.attackers].map(([id, a]) => ({ id, at: t + a.h })),
         };
       },
     };

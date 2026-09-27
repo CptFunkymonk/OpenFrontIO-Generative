@@ -172,6 +172,16 @@ baseline Iceland 90` (dev server up) writes screenshots and a state trace to
 first second and held 16k tiles a minute in, its replica never behind by even
 one turn.
 
+The apex search (`apex:{"search":true}`) blocks the tick it runs in for
+seconds to minutes; in the browser the worker's replica would fall behind the
+live game by as many ticks. There the search is time-sliced:
+`"searchSliceMs":30` spends at most 30 ms of wall time per live tick on it
+and acts when its rounds finish (the log's `k=` ticks later, the plan
+re-based to that tick; `lib/search/Slicer.ts`). The arena leaves it 0: its
+clock is game time, and only the unsliced search replays. A search's forks
+(0.1-0.7 s each, one per rollout) cannot be sliced, so the worst tick is a
+fork, not the slice.
+
 The same worker would also work in multiplayer against a real server (turns
 arrive over the socket instead of from `LocalServer`), subject to the same
 10/s, 150/min limits the arena enforces.

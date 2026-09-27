@@ -1499,13 +1499,20 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  tick, blocking it for seconds to minutes. */
   searchSliceMs: number;
   /** A sliced search still running this many ticks after its trigger is
-   *  given up (logged `skipped=slice`; what it spent is charged). */
+   *  given up (logged `skipped=slice`; what it spent is charged). At 30 ms
+   *  a full search takes 140-450 ticks on a quick map (Japan), more on a
+   *  large one. While a search runs, an alliance's window, an attack or a
+   *  nuke threat pre-empts it (`skipped=preempted:<trigger>`); the other
+   *  triggers wait for it to end. */
   searchSliceMaxTicks: number;
   /** A plan chosen k > 0 ticks after its search is re-based to the tick it
-   *  is adopted (its steps' ticks and foe marks shift by k) unless its
-   *  target died, changed alliance state with us or began attacking us
-   *  since, or its first step's `when` no longer holds (dropped, logged
-   *  `dropped=`). Off: such a plan is dropped (`dropped=stale`). */
+   *  is adopted (lib/search/Slicer.ts: a fork-anchored plan's steps and foe
+   *  marks shift by k; a lapse's or keep's keep their ticks at the
+   *  alliance's term) unless its target died, changed alliance state with
+   *  us, had its term extended or began attacking us since, a step is
+   *  already past, or a step due now has a `when` that no longer holds
+   *  (dropped, logged `dropped=`). Off: such a plan is dropped
+   *  (`dropped=stale`). */
   searchSliceRebase: boolean;
 
   // Package WP8 GOLD, the leader's economy (docs/14-m4-plan.md §2.8 items
@@ -1982,7 +1989,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
 
   // Package SLICE, the time-sliced search (off: the arena replays).
   searchSliceMs: 0,
-  searchSliceMaxTicks: 300,
+  searchSliceMaxTicks: 1500,
   searchSliceRebase: true,
 
   // Package WP8 GOLD.
