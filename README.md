@@ -93,10 +93,13 @@ This fork ships an AI player, `apex` (`src/agent/`). With `npm run dev` up,
 open `http://localhost:9000/?agent=apex`, click **Solo** and start a game
 without clicking the map: the bot spawns and plays your seat, with its
 reasoning in the browser console under the `[agent]` prefix. Open
-`http://localhost:9000/?agent=off` to get your seat back. To play against it,
-create a private lobby in one tab and join the lobby link from a second tab
-with `?agent=apex` appended. Step by step, with what to expect and how to
-watch arena games as pictures: [`docs/16-playing-with-apex.md`](docs/16-playing-with-apex.md).
+`http://localhost:9000/?agent=off` to turn it off again (in singleplayer this
+ends the current game). To play against it, create a private lobby in one
+window and open `http://localhost:9000/game/<lobby ID>?agent=apex` in a
+**private/incognito window or another browser** (a second tab of the same
+browser profile would take over your own seat). Step by step, including the
+lobby spawn-timing caveat, what to expect and how to watch arena games as
+pictures: [`docs/16-playing-with-apex.md`](docs/16-playing-with-apex.md).
 
 ### Client Only
 
