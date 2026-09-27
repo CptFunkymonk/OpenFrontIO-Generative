@@ -741,11 +741,14 @@ describe("keepBetrayalLine", () => {
     // ...unless we are a traitor: betraying one costs B nothing.
     ally(w, A);
     w.game.addExecution(new BreakAllianceExecution(w.us, A));
-    w.h.step();
+    for (let i = 0; i < 5 && w.us.isAlliedWith(NA); i++) w.h.step();
+    expect(w.us.isAlliedWith(NA)).toBe(false);
     expect(w.us.isTraitor()).toBe(true);
     const t3 = w.game.ticks();
     expect(keepBetrayalLine(v, NB, t3)).toBeCloseTo(0.33 * NB.troops(), 6);
-    // Later, its troops regrown by the model: the line grows with them.
+    // Later, its troops regrown by the model (B at 0.3x our cap, under
+    // its own): the line grows with them.
+    NB.setTroops(Math.round(0.3 * w.cap));
     const d = t3 + w.game.config().allianceDuration();
     expect(nm.troopsAt(B, d)).toBeGreaterThan(NB.troops());
     expect(keepBetrayalLine(v, NB, d)).toBeCloseTo(0.33 * nm.troopsAt(B, d), 6);
