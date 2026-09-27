@@ -1,0 +1,1509 @@
+diff --git a/src/agent/AgentHost.ts b/src/agent/AgentHost.ts
+index e3c8975..4b542ed 100644
+--- a/src/agent/AgentHost.ts
++++ b/src/agent/AgentHost.ts
+@@ -223,13 +223,16 @@ export class AgentHost {
+     this.stats.forks++;
+     const start = performance.now();
+     try {
+-      return new GameFork(
+-        runner.game,
+-        runner.snapshot(),
+-        terrain,
+-        gameStart,
+-        clientID,
+-      );
++      const snap = runner.snapshot();
++      const mid = performance.now();
++      const f = new GameFork(runner.game, snap, terrain, gameStart, clientID);
++      // SCRATCH (search): the snapshot and restore split, and the size.
++      (this as unknown as { forkSplit: unknown }).forkSplit = {
++        snapMs: Math.round(mid - start),
++        restoreMs: Math.round(performance.now() - mid),
++        bytes: snap.length,
++      };
++      return f;
+     } finally {
+       const ms = performance.now() - start;
+       const forkMs = this.stats.forkMs;
+@@ -270,6 +273,8 @@ export class AgentHost {
+       send: (intent) => this.send(intent),
+       budget: () => this.budget.remaining(),
+       fork: () => this.fork(),
++      // SCRATCH (search)
++      ...({ forkSplit: () => (this as unknown as { forkSplit: unknown }).forkSplit } as object),
+       log: (message) => this.log(message),
+     };
+   }
+diff --git a/src/agent/agents/apex/controllers/ExpansionController.ts b/src/agent/agents/apex/controllers/ExpansionController.ts
+index 6ccdc5d..0ef040b 100644
+--- a/src/agent/agents/apex/controllers/ExpansionController.ts
++++ b/src/agent/agents/apex/controllers/ExpansionController.ts
+@@ -492,6 +492,11 @@ export class ExpansionController implements Controller {
+     return this.nearTribes;
+   }
+ 
++  /** SCRATCH (search): carried into a rollout copy. */
++  setNearTribes(ids: readonly PlayerID[]): void {
++    this.nearTribes = [...ids];
++  }
++
+   decide(v: View, s: ApexState): void {
+     const run = new AllocatorRun(v, s);
+     run.all();
+diff --git a/src/agent/agents/apex/controllers/NavalController.ts b/src/agent/agents/apex/controllers/NavalController.ts
+index 057580f..5b7b488 100644
+--- a/src/agent/agents/apex/controllers/NavalController.ts
++++ b/src/agent/agents/apex/controllers/NavalController.ts
+@@ -335,6 +335,19 @@ function foodOf(
+   return f;
+ }
+ 
++/** SCRATCH (search): the memos of one OwnerGrid onto its clone, so a
++ *  rollout copy decides on the same (possibly stale) fields as live. */
++export function carryNavalMemos(from: OwnerGrid, to: OwnerGrid): void {
++  const v = voyageMemo.get(from);
++  if (v !== undefined) voyageMemo.set(to, structuredClone(v));
++  const r = nationReachMemo.get(from);
++  if (r !== undefined) {
++    nationReachMemo.set(to, { ...structuredClone({ ...r, grid: null }), grid: r.grid });
++  }
++  const f = foodMemo.get(from);
++  if (f !== undefined) foodMemo.set(to, structuredClone(f));
++}
++
+ export class NavalController implements Controller {
+   readonly name = "naval";
+ 
+diff --git a/src/agent/agents/apex/options.ts b/src/agent/agents/apex/options.ts
+index cc98e93..434f1b5 100644
+--- a/src/agent/agents/apex/options.ts
++++ b/src/agent/agents/apex/options.ts
+@@ -1042,6 +1042,47 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
+   /** Fork budget outside the spawn search, in ms per 10 s of game time
+    *  (roadmap §11.4). */
+   forkMsPer10s: number;
++
++  // ── SCRATCH (search experiments, not for the main tree) ─────────────
++  /** "" off; "cost": time forks and rollouts; "plans": evaluate candidate
++   *  plans by rollouts and log them; "act": plans, then act on the best. */
++  probeMode: string;
++  /** Explicit probe ticks (live ticks). */
++  probeTicks: number[];
++  /** Probe every this many ticks from probeFrom (0: only probeTicks). */
++  probeEvery: number;
++  probeFrom: number;
++  /** Rollout horizon in ticks. */
++  probeH: number;
++  /** Most bordering nations given strike candidates. */
++  probeK: number;
++  /** Chaos-floor candidates (cadence shifts) per probe. */
++  probeShifts: number;
++  /** act: minimum value gain over base (in tiles) to act. */
++  probeMargin: number;
++  /** act: only probe while in stall mode. */
++  probeStallOnly: boolean;
++  /** Value: troops per tile used to convert home+outgoing into tiles. */
++  probeCbar: number;
++  /** Value: weight of home+outgoing troops (beta) and of incoming (alpha). */
++  probeBeta: number;
++  probeAlpha: number;
++  /** Candidate kinds: comma list of base,shift,strike,half,break,hold. */
++  probeKinds: string;
++  /** act2: first-round horizon, survivors kept, absolute margin (tiles). */
++  probeH1: number;
++  probeKeep: number;
++  probeMarginAbs: number;
++  /** act2: strike sizes as shares of purse.available("strike"). */
++  probeFracs: number[];
++  /** act2: most candidates besides the base. */
++  probeMaxCands: number;
++  /** act3: horizon for break finalists; prune share at H1; dip guard. */
++  probeHBreak: number;
++  probePrune: number;
++  probeDip: number;
++  /** act3: a lapse is judged this many ticks after its strike (0: at probeH). */
++  probeHPost: number;
+ }
+ 
+ function deepFreeze<T>(o: T): T {
+@@ -1077,8 +1118,8 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
+   spawnWallBudgetMs: 120_000,
+ 
+   // Package A3 SPAWN PREVIEW.
+-  spawnPreview: true,
+-  spawnErase: true,
++  spawnPreview: false,
++  spawnErase: false,
+   spawnEraseMargin: -0.25,
+   spawnEraseK: 4,
+   spawnEraseMinLeft: 2,
+@@ -1270,7 +1311,7 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
+   bombs: false,
+ 
+   // Package A1 STRIKES.
+-  strikes: true,
++  strikes: false,
+   strikeW1: true,
+   strikeW2: true,
+   strikeW3: true,
+@@ -1291,12 +1332,12 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
+   strikeRetreat: false,
+   strikeRetreatRatio: 1.5,
+   strikeDetHorizon: 0,
+-  strikeMinContact: 8,
+-  strikeDetNearTarget: true,
+-  strikeDetNearReach: true,
++  strikeMinContact: 0,
++  strikeDetNearTarget: false,
++  strikeDetNearReach: false,
+   strikeSaveOpenOnly: false,
+   strikeReachModel: false,
+-  strikeLiveCheck: true,
++  strikeLiveCheck: false,
+ 
+   // Package B3 NUKES AND SAMs.
+   nukeModel: false,
+@@ -1330,6 +1371,29 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
+   },
+ 
+   forkMsPer10s: 1000,
++
++  probeMode: "",
++  probeTicks: [],
++  probeEvery: 0,
++  probeFrom: 2400,
++  probeH: 600,
++  probeK: 3,
++  probeShifts: 2,
++  probeMargin: 0,
++  probeStallOnly: false,
++  probeCbar: 60,
++  probeBeta: 0.5,
++  probeAlpha: 0.5,
++  probeKinds: "base,shift,strike,half",
++  probeH1: 200,
++  probeKeep: 2,
++  probeMarginAbs: 200,
++  probeFracs: [0.5, 1],
++  probeMaxCands: 8,
++  probeHBreak: 1200,
++  probePrune: 0.03,
++  probeDip: 0.2,
++  probeHPost: 600,
+ } satisfies ApexOptions);
+ 
+ /**
+diff --git a/src/agent/agents/apex/policy.ts b/src/agent/agents/apex/policy.ts
+index c605abb..efc45d4 100644
+--- a/src/agent/agents/apex/policy.ts
++++ b/src/agent/agents/apex/policy.ts
+@@ -17,7 +17,13 @@ import {
+   ownerGrid,
+   RaceGrid,
+ } from "../../lib/RaceField";
+-import { createPurse, HomeFloors, Purse, Scheduler } from "../../lib/Scheduler";
++import {
++  createPurse,
++  HomeFloors,
++  Proposal,
++  Purse,
++  Scheduler,
++} from "../../lib/Scheduler";
+ import { scanWorld, WorldModel } from "../../lib/WorldModel";
+ import { DefenseController } from "./controllers/DefenseController";
+ import { DiplomacyController } from "./controllers/DiplomacyController";
+@@ -27,12 +33,19 @@ import {
+   inboundNukeLevels,
+ } from "./controllers/EconomyController";
+ import { EndgameController } from "./controllers/EndgameController";
+-import { ExpansionController } from "./controllers/ExpansionController";
+-import { NavalController } from "./controllers/NavalController";
++import {
++  ExpansionController,
++  inStall as inStallOf,
++} from "./controllers/ExpansionController";
++import {
++  carryNavalMemos,
++  NavalController,
++} from "./controllers/NavalController";
+ import { SpawnController } from "./controllers/SpawnController";
+ import { StrikeController } from "./controllers/StrikeController";
+ import { homeFloors, NO_FLOORS } from "./HomeTarget";
+ import { ApexOptions, BooleanOption } from "./options";
++import { DirectiveStep, RolloutSpec, SearchProbe } from "./SearchProbe";
+ import { ApexState, stateLog } from "./state";
+ 
+ // The apex policy (spec §2.10, §3.0): runs the controllers over one View per
+@@ -269,10 +282,23 @@ export class ApexPolicy {
+     >
+   > | null = null;
+ 
++  /** SCRATCH: the live NationModel to clone into the copy's runtime. */
++  private nmSource: NationModel | null = null;
++  private schedSource: Scheduler | null = null;
++  /** SCRATCH: proposals to offer at given live ticks (search). */
++  private directive: {
++    at: number;
++    p?: Proposal;
++    frac?: number;
++    foe?: { id: string; until: number };
++  }[] = [];
++  private probe: SearchProbe | null = null;
++
+   constructor(
+     private readonly o: ApexOptions,
+     private readonly s: ApexState,
+   ) {
++    if (o.probeMode !== "") this.probe = new SearchProbe(o);
+     const all: Record<ControllerName, Controller> = {
+       defense: new DefenseController(),
+       diplomacy: new DiplomacyController(),
+@@ -304,16 +330,31 @@ export class ApexPolicy {
+   /** Live: builds the View, runs the controllers in priority order (§3),
+    *  flushes the Scheduler through ctx.send. */
+   tick(ctx: AgentContext): void {
++    if (this.probe !== null && !this.inRollout) {
++      this.probe.tick(ctx, {
++        floors: () => this.rt?.floors ?? NO_FLOORS,
++        wm: () => this.rt?.wm ?? null,
++        inStall: (t) => inStallOf(this.s, t, this.o),
++        forRolloutWith: (spec, t) => this.forRolloutWith(spec, t),
++        setDirective: (steps, t) => this.setDirective(steps, t),
++      });
++    }
++    const sentLive: AgentIntent[] = [];
+     this.run({
+       game: ctx.game,
+       me: ctx.me,
+       tick: ctx.tick,
+       gameID: ctx.gameID,
+       budget: () => ctx.budget(),
+-      send: (i) => ctx.send(i),
++      send: (i) => {
++        const r = ctx.send(i);
++        if (r === "ok") sentLive.push(i);
++        return r;
++      },
+       live: ctx,
+       log: (line) => ctx.log(line),
+     });
++    this.probe?.noteLive(ctx.tick, sentLive);
+   }
+ 
+   /** For rollouts: a copy with structuredClone(state) and lookahead
+@@ -337,6 +378,67 @@ export class ApexPolicy {
+     return { step: (v) => copy.step(v) };
+   }
+ 
++  /** SCRATCH: a rollout copy with a directive, a cadence shift and an
++   *  options override. */
++  forRolloutWith(spec: RolloutSpec, tick: number): RolloutPolicy {
++    this.syncState();
++    const o = spec.o === undefined ? this.o : { ...this.o, ...spec.o };
++    const copy = new ApexPolicy(o, structuredClone(this.s));
++    copy.inRollout = true;
++    copy.probe = null;
++    copy.sharedRace = this.rt?.race ?? this.sharedRace;
++    const rt = this.rt;
++    if (rt !== null) {
++      copy.carry = structuredClone({
++        wm: rt.wm,
++        floors: rt.floors,
++        owners: rt.owners,
++        refreshList: rt.refreshList,
++        refreshCursor: rt.refreshCursor,
++        refreshedAt: rt.refreshedAt,
++      });
++    }
++    if (rt !== null && rt.owners !== null && copy.carry?.owners) {
++      carryNavalMemos(rt.owners, copy.carry.owners);
++    }
++    if (rt !== null) {
++      copy.nmSource = rt.nm;
++      copy.schedSource = rt.scheduler;
++      copy.expansion.setNearTribes(this.expansion.nationsNearTribes());
++    }
++    copy.s.timers.lastThink -= spec.shift;
++    copy.directive = spec.directive.map((d) => ({
++      at: tick + d.delay,
++      p: d.p,
++      frac: d.frac,
++      foe: d.foe,
++    }));
++    const rp: RolloutPolicy & { copyLog?: () => string[] } = {
++      step: (v) => copy.step(v),
++    };
++    rp.copyLog = () => copy.s.log;
++    return rp;
++  }
++
++  private newScheduler(env: Env): Scheduler {
++    const sc = new Scheduler(this.o, env.game.config().msPerTick());
++    if (this.schedSource !== null) {
++      sc.copyFrom(this.schedSource);
++      this.schedSource = null;
++    }
++    return sc;
++  }
++
++  /** SCRATCH: live directive (act mode). */
++  setDirective(steps: DirectiveStep[], tick: number): void {
++    this.directive = steps.map((d) => ({
++      at: tick + d.delay,
++      p: d.p,
++      frac: d.frac,
++      foe: d.foe,
++    }));
++  }
++
+   /** One rollout step: the intents this tick's policy sends, rate limited
+    *  by the fork's BudgetMirror on the fork clock. */
+   private step(v: SimView): AgentIntent[] {
+@@ -420,6 +522,48 @@ export class ApexPolicy {
+     rt.scheduler.begin(t, env.budget(), purse);
+     const v = this.view(env, rt, wm, purse);
+ 
++    // SCRATCH: foes (no alliance, extension or counter-accept with them).
++    const foes = (s as { searchFoes?: Record<string, number> }).searchFoes;
++    rt.scheduler.veto.clear();
++    if (foes !== undefined) {
++      for (const [id, until] of Object.entries(foes)) {
++        if (until < t) continue;
++        rt.scheduler.veto.add(`ally:${id}`);
++        rt.scheduler.veto.add(`ext:${id}`);
++      }
++    }
++    // SCRATCH: the search's directive, before the reflexes.
++    if (this.directive.length > 0) {
++      const now = this.directive.filter((d) => d.at === t);
++      this.directive = this.directive.filter((d) => d.at > t);
++      for (const d of now) {
++        if (d.foe !== undefined) {
++          const sf = s as { searchFoes?: Record<string, number> };
++          sf.searchFoes ??= {};
++          sf.searchFoes[d.foe.id] = d.foe.until;
++        }
++        if (d.p === undefined) continue;
++        let p = d.p;
++        if (d.frac !== undefined && p.intent.type === "attack") {
++          const S = Math.floor(d.frac * purse.available("strike"));
++          if (S < 1000) {
++            env.log?.(`${t} directive attack skipped (S=${S})`);
++            continue;
++          }
++          p = {
++            ...p,
++            intent: { ...p.intent, troops: S },
++            spend: { kind: "strike", troops: S },
++            meta: { ...p.meta, clampTroops: S },
++          };
++        }
++        const ok = rt.scheduler.offer(p);
++        env.log?.(
++          `${t} directive ${p.intent.type} ${ok ? "ok" : "refused " + String(rt.scheduler.lastRefusal)}`,
++        );
++      }
++    }
++
+     // Step 3: reflexes.
+     for (const c of this.onTicks) c.onTick?.(v, s);
+     // Step 4: decisions.
+@@ -478,8 +622,14 @@ export class ApexPolicy {
+     if (rt !== null && rt.game === env.game && rt.me === env.me) return rt;
+     const { o, s } = this;
+     const models = createModels(env.game);
+-    const nm = new NationModel(env.game, env.me, env.gameID, models);
+-    nm.relations = relationTracker(s.relations);
++    let nm: NationModel;
++    if (this.nmSource !== null) {
++      nm = this.nmSource.cloneFor(env.game, env.me, models);
++      this.nmSource = null;
++    } else {
++      nm = new NationModel(env.game, env.me, env.gameID, models);
++      nm.relations = relationTracker(s.relations);
++    }
+     this.rt = {
+       game: env.game,
+       me: env.me,
+@@ -487,7 +637,7 @@ export class ApexPolicy {
+       nm,
+       nukes: new NukeModel(env.game, env.me, nm),
+       ledger: Ledger.fromData(s.ledger),
+-      scheduler: new Scheduler(o, env.game.config().msPerTick()),
++      scheduler: this.newScheduler(env),
+       lookahead:
+         !this.inRollout && usesLookahead(o)
+           ? new Lookahead({
+diff --git a/src/agent/lib/NationModel.ts b/src/agent/lib/NationModel.ts
+index 67fc555..479b161 100644
+--- a/src/agent/lib/NationModel.ts
++++ b/src/agent/lib/NationModel.ts
+@@ -727,6 +727,39 @@ export class NationModel {
+     this.betrayals = me.betrayals();
+   }
+ 
++  /** SCRATCH (search): an exact copy bound to another game (a fork). */
++  cloneFor(game: Game, me: Player, models: Models): NationModel {
++    const c = new NationModel(game, me, this.gameID, models);
++    c.relations = relationTracker(this.relations.toData());
++    for (const [k, v] of this.byId) c.byId.set(k, structuredClone(v));
++    for (const [k, v] of this.paramsCache) {
++      c.paramsCache.set(k, structuredClone(v));
++    }
++    for (const [k, v] of this.troopPath) {
++      c.troopPath.set(k, structuredClone(v));
++    }
++    c.nationList = this.nationList
++      .filter((p) => game.hasPlayer(p.id()))
++      .map((p) => game.player(p.id()));
++    c.nonBotAlive = this.nonBotAlive;
++    c.listAt = this.listAt;
++    c.lastObserve = this.lastObserve;
++    c.firstDecision = this.firstDecision;
++    c.ourAttackIDs = new Set(this.ourAttackIDs);
++    c.allies = new Set(this.allies);
++    c.requestsToUs = new Set(this.requestsToUs);
++    c.ourRequests = new Set(this.ourRequests);
++    c.ourTargets = new Set(this.ourTargets);
++    c.ourNukeIDs = new Set(this.ourNukeIDs);
++    c.nukeLaunched = this.nukeLaunched;
++    c.warshipWatch = structuredClone(this.warshipWatch);
++    c.allyExpiry = new Map(this.allyExpiry);
++    c.broken = [...this.broken];
++    c.betrayals = this.betrayals;
++    for (const l of this.log) c.log.push(l);
++    return c;
++  }
++
+   // ── Observation ────────────────────────────────────────────────────────
+ 
+   /** Every tick, O(nations deciding this tick + new attack IDs): records
+diff --git a/src/agent/lib/Scheduler.ts b/src/agent/lib/Scheduler.ts
+index f502afb..9646106 100644
+--- a/src/agent/lib/Scheduler.ts
++++ b/src/agent/lib/Scheduler.ts
+@@ -223,6 +223,14 @@ export class Scheduler {
+     this.ticksPerMinute = Math.max(1, Math.round(60_000 / msPerTick));
+   }
+ 
++  /** SCRATCH (search): the class windows and the dup guard of another
++   *  scheduler (a rollout copy starts where the live one is). */
++  copyFrom(other: Scheduler): void {
++    this.window.clear();
++    for (const [k, v] of other.window) this.window.set(k, [...v]);
++    this.lastCancel = other.lastCancel;
++  }
++
+   /** Start of tick: copies ctx.budget(). Drops whatever an earlier tick
+    *  accepted and did not flush. */
+   begin(tick: number, remaining: IntentBudgetRemaining, purse: Purse): void {
+@@ -386,9 +394,13 @@ export class Scheduler {
+     return out;
+   }
+ 
++  /** SCRATCH (search): keys refused this tick (alliances with foes). */
++  veto = new Set<string>();
++
+   private check(p: Proposal): Refusal | null {
+     if (this.purse === null) return "notBegun";
+     if (p.key !== undefined && this.keys.has(p.key)) return "key";
++    if (p.key !== undefined && this.veto.has(p.key)) return "key";
+     if (p.intent.type === "attack") {
+       const since = this.tick - this.lastCancel;
+       if (since >= DUP_GUARD_TICKS[0] && since <= DUP_GUARD_TICKS[1]) {
+diff --git a/src/agent/agents/apex/SearchProbe.ts b/src/agent/agents/apex/SearchProbe.ts
+new file mode 100644
+index 0000000..9b0ba01
+--- /dev/null
++++ b/src/agent/agents/apex/SearchProbe.ts
+@@ -0,0 +1,989 @@
++// SCRATCH (search experiments; not for the main tree). Measures forks and
++// rollouts in the midgame, evaluates candidate plans by rolling each out
++// with a copy of the live policy, and optionally acts on the best one.
++// Everything it logs is one `PROBE {json}` line per probe.
++import { Game, Player, PlayerType } from "../../../core/game/Game";
++import { IntentSchema } from "../../../core/Schemas";
++import { AgentContext, AgentIntent } from "../../Agent";
++import { GameFork } from "../../Fork";
++import { MAX_INTENT_BYTES } from "../../IntentBudget";
++import { BudgetMirror, RolloutPolicy, SimView } from "../../lib/Lookahead";
++import { HomeFloors, Prio, Proposal } from "../../lib/Scheduler";
++import { WorldModel } from "../../lib/WorldModel";
++import type { ApexOptions } from "./options";
++
++export interface DirectiveStep {
++  /** Ticks after the probe tick (0 = this tick's run). */
++  delay: number;
++  p?: Proposal;
++  /** Attack troops as this share of purse.available("strike") when sent. */
++  frac?: number;
++  /** Mark a foe (no alliance with it) until a tick, when applied. */
++  foe?: { id: string; until: number };
++}
++
++export interface RolloutSpec {
++  directive: DirectiveStep[];
++  /** Decision cadence shift of the copy (s.timers.lastThink -= shift). */
++  shift: number;
++  /** Options override for the copy. */
++  o?: Partial<ApexOptions>;
++}
++
++export interface ProbeHost {
++  floors(): HomeFloors;
++  wm(): WorldModel | null;
++  inStall(tick: number): boolean;
++  forRolloutWith(spec: RolloutSpec, tick: number): RolloutPolicy;
++  setDirective(steps: DirectiveStep[], tick: number): void;
++}
++
++interface Snap {
++  h: number;
++  tiles: number;
++  home: number;
++  out: number;
++  inc: number;
++  cap: number;
++  gold: number;
++  alive: boolean;
++  natAtks: number;
++  natTroops: number;
++  rank: number;
++  top: number;
++}
++
++interface Cand {
++  name: string;
++  spec: RolloutSpec;
++  /** act3: ticks after the fork when the plan's strike is sent. */
++  strikeAt?: number;
++}
++
++function isValidIntent(intent: AgentIntent): boolean {
++  return (
++    IntentSchema.safeParse(intent).success &&
++    JSON.stringify(intent).length <= MAX_INTENT_BYTES
++  );
++}
++
++function rankOf(game: Game, me: Player): { rank: number; top: number } {
++  let rank = 1;
++  let top = 0;
++  const mine = me.numTilesOwned();
++  for (const p of game.players()) {
++    if (p === me || p.type() === PlayerType.Bot || !p.isAlive()) continue;
++    const n = p.numTilesOwned();
++    if (n > mine) rank++;
++    if (n > top) top = n;
++  }
++  return { rank, top };
++}
++
++function snapOf(
++  game: Game,
++  me: Player,
++  h: number,
++  natAtks: number,
++  natTroops: number,
++): Snap {
++  let out = 0;
++  for (const a of me.outgoingAttacks()) out += a.troops();
++  let inc = 0;
++  for (const a of me.incomingAttacks()) {
++    if (a.attacker().type() !== PlayerType.Bot) inc += a.troops();
++  }
++  const { rank, top } = rankOf(game, me);
++  return {
++    h,
++    tiles: me.numTilesOwned(),
++    home: Math.round(me.troops()),
++    out: Math.round(out),
++    inc: Math.round(inc),
++    cap: Math.round(game.config().maxTroops(me)),
++    gold: Number(me.gold()),
++    alive: me.isAlive(),
++    natAtks,
++    natTroops: Math.round(natTroops),
++    rank,
++    top,
++  };
++}
++
++/** Steps `f` `ticks` times with `policy` (null: no intents), sampling at
++ *  every checkpoint in `at`. Times the policy and the simulation apart. */
++function roll(
++  ctx: AgentContext,
++  f: GameFork,
++  policy: RolloutPolicy | null,
++  ticks: number,
++  at: readonly number[],
++  trace?: Map<number, string[]>,
++): { snaps: Snap[]; simMs: number; polMs: number; chunkMs: number[] } {
++  const me = f.game.playerByClientID(ctx.clientID);
++  if (me === null) throw new Error("probe: no player in fork");
++  const budget = BudgetMirror.fromLive(
++    ctx.budget(),
++    ctx.tick * ctx.game.config().msPerTick(),
++  );
++  const snaps: Snap[] = [];
++  const seen = new Set<string>();
++  let natAtks = 0;
++  let natTroops = 0;
++  let simMs = 0;
++  let polMs = 0;
++  const chunkMs: number[] = [];
++  let chunkStart = performance.now();
++  const want = new Set(at);
++  for (let h = 1; h <= ticks; h++) {
++    let intents: AgentIntent[] = [];
++    if (policy !== null) {
++      const g = f.game;
++      const view: SimView = {
++        game: g,
++        me,
++        tick: g.ticks(),
++        gameID: ctx.gameID,
++        budget,
++      };
++      const p0 = performance.now();
++      intents = policy.step(view).filter(isValidIntent);
++      polMs += performance.now() - p0;
++      if (trace !== undefined && h <= 80 && intents.length > 0) {
++        trace.set(view.tick, intents.map((i) => JSON.stringify(i)));
++      }
++    }
++    const s0 = performance.now();
++    f.step(intents);
++    simMs += performance.now() - s0;
++    for (const a of me.incomingAttacks()) {
++      const t = a.attacker().type();
++      if (t === PlayerType.Bot || seen.has(a.id())) continue;
++      seen.add(a.id());
++      natAtks++;
++      natTroops += a.troops();
++    }
++    if (h % 100 === 0) {
++      const now = performance.now();
++      chunkMs.push(Math.round((now - chunkStart) * 10) / 10);
++      chunkStart = now;
++    }
++    if (want.has(h)) snaps.push(snapOf(f.game, me, h, natAtks, natTroops));
++    if (me.hasSpawned() && !me.isAlive()) {
++      snaps.push(snapOf(f.game, me, h, natAtks, natTroops));
++      break;
++    }
++  }
++  return { snaps, simMs, polMs, chunkMs };
++}
++
++/** A resumable rollout: one fork and one policy copy, stepped on demand. */
++class Runner {
++  readonly me: Player;
++  private readonly budget: BudgetMirror;
++  private readonly seen = new Set<string>();
++  natAtks = 0;
++  natTroops = 0;
++  h = 0;
++  simMs = 0;
++  polMs = 0;
++  dead = false;
++  snaps: Snap[] = [];
++  /** Nations (and humans) whose attacks reached us: first h and troops. */
++  attackers = new Map<string, { h: number; troops: number }>();
++
++  constructor(
++    private readonly ctx: AgentContext,
++    readonly f: GameFork,
++    private readonly policy: RolloutPolicy,
++    readonly name: string,
++    readonly forkMs: number,
++  ) {
++    const me = f.game.playerByClientID(ctx.clientID);
++    if (me === null) throw new Error("probe: no player in fork");
++    this.me = me;
++    this.budget = BudgetMirror.fromLive(
++      ctx.budget(),
++      ctx.tick * ctx.game.config().msPerTick(),
++    );
++  }
++
++  /** Steps to horizon `to`, snapping at the checkpoints in `at`. */
++  advance(to: number, at: readonly number[]): Snap {
++    const want = new Set(at);
++    while (this.h < to && !this.dead) {
++      const g = this.f.game;
++      const view: SimView = {
++        game: g,
++        me: this.me,
++        tick: g.ticks(),
++        gameID: this.ctx.gameID,
++        budget: this.budget,
++      };
++      const p0 = performance.now();
++      const intents = this.policy.step(view).filter(isValidIntent);
++      const s0 = performance.now();
++      this.polMs += s0 - p0;
++      this.f.step(intents);
++      this.simMs += performance.now() - s0;
++      this.h++;
++      for (const a of this.me.incomingAttacks()) {
++        if (a.attacker().type() === PlayerType.Bot || this.seen.has(a.id())) {
++          continue;
++        }
++        this.seen.add(a.id());
++        this.natAtks++;
++        this.natTroops += a.troops();
++        const id = a.attacker().id();
++        const prev = this.attackers.get(id);
++        if (prev === undefined) {
++          this.attackers.set(id, { h: this.h, troops: a.troops() });
++        } else prev.troops += a.troops();
++      }
++      if (this.me.hasSpawned() && !this.me.isAlive()) this.dead = true;
++      if (want.has(this.h) || this.dead) {
++        this.snaps.push(
++          snapOf(g, this.me, this.h, this.natAtks, this.natTroops),
++        );
++      }
++    }
++    const last = this.snaps[this.snaps.length - 1];
++    if (last !== undefined && last.h === this.h) return last;
++    const s = snapOf(this.f.game, this.me, this.h, this.natAtks, this.natTroops);
++    this.snaps.push(s);
++    return s;
++  }
++}
++
++/** V = tiles + beta·(home + out)/cbar − alpha·inc/cbar; dead: −Infinity. */
++function valueOf(s: Snap, o: ApexOptions): number {
++  if (!s.alive) return -Infinity;
++  return (
++    s.tiles + (o.probeBeta * (s.home + s.out)) / o.probeCbar -
++    (o.probeAlpha * s.inc) / o.probeCbar
++  );
++}
++
++/** The bordering nations at a probe (logs only). */
++function neighbours(ctx: AgentContext, wm: WorldModel | null): unknown[] {
++  if (wm === null) return [];
++  const out: unknown[] = [];
++  for (const n of wm.nations) {
++    if (n.type !== PlayerType.Nation || !ctx.game.hasPlayer(n.id)) continue;
++    const N = ctx.game.player(n.id);
++    if (!N.isAlive()) continue;
++    const al = ctx.me.allianceWith(N);
++    out.push({
++      id: n.id,
++      name: N.name(),
++      T: Math.round(N.troops()),
++      M: Math.round(ctx.game.config().maxTroops(N)),
++      tiles: N.numTilesOwned(),
++      contact: n.contact,
++      ally: al === null ? null : al.expiresAt() - ctx.tick,
++    });
++  }
++  return out;
++}
++
++export class SearchProbe {
++  private done = new Set<number>();
++  private checks: { tick: number; h: number; pred: Snap; t0: number }[] = [];
++  trace: Map<number, string[]> | null = null;
++  traceFrom = 0;
++  liveTrace = new Map<number, string[]>();
++
++  /** Live sends of tick t (for the trace comparison). */
++  noteLive(t: number, intents: AgentIntent[]): void {
++    if (this.trace === null) return;
++    if (t < this.traceFrom || t > this.traceFrom + 80) {
++      if (t > this.traceFrom + 80) this.compare(t);
++      return;
++    }
++    if (intents.length > 0) {
++      this.liveTrace.set(t, intents.map((i) => JSON.stringify(i)));
++    }
++  }
++
++  private lastCtx: AgentContext | null = null;
++
++  private compare(t: number): void {
++    const tr = this.trace;
++    if (tr === null || this.lastCtx === null) return;
++    const ticks = new Set([...tr.keys(), ...this.liveTrace.keys()]);
++    const diffs: string[] = [];
++    for (const k of [...ticks].sort((a, b) => a - b)) {
++      const a = (tr.get(k) ?? []).join(" | ");
++      const b = (this.liveTrace.get(k) ?? []).join(" | ");
++      if (a !== b) diffs.push(`${k}: roll=[${a}] live=[${b}]`);
++    }
++    this.lastCtx.log(
++      `PROBE_TRACE from ${this.traceFrom} diffs=${diffs.length} ` +
++        diffs.slice(0, 6).join(" ;; ").slice(0, 3000),
++    );
++    this.trace = null;
++    this.liveTrace = new Map();
++    void t;
++  }
++
++  constructor(private readonly o: ApexOptions) {}
++
++  private due(tick: number): boolean {
++    const o = this.o;
++    if (o.probeTicks.includes(tick)) return true;
++    if (o.probeEvery > 0 && tick >= o.probeFrom) {
++      return (tick - o.probeFrom) % o.probeEvery === 0;
++    }
++    return false;
++  }
++
++  /** Called at the start of the live tick, before any send. */
++  private lastWall: number | null = null;
++  private probeWall = 0;
++  private intervals: number[] = [];
++
++  /** Mean wall ms per live tick over the last 200 ticks (probes excluded):
++   *  the live simulation plus every agent's think, at the current load. */
++  liveMsPerTick(): number {
++    if (this.intervals.length === 0) return 0;
++    let sum = 0;
++    for (const x of this.intervals) sum += x;
++    return Math.round((sum / this.intervals.length) * 100) / 100;
++  }
++
++  tick(ctx: AgentContext, host: ProbeHost): void {
++    const now = performance.now();
++    if (this.lastWall !== null) {
++      this.intervals.push(now - this.lastWall - this.probeWall);
++      if (this.intervals.length > 200) this.intervals.shift();
++    }
++    this.probeWall = 0;
++    this.lastWall = now;
++    this.lastCtx = ctx;
++    this.verify(ctx);
++    const o = this.o;
++    if (o.probeMode === "") return;
++    const t = ctx.tick;
++    if (ctx.game.inSpawnPhase() || !ctx.me.isAlive()) return;
++    if (!this.due(t) || this.done.has(t)) return;
++    this.done.add(t);
++    if (o.probeStallOnly && !host.inStall(t)) return;
++    const p0 = performance.now();
++    try {
++      if (o.probeMode === "cost") this.cost(ctx, host);
++      else if (o.probeMode === "act2") this.act2(ctx, host);
++      else if (o.probeMode === "act3") this.act3(ctx, host);
++      else this.plans(ctx, host, o.probeMode === "act");
++    } catch (e) {
++      ctx.log(`PROBE error ${String(e)}`);
++    }
++    this.probeWall = performance.now() - p0;
++  }
++
++  /** Live values at the checkpoints of the base rollouts (log-only mode):
++   *  how exact the base prediction is. */
++  private verify(ctx: AgentContext): void {
++    if (this.checks.length === 0) return;
++    const keep: typeof this.checks = [];
++    for (const c of this.checks) {
++      if (ctx.tick !== c.tick) {
++        if (ctx.tick < c.tick) keep.push(c);
++        continue;
++      }
++      const me = ctx.me;
++      const live = snapOf(ctx.game, me, c.h, 0, 0);
++      ctx.log(
++        `PROBE_CHECK ${JSON.stringify({
++          t0: c.t0,
++          h: c.h,
++          pred: { tiles: c.pred.tiles, home: c.pred.home, out: c.pred.out },
++          live: { tiles: live.tiles, home: live.home, out: live.out },
++        })}`,
++      );
++    }
++    this.checks = keep;
++  }
++
++  private checkpoints(): number[] {
++    const H = this.o.probeH;
++    const at = [50, 100, 150, 200, 300, 450, 600, 900, 1200, 1800, 2400];
++    return [...at.filter((h) => h < H), H];
++  }
++
++  private cost(ctx: AgentContext, host: ProbeHost): void {
++    const H = this.o.probeH;
++    const at = this.checkpoints();
++    const f0 = performance.now();
++    const f1 = ctx.fork();
++    const fork1 = performance.now() - f0;
++    const split = (ctx as unknown as { forkSplit?: () => unknown }).forkSplit?.();
++    const nul = roll(ctx, f1, null, H, at);
++    const f2s = performance.now();
++    const f2 = ctx.fork();
++    const fork2 = performance.now() - f2s;
++    const pol = host.forRolloutWith({ directive: [], shift: 0 }, ctx.tick);
++    this.trace = new Map();
++    this.traceFrom = ctx.tick;
++    const withPol = roll(ctx, f2, pol, H, at, this.trace);
++    const cl = (pol as { copyLog?: () => string[] }).copyLog?.() ?? [];
++    ctx.log(
++      `PROBE_COPYLOG ${cl.filter((l) => l.includes("boat")).join(" || ").slice(0, 6000)}`,
++    );
++    const me = ctx.me;
++    ctx.log(
++      `PROBE ${JSON.stringify({
++        mode: "cost",
++        t: ctx.tick,
++        liveMsPerTick: this.liveMsPerTick(),
++        tiles: me.numTilesOwned(),
++        players: ctx.game.players().filter((p) => p.isAlive()).length,
++        fork1: Math.round(fork1),
++        split,
++        fork2: Math.round(fork2),
++        nullSim: Math.round(nul.simMs),
++        nullChunks: nul.chunkMs,
++        polSim: Math.round(withPol.simMs),
++        polPol: Math.round(withPol.polMs),
++        polChunks: withPol.chunkMs,
++        base: withPol.snaps,
++        nul: nul.snaps,
++      })}`,
++    );
++    for (const s of withPol.snaps) {
++      this.checks.push({ tick: ctx.tick + s.h, h: s.h, pred: s, t0: ctx.tick });
++    }
++  }
++
++  private candidates(ctx: AgentContext, host: ProbeHost): Cand[] {
++    const o = this.o;
++    const kinds = new Set(o.probeKinds.split(","));
++    const out: Cand[] = [{ name: "base", spec: { directive: [], shift: 0 } }];
++    if (kinds.has("shift")) {
++      for (let k = 1; k <= o.probeShifts; k++) {
++        out.push({ name: `shift${k}`, spec: { directive: [], shift: k } });
++      }
++    }
++    if (kinds.has("hold")) {
++      out.push({
++        name: "hold",
++        spec: {
++          directive: [],
++          shift: 0,
++          o: {
++            strikes: false,
++            stallStrike: false,
++            stallTribes: false,
++            stallBoats: false,
++          },
++        },
++      });
++    }
++    const wm = host.wm();
++    if (wm === null) return out;
++    const floors = host.floors();
++    const me = ctx.me;
++    const home = Math.min(me.troops(), Math.ceil(floors.cap));
++    const avail = Math.max(0, home - floors.strike);
++    const nations = wm.nations
++      .filter((n) => n.type === PlayerType.Nation && n.contact >= 8)
++      .filter((n) => ctx.game.hasPlayer(n.id))
++      .sort((a, b) => b.contact - a.contact);
++    let k = 0;
++    for (const n of nations) {
++      if (k >= o.probeK) break;
++      const N = ctx.game.player(n.id);
++      if (!N.isAlive()) continue;
++      const friendly = me.isFriendly(N);
++      const mk = (S: number, delay: number): DirectiveStep => ({
++        delay,
++        p: {
++          intent: { type: "attack", targetID: n.id, troops: Math.floor(S) },
++          prio: Prio.Strike,
++          cls: "strike",
++          key: `attack:${n.smallID}`,
++          spend: { kind: "strike", troops: Math.floor(S) },
++          plan: "strike",
++          meta: { target: n.smallID, clampTroops: S, expectedRefund: 0 },
++        },
++      });
++      if (!friendly) {
++        if (!n.attackable || avail < 1000) continue;
++        k++;
++        if (kinds.has("strike")) {
++          out.push({
++            name: `strike:${n.id}:full`,
++            spec: { directive: [mk(avail, 0)], shift: 0 },
++          });
++        }
++        if (kinds.has("half")) {
++          out.push({
++            name: `strike:${n.id}:half`,
++            spec: { directive: [mk(avail / 2, 0)], shift: 0 },
++          });
++        }
++      } else if (kinds.has("break")) {
++        k++;
++        out.push({
++          name: `break:${n.id}:full`,
++          spec: {
++            directive: [
++              {
++                delay: 0,
++                p: {
++                  intent: { type: "breakAlliance", recipient: n.id },
++                  prio: Prio.Diplomacy,
++                  cls: "diplomacy",
++                  key: `break:${n.id}`,
++                },
++              },
++              mk(avail, 1),
++            ],
++            shift: 0,
++          },
++        });
++      }
++    }
++    return out;
++  }
++
++  private plans(ctx: AgentContext, host: ProbeHost, act: boolean): void {
++    const o = this.o;
++    const H = o.probeH;
++    const at = this.checkpoints();
++    const cands = this.candidates(ctx, host);
++    const rows: {
++      name: string;
++      forkMs: number;
++      simMs: number;
++      polMs: number;
++      snaps: Snap[];
++      v: number;
++    }[] = [];
++    const t0 = performance.now();
++    for (const c of cands) {
++      const fs = performance.now();
++      const f = ctx.fork();
++      const forkMs = performance.now() - fs;
++      const pol = host.forRolloutWith(c.spec, ctx.tick);
++      const r = roll(ctx, f, pol, H, at);
++      const last = r.snaps[r.snaps.length - 1];
++      rows.push({
++        name: c.name,
++        forkMs: Math.round(forkMs),
++        simMs: Math.round(r.simMs),
++        polMs: Math.round(r.polMs),
++        snaps: r.snaps,
++        v: last === undefined ? -Infinity : valueOf(last, o),
++      });
++    }
++    const totalMs = performance.now() - t0;
++    const base = rows[0];
++    let best = base;
++    for (const r of rows) {
++      if (r.name.startsWith("shift")) continue;
++      if (r.v > best.v) best = r;
++    }
++    let chosen = "base";
++    if (act && best !== base && best.v > base.v + o.probeMargin) {
++      const c = cands.find((x) => x.name === best.name);
++      if (c !== undefined) {
++        host.setDirective(c.spec.directive, ctx.tick);
++        chosen = best.name;
++      }
++    }
++    const floors = host.floors();
++    ctx.log(
++      `PROBE ${JSON.stringify({
++        mode: act ? "act" : "plans",
++        t: ctx.tick,
++        nbrs: neighbours(ctx, host.wm()),
++        liveMsPerTick: this.liveMsPerTick(),
++        tiles: ctx.me.numTilesOwned(),
++        home: Math.round(ctx.me.troops()),
++        cap: Math.round(floors.cap),
++        H: Math.round(floors.H),
++        stall: host.inStall(ctx.tick),
++        totalMs: Math.round(totalMs),
++        chosen,
++        rows,
++      })}`,
++    );
++    if (!act || chosen === "base") {
++      for (const s of base.snaps) {
++        this.checks.push({
++          tick: ctx.tick + s.h,
++          h: s.h,
++          pred: s,
++          t0: ctx.tick,
++        });
++      }
++    }
++  }
++
++  /** An attack proposal whose troops the directive sets (frac). */
++  private attackStep(id: string, sid: number, delay: number, frac: number) {
++    return {
++      delay,
++      frac,
++      p: {
++        intent: { type: "attack" as const, targetID: id, troops: 1 },
++        prio: Prio.Strike,
++        cls: "strike" as const,
++        key: `attack:${sid}`,
++        spend: { kind: "strike" as const, troops: 1 },
++        plan: "strike" as const,
++        meta: { target: sid, clampTroops: 1, expectedRefund: 0 },
++      },
++    };
++  }
++
++  /** act2's candidates, given who attacks us in the base rollout. */
++  private candidates2(
++    ctx: AgentContext,
++    host: ProbeHost,
++    attackers: ReadonlyMap<string, { h: number; troops: number }>,
++  ): Cand[] {
++    const o = this.o;
++    const kinds = new Set(o.probeKinds.split(","));
++    const out: Cand[] = [];
++    const wm = host.wm();
++    if (wm === null) return out;
++    const me = ctx.me;
++    const t = ctx.tick;
++    const nations = wm.nations
++      .filter((n) => n.type === PlayerType.Nation && ctx.game.hasPlayer(n.id))
++      .filter((n) => n.contact >= 8 || attackers.has(n.id))
++      .sort((a, b) => b.contact - a.contact);
++    let k = 0;
++    for (const n of nations) {
++      if (k >= o.probeK) break;
++      const N = ctx.game.player(n.id);
++      if (!N.isAlive()) continue;
++      const al = me.allianceWith(N);
++      if (al === null) {
++        if (!n.attackable) continue;
++        k++;
++        if (kinds.has("strike")) {
++          for (const f of o.probeFracs) {
++            out.push({
++              name: `strike:${n.id}:${f}`,
++              spec: {
++                directive: [this.attackStep(n.id, n.smallID, 0, f)],
++                shift: 0,
++              },
++            });
++          }
++        }
++        continue;
++      }
++      const left = al.expiresAt() - t;
++      if (kinds.has("lapse") && left + 2 <= o.probeH - 100) {
++        k++;
++        out.push({
++          name: `lapse:${n.id}:1`,
++          strikeAt: left + 2,
++          spec: {
++            directive: [
++              { delay: 0, foe: { id: n.id, until: al.expiresAt() + 900 } },
++              this.attackStep(n.id, n.smallID, left + 2, 1),
++            ],
++            shift: 0,
++          },
++        });
++      }
++      if (kinds.has("breakhalf")) {
++        out.push({
++          name: `break:${n.id}:0.5`,
++          spec: {
++            directive: [
++              {
++                delay: 0,
++                p: {
++                  intent: { type: "breakAlliance", recipient: n.id },
++                  prio: Prio.Diplomacy,
++                  cls: "diplomacy",
++                  key: `break:${n.id}`,
++                },
++              },
++              this.attackStep(n.id, n.smallID, 1, 0.5),
++            ],
++            shift: 0,
++          },
++        });
++      }
++      if (kinds.has("break")) {
++        k++;
++        out.push({
++          name: `break:${n.id}:1`,
++          spec: {
++            directive: [
++              {
++                delay: 0,
++                p: {
++                  intent: { type: "breakAlliance", recipient: n.id },
++                  prio: Prio.Diplomacy,
++                  cls: "diplomacy",
++                  key: `break:${n.id}`,
++                },
++              },
++              this.attackStep(n.id, n.smallID, 1, 1),
++            ],
++            shift: 0,
++          },
++        });
++      }
++    }
++    if (kinds.has("ally")) {
++      for (const [id] of attackers) {
++        if (!ctx.game.hasPlayer(id)) continue;
++        const N = ctx.game.player(id);
++        if (N.type() !== PlayerType.Nation || !N.isAlive()) continue;
++        if (me.isAlliedWith(N)) continue;
++        out.push({
++          name: `ally:${id}`,
++          spec: {
++            directive: [
++              {
++                delay: 0,
++                p: {
++                  intent: { type: "allianceRequest", recipient: id },
++                  prio: Prio.Recall,
++                  cls: "defense",
++                  key: `ally:${id}`,
++                },
++              },
++            ],
++            shift: 0,
++          },
++        });
++      }
++    }
++    return out.slice(0, o.probeMaxCands);
++  }
++
++  /**
++   * act3: act2 with pruning and a longer horizon for alliance breaks. Round
++   * 1 takes every candidate to probeH1; a candidate more than probePrune
++   * below the base's land there is dropped. Round 2 takes the best probeKeep
++   * non-break candidates to probeH, round 3 the best break to probeHBreak,
++   * the base to both. A candidate is judged by its value minus the base's at
++   * its own horizon; the best acts if that beats the margin.
++   */
++  private act3(ctx: AgentContext, host: ProbeHost): void {
++    const o = this.o;
++    const H = o.probeH;
++    const HB = Math.max(H, o.probeHBreak);
++    const H1 = Math.min(o.probeH1, H);
++    const at = [...new Set([...this.checkpoints(), 900, 1200, HB])]
++      .filter((h) => h <= HB)
++      .sort((a, b) => a - b);
++    const t0 = performance.now();
++    const mk = (c: Cand): Runner => {
++      const fs = performance.now();
++      const f = ctx.fork();
++      const forkMs = performance.now() - fs;
++      const pol = host.forRolloutWith(c.spec, ctx.tick);
++      return new Runner(ctx, f, pol, c.name, forkMs);
++    };
++    const base = mk({ name: "base", spec: { directive: [], shift: 0 } });
++    base.advance(H1, at);
++    const cands = this.candidates2(ctx, host, base.attackers);
++    const runners: Runner[] = [base];
++    const baseT1 = base.snaps[base.snaps.length - 1].tiles;
++    for (const c of cands) {
++      const r = mk(c);
++      r.advance(H1, at);
++      runners.push(r);
++    }
++    const lastOf = (r: Runner) => r.snaps[r.snaps.length - 1];
++    const alive1 = runners.slice(1).filter((r) => {
++      const sn = lastOf(r);
++      return sn.alive && sn.tiles >= (1 - o.probePrune) * baseT1;
++    });
++    const isBreak = (r: Runner) => r.name.startsWith("break");
++    const val = (r: Runner) => valueOf(lastOf(r), o);
++    const strikes = alive1.filter((r) => !isBreak(r)).sort((a, b) => val(b) - val(a));
++    const breaks = alive1.filter(isBreak).sort((a, b) => val(b) - val(a));
++    const keptS = strikes.slice(0, Math.max(1, o.probeKeep));
++    const keptB = breaks.slice(0, 1);
++    // The horizon each finalist is judged at: a break at HB, a lapse
++    // probeHPost ticks after its strike (at least H), anything else at H.
++    const judge = new Map<Runner, number>();
++    for (const r of keptS) {
++      const c = cands.find((x) => x.name === r.name);
++      const post =
++        o.probeHPost > 0 && c?.strikeAt !== undefined
++          ? Math.ceil((c.strikeAt + o.probeHPost) / 50) * 50
++          : H;
++      judge.set(r, Math.max(H, post));
++    }
++    for (const r of keptB) judge.set(r, HB);
++    // Base values at each horizon a finalist is judged at.
++    const baseAt = new Map<number, number>();
++    const hs = [...new Set([H, ...judge.values()])].sort((a, b) => a - b);
++    for (const h of hs) {
++      base.advance(h, at);
++      baseAt.set(h, valueOf(lastOf(base), o));
++    }
++    for (const [r, h] of judge) r.advance(h, at);
++    const snapAt = (r: Runner, h: number) => {
++      let sn = r.snaps[0];
++      for (const x of r.snaps) if (x.h <= h) sn = x;
++      return sn;
++    };
++    let best: Runner | null = null;
++    let bestGain = -Infinity;
++    const tiles = ctx.me.numTilesOwned();
++    for (const r of [...keptS, ...keptB]) {
++      const h = judge.get(r) ?? H;
++      const vb = baseAt.get(h);
++      if (vb === undefined) continue;
++      // A candidate that dies before its horizon has value -Infinity.
++      const v = r.dead ? -Infinity : valueOf(snapAt(r, h), o);
++      // Safety: no checkpoint more than probeDip below the base's land.
++      let dipped = false;
++      for (const sn of r.snaps) {
++        const b = snapAt(base, sn.h);
++        if (b.h === sn.h && sn.tiles < (1 - o.probeDip) * b.tiles) dipped = true;
++      }
++      if (dipped) continue;
++      const gain = v - vb;
++      if (gain > bestGain) {
++        bestGain = gain;
++        best = r;
++      }
++    }
++    const need = Math.max(o.probeMarginAbs, o.probeMargin * tiles);
++    let chosen = "base";
++    if (best !== null && bestGain > need) {
++      const c = cands.find((x) => x.name === best.name);
++      if (c !== undefined) {
++        host.setDirective(c.spec.directive, ctx.tick);
++        chosen = best.name;
++      }
++    }
++    const totalMs = performance.now() - t0;
++    const floors = host.floors();
++    const row = (r: Runner) => ({
++      name: r.name,
++      forkMs: Math.round(r.forkMs),
++      simMs: Math.round(r.simMs),
++      polMs: Math.round(r.polMs),
++      h: r.h,
++      j: judge.get(r) ?? null,
++      v: Math.round(val(r)),
++      atk: [...r.attackers].map(([id, x]) => [id, x.h, Math.round(x.troops)]),
++      snaps: r.snaps,
++    });
++    ctx.log(
++      `PROBE ${JSON.stringify({
++        mode: "act3",
++        t: ctx.tick,
++        nbrs: neighbours(ctx, host.wm()),
++        liveMsPerTick: this.liveMsPerTick(),
++        tiles,
++        home: Math.round(ctx.me.troops()),
++        cap: Math.round(floors.cap),
++        H: Math.round(floors.H),
++        stall: host.inStall(ctx.tick),
++        totalMs: Math.round(totalMs),
++        simTicks: runners.reduce((a, r) => a + r.h, 0),
++        chosen,
++        gain: Number.isFinite(bestGain) ? Math.round(bestGain) : null,
++        rows: runners.map(row),
++      })}`,
++    );
++    const pick = chosen === "base" ? base : (best as Runner);
++    // An act changes the future the pending checks predicted.
++    if (chosen !== "base") this.checks = this.checks.filter((c) => c.tick <= ctx.tick);
++    for (const sn of pick.snaps) {
++      this.checks.push({ tick: ctx.tick + sn.h, h: sn.h, pred: sn, t0: ctx.tick });
++    }
++  }
++
++  /**
++   * act2: successive halving. The base is rolled out probeH1 ticks first
++   * (who attacks us there picks the ally candidates), then every other
++   * candidate; the best probeKeep by value go on to probeH with the base;
++   * the best of those acts when it beats the base by probeMargin (share of
++   * our tiles) and probeMarginAbs tiles.
++   */
++  private act2(ctx: AgentContext, host: ProbeHost): void {
++    const o = this.o;
++    const H = o.probeH;
++    const H1 = Math.min(o.probeH1, H);
++    const at = this.checkpoints();
++    const t0 = performance.now();
++    const mk = (c: Cand): Runner => {
++      const fs = performance.now();
++      const f = ctx.fork();
++      const forkMs = performance.now() - fs;
++      const pol = host.forRolloutWith(c.spec, ctx.tick);
++      return new Runner(ctx, f, pol, c.name, forkMs);
++    };
++    const baseCand: Cand = { name: "base", spec: { directive: [], shift: 0 } };
++    const base = mk(baseCand);
++    base.advance(H1, at);
++    const cands = this.candidates2(ctx, host, base.attackers);
++    const runners: Runner[] = [base];
++    for (const c of cands) {
++      const r = mk(c);
++      r.advance(H1, at);
++      runners.push(r);
++    }
++    const v1 = (r: Runner) => valueOf(r.snaps[r.snaps.length - 1], o);
++    const others = runners.slice(1).sort((a, b) => v1(b) - v1(a));
++    const kept = others.slice(0, Math.max(1, o.probeKeep));
++    if (H > H1) {
++      base.advance(H, at);
++      for (const r of kept) r.advance(H, at);
++    }
++    const vb = v1(base);
++    let best: Runner | null = null;
++    for (const r of kept) if (best === null || v1(r) > v1(best)) best = r;
++    const tiles = ctx.me.numTilesOwned();
++    const need = Math.max(o.probeMarginAbs, o.probeMargin * tiles);
++    let chosen = "base";
++    if (best !== null && v1(best) > vb + need) {
++      const c = cands.find((x) => x.name === best.name);
++      if (c !== undefined) {
++        host.setDirective(c.spec.directive, ctx.tick);
++        chosen = best.name;
++      }
++    }
++    const totalMs = performance.now() - t0;
++    const floors = host.floors();
++    const row = (r: Runner) => ({
++      name: r.name,
++      forkMs: Math.round(r.forkMs),
++      simMs: Math.round(r.simMs),
++      polMs: Math.round(r.polMs),
++      h: r.h,
++      v: Math.round(v1(r)),
++      atk: [...r.attackers].map(([id, x]) => [id, x.h, Math.round(x.troops)]),
++      snaps: r.snaps,
++    });
++    ctx.log(
++      `PROBE ${JSON.stringify({
++        mode: "act2",
++        t: ctx.tick,
++        nbrs: neighbours(ctx, host.wm()),
++        liveMsPerTick: this.liveMsPerTick(),
++        tiles,
++        home: Math.round(ctx.me.troops()),
++        cap: Math.round(floors.cap),
++        H: Math.round(floors.H),
++        stall: host.inStall(ctx.tick),
++        totalMs: Math.round(totalMs),
++        simTicks: runners.reduce((a, r) => a + r.h, 0),
++        chosen,
++        rows: runners.map(row),
++      })}`,
++    );
++    const pick = chosen === "base" ? base : (best as Runner);
++    for (const sn of pick.snaps) {
++      if (sn.h > H) continue;
++      this.checks.push({ tick: ctx.tick + sn.h, h: sn.h, pred: sn, t0: ctx.tick });
++    }
++  }
++}
