@@ -89,7 +89,12 @@ async function scene(opts: { freeCols?: number } = {}): Promise<Scene> {
   return { f, nation, exec, rate: n.attackRate, phase: n.attackTick, answers };
 }
 
-const STRIKE_ON: ApexOptions = parseApexOptions({ stallStrike: true });
+/** The stall strike alone: the window strikes (o.strikes, package A1; on by
+ *  default since its adoption, Strikes.test.ts) are off. */
+const STRIKE_ON: ApexOptions = parseApexOptions({
+  stallStrike: true,
+  strikes: false,
+});
 
 /** One onTick of the StrikeController over a View as the policy builds it;
  *  returns what it offered (flushed as the policy flushes). */
@@ -293,8 +298,11 @@ describe("apex stall strike (§3.5)", () => {
     const nm = new NationModel(game, me, GAME_ID, createModels(game));
     const ledger = new Ledger();
     const M = config.maxTroops(sc.nation);
-    const defaults = parseApexOptions();
-    expect(defaults.stallStrike).toBe(false);
+    expect(parseApexOptions().stallStrike).toBe(false);
+    // The window strikes are on by default and would strike here: off, the
+    // defaults send nothing.
+    expect(parseApexOptions().strikes).toBe(true);
+    const defaults = parseApexOptions({ strikes: false });
     for (let i = 0; i < 2 * sc.rate; i++) {
       setShare(sc.nation, 0.08, M);
       setShare(me, 0.95, config.maxTroops(me));

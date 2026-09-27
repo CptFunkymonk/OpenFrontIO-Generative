@@ -116,6 +116,9 @@ async function scene(
   return { f, nation, rate: n.attackRate, phase: n.attackTick, answers };
 }
 
+/** Apex's defaults since package A1's adoption (strikes on, with
+ *  strikeMinContact 8, strikeDetNearTarget, strikeDetNearReach and
+ *  strikeLiveCheck); tests that need a sub-option off pin it. */
 const STRIKES: ApexOptions = parseApexOptions({ strikes: true });
 /** The small field holds a nation at 0.8 of its cap at a density of about
  *  200 troops a tile (real nations: 20-40), so tiles are dear there: the
@@ -281,16 +284,25 @@ describe("apex window strikes (§5.2, package A1)", () => {
 
   test("overwhelm: above its trigger the nation answers, but our stack cancels the answer whole and goes on", async () => {
     // A 4-tile front, so the nation lives to its decisions (on the open
-    // field the stack annexes it within its rate − 1 unseen ticks).
+    // field the stack annexes it within its rate − 1 unseen ticks). That is
+    // under the default strikeMinContact (8), which skips it before any
+    // window is read: 0 here.
     const sc = await scene(4);
     const { game, me, config } = sc.f;
     const r = run(sc, stalled());
     const M = config.maxTroops(sc.nation);
     const p = r.nm.params(NATION_ID);
+    const front4 = (o: ApexOptions): ApexOptions => ({
+      ...o,
+      strikeMinContact: 0,
+    });
     // At the default value rule it is not worth it.
     const dear = run(sc, stalled());
-    expect(untilLaunch(sc, dear, STRIKES, 0.8, sc.rate + 2)).toBeNull();
-    const launch = untilLaunch(sc, r, ANY_VALUE, 0.8, 3 * sc.rate);
+    expect(
+      untilLaunch(sc, dear, front4(STRIKES), 0.8, sc.rate + 2),
+    ).toBeNull();
+    expect(strikeMemory(dear.s).stats.skips.value).toBeGreaterThan(0);
+    const launch = untilLaunch(sc, r, front4(ANY_VALUE), 0.8, 3 * sc.rate);
     expect(launch).not.toBeNull();
     const t0 = launch!.tick;
     const line = r.logs.find((l) => l.includes("wstrike"))!;
@@ -321,12 +333,21 @@ describe("apex window strikes (§5.2, package A1)", () => {
     expect(sc.nation.troops()).toBeLessThan((p.reserve + 0.05) * M);
   });
 
-  test("never an ally, an allySet nation, or outside stall mode; off by default", async () => {
+  test("never an ally, an allySet nation, or outside stall mode; on by default, never with strikes false", async () => {
     const sc = await scene();
     const { game, me } = sc.f;
-    expect(parseApexOptions().strikes).toBe(false);
+    // On by default since package A1's adoption, with the review's launch
+    // filters: STRIKES are apex's defaults.
+    expect(parseApexOptions()).toEqual(STRIKES);
+    expect(STRIKES).toMatchObject({
+      strikes: true,
+      strikeMinContact: 8,
+      strikeDetNearTarget: true,
+      strikeDetNearReach: true,
+      strikeLiveCheck: true,
+    });
     const cases: { o: ApexOptions; s: () => ApexState }[] = [
-      { o: parseApexOptions(), s: stalled },
+      { o: parseApexOptions({ strikes: false }), s: stalled },
       { o: STRIKES, s: createState },
       {
         o: STRIKES,
@@ -642,12 +663,17 @@ describe("apex window strikes (§5.2, package A1)", () => {
       models: createModels(game),
     });
     const near = parseApexOptions({ strikes: true, strikeDetNearTarget: true });
+    // The option is on by default.
+    const bordering = parseApexOptions({
+      strikes: true,
+      strikeDetNearTarget: false,
+    });
     expect(v(STRIKES).wm.nations.map((n) => n.id)).toEqual([T.id()]);
     expect(targetNeighbours(v(near), T.id()).map((p) => p.id())).toEqual([
       X.id(),
     ]);
     // Without the option no bordering nation but the target: no floor.
-    expect(deterrenceFloor(v(STRIKES), T.id())).toBe(0);
+    expect(deterrenceFloor(v(bordering), T.id())).toBe(0);
     // With it, X's land line at its decision.
     const dX = nm.nextDecision(X.id(), tick);
     expect(deterrenceFloor(v(near), T.id())).toBeCloseTo(

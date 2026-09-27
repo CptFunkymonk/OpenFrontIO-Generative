@@ -68,6 +68,9 @@ const TIMEOUT = 240_000;
 const WORLD_ID = "G0avyeoz";
 const EUROPE_ID = "G0avyep5";
 const LAYOUT_TICK = PREVIEW_TICK + PREVIEW_ADVANCE;
+/** Apex's spawn without package A3 (both on by default since its
+ *  adoption): planned and sent at spawnDelay. */
+const NO_PREVIEW = { spawnPreview: false, spawnErase: false };
 
 interface Sent {
   tick: number;
@@ -392,9 +395,10 @@ describe("spawnPreview", () => {
     async () => {
       const L = await layoutOf(GameMapType.World, WORLD_ID);
       const want = raceCandidates(L.game, L.me)[0].tile;
+      // No erasure: Siberia's pick would beat the race best (spawnErase).
       const r = await start(
         GameMapType.World,
-        { spawnPreview: true, spawnPreviewEarly: true },
+        { spawnPreview: true, spawnPreviewEarly: true, spawnErase: false },
         WORLD_ID,
       );
       r.step();
@@ -435,26 +439,39 @@ describe("spawnPreview", () => {
   );
 
   test(
-    "off by default, off in the browser, and not at a first call after tick 1: the spawn goes out as before",
+    "on by default; with spawnPreview false, in the browser, or at a first call after tick 1 the spawn goes out as before",
     async () => {
-      expect(APEX_DEFAULTS.spawnPreview).toBe(false);
-      expect(APEX_DEFAULTS.spawnErase).toBe(false);
+      expect(APEX_DEFAULTS.spawnPreview).toBe(true);
+      expect(APEX_DEFAULTS.spawnErase).toBe(true);
       expect(APEX_DEFAULTS.spawnPreviewEarly).toBe(false);
       expect(APEX_DEFAULTS.spawnEraseMinLeft).toBe(2);
-      expect(
-        parseApexOptions({ spawnPreview: true, spawnErase: true }).spawnErase,
-      ).toBe(true);
+      expect(parseApexOptions(NO_PREVIEW)).toMatchObject(NO_PREVIEW);
 
-      const off = await start(GameMapType.Onion, {}, "G0avyep3");
+      // Off: planned and sent at spawnDelay, without a fork.
+      const off = await start(GameMapType.Onion, NO_PREVIEW, "G0avyep3");
       stepTo(off, APEX_DEFAULTS.spawnDelay);
       expect(off.spawns().map((s) => s.tick)).toEqual([
         APEX_DEFAULTS.spawnDelay,
       ]);
+      expect(off.host.stats.forks).toBe(0);
+
+      // The defaults: the preview runs at the first call, and this game has
+      // an erasure site (Leafer Confederation's pick), verified in the
+      // second fork and sent at once.
+      const on = await start(GameMapType.Onion, {}, "G0avyep3");
+      on.step();
+      expect(on.host.stats.errors).toBe(0);
+      expect(on.spawns().map((s) => s.tick)).toEqual([PREVIEW_TICK]);
+      expect(on.host.stats.forks).toBe(2);
+      expect(
+        on.host.logs.some((l) => l.includes("spawn (race, preview, erase")),
+      ).toBe(true);
+      expect(spawnTile(on.spawns()[0])).not.toBe(spawnTile(off.spawns()[0]));
 
       // The preview alone has nothing to send at tick 1: it does not run.
       const alone = await start(
         GameMapType.Onion,
-        { spawnPreview: true },
+        { spawnPreview: true, spawnErase: false },
         "G0avyep3",
       );
       stepTo(alone, APEX_DEFAULTS.spawnDelay);
@@ -628,10 +645,11 @@ describe("spawnErase", () => {
   );
 
   test(
-    "Bering Strait, 2 nations: the guard keeps both (an erasure would leave a duel) and the game replays apex's exactly; spawnEraseMinLeft 0 erases one at tick 1",
+    "Bering Strait, 2 nations: the guard keeps both (an erasure would leave a duel) and the game replays apex's without the preview exactly; spawnEraseMinLeft 0 erases one at tick 1",
     async () => {
       const BERING_ID = "G0avyep2";
-      const apex = await start(GameMapType.BeringStrait, {}, BERING_ID);
+      // Apex as it was before package A3 (the preview is on by default).
+      const apex = await start(GameMapType.BeringStrait, NO_PREVIEW, BERING_ID);
       const guarded = await start(
         GameMapType.BeringStrait,
         { spawnPreview: true, spawnErase: true },
@@ -699,6 +717,7 @@ describe("preview with the lookahead modes", () => {
           spawnIdleTicks: 150,
           spawnPreview: true,
           spawnPreviewEarly: true,
+          spawnErase: false,
         },
         "SPAWNCTL",
       );

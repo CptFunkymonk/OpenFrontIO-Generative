@@ -425,16 +425,22 @@ describe("counter-accepts with the midgame web", () => {
 describe("lapse for a target (webLapseTarget)", () => {
   test("boxed in (every bordering nation kept) with a strike feature on: the weakest bordering one leaves the keep set; inert without strikes", () => {
     const share = { [A]: 0.95, [B]: 0.8, [C]: 0.58, [D]: 0.5 };
-    const on = synth(
-      { webMidgame: true, webSlotsMax: true, stallStrike: true },
+    // The window strikes (on by default), or the stall strike alone.
+    for (const feature of [{}, { strikes: false, stallStrike: true }]) {
+      const on = synth(
+        { webMidgame: true, webSlotsMax: true, ...feature },
+        share,
+      );
+      on.h.step();
+      on.h.step();
+      const mid = diplomacyMemory(on.s).mid!;
+      expect(mid.rank).toEqual([A, B, C]);
+      expect(mid.keep).toEqual([A]);
+    }
+    const off = synth(
+      { webMidgame: true, webSlotsMax: true, strikes: false },
       share,
     );
-    on.h.step();
-    on.h.step();
-    const mid = diplomacyMemory(on.s).mid!;
-    expect(mid.rank).toEqual([A, B, C]);
-    expect(mid.keep).toEqual([A]);
-    const off = synth({ webMidgame: true, webSlotsMax: true }, share);
     off.h.step();
     off.h.step();
     expect(diplomacyMemory(off.s).mid!.keep).toEqual([A, B]);

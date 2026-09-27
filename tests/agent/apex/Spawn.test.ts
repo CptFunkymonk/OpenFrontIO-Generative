@@ -49,10 +49,18 @@ import { StampedIntent } from "../../../src/core/Schemas";
 // runs in a real AgentHost with the arena's turn plumbing (latency 1: an
 // intent sent at ctx.tick T goes into turn T, ArenaGame.ts). Tests may
 // mutate the game (to take a disc away); the agent never does.
+//
+// The spawn preview (package A3, on by default; SpawnPreview.test.ts) plans
+// at the first call, tick 1, and sends there when an erasure site verifies.
+// The tests of the spawn planned and sent at spawnDelay pin it off
+// (NO_PREVIEW); the browser tests need not, since the preview never runs
+// in the browser.
 
 const MAPS = path.join(__dirname, "../../../resources/maps");
 const ME = seatClientID(0);
 const TIMEOUT = 180_000;
+/** Apex's spawn without package A3: planned and sent at spawnDelay. */
+const NO_PREVIEW = { spawnPreview: false, spawnErase: false };
 
 interface Sent {
   tick: number;
@@ -178,7 +186,7 @@ describe("helpers", () => {
   });
 });
 
-describe("mode race (default)", () => {
+describe("mode race (default), without the preview", () => {
   // Race candidates beat planSpawn's tile on the race score on 16 of 20
   // maps surveyed at tick 3 (World ×7.2, Japan ×2.5, Alps ×1.2); on Europe
   // (0.93), Mena (0.90), Asia (0.94) and ArchipelagoSea (0.98) planSpawn's
@@ -193,7 +201,7 @@ describe("mode race (default)", () => {
   ])(
     "%s: sent at tick spawnDelay on the best candidate; race beats planSpawn: %s",
     async (map, raceWins) => {
-      const r = await start(map, {});
+      const r = await start(map, NO_PREVIEW);
       expect(spawnTick(r.game, APEX_DEFAULTS)).toBe(APEX_DEFAULTS.spawnDelay);
       stepTo(r, APEX_DEFAULTS.spawnDelay - 1);
       expect(r.spawns()).toHaveLength(0);
@@ -233,7 +241,10 @@ describe("mode plan", () => {
   test(
     "World: planSpawn's tile, sent at tick spawnDelay",
     async () => {
-      const r = await start(GameMapType.World, { spawnMode: "plan" });
+      const r = await start(GameMapType.World, {
+        ...NO_PREVIEW,
+        spawnMode: "plan",
+      });
       stepTo(r, APEX_DEFAULTS.spawnDelay, false);
       const want = planSpawn(r.game, r.me);
       r.host.tick();
@@ -253,7 +264,7 @@ describe("failure modes (§3.2.7)", () => {
   test(
     "a disc taken before the spawn lands: resent RESEND_TICKS later on the next candidate whose disc is free",
     async () => {
-      const r = await start(GameMapType.World, {});
+      const r = await start(GameMapType.World, NO_PREVIEW);
       stepTo(r, APEX_DEFAULTS.spawnDelay, false);
       const cands = raceCandidates(r.game, r.me);
       r.host.tick();
@@ -345,6 +356,7 @@ describe("lookahead modes (§3.2.2, §3.2.5)", () => {
     "idle: arrival from the idle fork; sent at spawnDelay; the live game is only touched by our spawn",
     async () => {
       const r = await start(GameMapType.Pangaea, {
+        ...NO_PREVIEW,
         spawnMode: "idle",
         spawnIdleTicks: 300,
       });
@@ -365,6 +377,7 @@ describe("lookahead modes (§3.2.2, §3.2.5)", () => {
     "rollout: successive halving picks the round-2 run with most tiles; deterministic",
     async () => {
       const o = {
+        ...NO_PREVIEW,
         spawnMode: "rollout",
         spawnRolloutK: 2,
         spawnKeep: 2,
