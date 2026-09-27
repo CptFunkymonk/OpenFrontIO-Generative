@@ -62,9 +62,10 @@ export class SnapshotWriter {
   readonly railroads = new RefTable<Railroad>();
   readonly clusters = new RefTable<Cluster>();
   /**
-   * Structural mode (GameClone): a TileSet is not listed. `tiles` returns an
-   * empty placeholder and records the set under it here; the clone copies
-   * the set itself (SnapshotReader.tileSet). Null when writing a snapshot.
+   * Structural mode (GameClone): a set written with `tileSet` is not listed.
+   * `tileSet` returns an empty placeholder and records the set under it
+   * here; the clone copies the set itself (SnapshotReader.tileSet). Null
+   * when writing a snapshot.
    */
   readonly tileSets: Map<Uint32Array, TileSet> | null;
 
@@ -127,16 +128,23 @@ export class SnapshotWriter {
     return r.getState();
   }
 
+  /** A tile list, in iteration order. */
   tiles(tiles: Iterable<TileRef>): Uint32Array {
-    if (tiles instanceof TileSet) {
-      if (this.tileSets !== null) {
-        const placeholder = new Uint32Array(0);
-        this.tileSets.set(placeholder, tiles);
-        return placeholder;
-      }
-      return tiles.toUint32Array();
-    }
-    return Uint32Array.from(tiles);
+    return tiles instanceof TileSet
+      ? tiles.toUint32Array()
+      : Uint32Array.from(tiles);
+  }
+
+  /**
+   * A TileSet, stored as its tile list; read it back with
+   * SnapshotReader.tileSet only. In structural mode it is an empty
+   * placeholder instead, standing for the set (see `tileSets`).
+   */
+  tileSet(set: TileSet): Uint32Array {
+    if (this.tileSets === null) return set.toUint32Array();
+    const placeholder = new Uint32Array(0);
+    this.tileSets.set(placeholder, set);
+    return placeholder;
   }
 
   versioned<S>(type: SnapshotType<S>, data: S): Versioned {
@@ -146,6 +154,9 @@ export class SnapshotWriter {
 
 /** Resolves the ids and table indexes a SnapshotWriter produced. */
 export class SnapshotReader {
+  // Structural-mode placeholders resolved by tileSet (checkTileSetsRead).
+  private readonly placeholdersRead = new Set<Uint32Array>();
+
   constructor(
     readonly game: GameImpl,
     private readonly tables: {
@@ -238,11 +249,26 @@ export class SnapshotReader {
   }
 
   /**
-   * A TileSet holding `tiles` in their order, or, for a structural-mode
-   * placeholder, a copy of the set it stands for.
+   * A TileSet holding `tiles` in their order (SnapshotWriter.tileSet), or,
+   * for a structural-mode placeholder, a copy of the set it stands for.
    */
   tileSet(tiles: Uint32Array): TileSet {
     const source = this.tables.tileSets?.get(tiles);
-    return source !== undefined ? source.clone() : new TileSet(tiles);
+    if (source === undefined) return new TileSet(tiles);
+    this.placeholdersRead.add(tiles);
+    return source.clone();
+  }
+
+  /**
+   * Structural mode: throws unless every placeholder was read back through
+   * tileSet. A placeholder read any other way reads as an empty tile list.
+   */
+  checkTileSetsRead(): void {
+    const expected = this.tables.tileSets?.size ?? 0;
+    if (this.placeholdersRead.size !== expected) {
+      throw new SnapshotError(
+        `structural clone: ${expected - this.placeholdersRead.size} of ${expected} tile sets were not read back with SnapshotReader.tileSet`,
+      );
+    }
   }
 }

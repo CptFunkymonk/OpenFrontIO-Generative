@@ -480,6 +480,7 @@ export function restoreSnapshotRecords(
     ).restoreSnapshot(data, r);
   });
   game.restoreState(state, r);
+  r.checkTileSetsRead();
   return playerShells;
 }
 

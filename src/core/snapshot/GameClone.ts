@@ -135,9 +135,10 @@ export function cloneGame(game: Game, deps: CloneDeps): Game {
  * A deep copy of snapshot data with the byte codec's semantics, that is
  * `decodeSnapshotValue(encodeSnapshotValue(v))`: plain objects and arrays
  * rebuilt in key and index order (holes read as undefined), typed arrays
- * copied, primitives kept, and no identity preserved. Anything else throws,
- * as the encoder does. Keys of `keep` (structural placeholders) are
- * returned as they are.
+ * copied, strings (keys too) as their UTF-8 round trip gives them,
+ * primitives kept, and no identity preserved. Anything else throws, as the
+ * encoder does. Keys of `keep` (structural placeholders) are returned as
+ * they are.
  */
 export function copySnapshotData(
   v: unknown,
@@ -146,14 +147,14 @@ export function copySnapshotData(
   return copy(v, keep);
 }
 
-// The typed arrays SnapshotCodec encodes.
+// The typed arrays SnapshotCodec encodes (Uint32Array, any subclass
+// included, as a tile list; the others by exact class).
 const CODEC_TYPED_ARRAYS: ReadonlySet<unknown> = new Set([
   Int8Array,
   Uint8Array,
   Int16Array,
   Uint16Array,
   Int32Array,
-  Uint32Array,
   Float32Array,
   Float64Array,
 ]);
@@ -166,8 +167,9 @@ function copy(v: unknown, keep: ReadonlyMap<object, unknown>): unknown {
     case "boolean":
     case "number":
     case "bigint":
-    case "string":
       return v;
+    case "string":
+      return codecString(v);
     case "object": {
       if (v === null) return null;
       if (Array.isArray(v)) {
@@ -177,6 +179,7 @@ function copy(v: unknown, keep: ReadonlyMap<object, unknown>): unknown {
       }
       if (ArrayBuffer.isView(v)) {
         if (keep.has(v)) return v;
+        if (v instanceof Uint32Array) return new Uint32Array(v);
         if (!CODEC_TYPED_ARRAYS.has(v.constructor)) {
           throw new SnapshotCodecError(
             `unsupported binary view ${v.constructor.name}`,
@@ -192,14 +195,45 @@ function copy(v: unknown, keep: ReadonlyMap<object, unknown>): unknown {
       }
       const out: Record<string, unknown> = {};
       for (const k of Object.keys(v)) {
-        if (k === "__proto__") {
+        const key = codecString(k);
+        if (key === "__proto__") {
           throw new SnapshotCodecError("invalid object key __proto__");
         }
-        out[k] = copy((v as Record<string, unknown>)[k], keep);
+        out[key] = copy((v as Record<string, unknown>)[k], keep);
       }
       return out;
     }
     default:
       throw new SnapshotCodecError(`cannot encode a ${typeof v}`);
   }
+}
+
+const SURROGATE = /[\ud800-\udfff]/;
+
+/**
+ * A string as the codec's UTF-8 round trip returns it: TextEncoder writes
+ * each lone surrogate as U+FFFD, and the decoder (TextDecoder, ignoreBOM
+ * off) drops one leading U+FEFF.
+ */
+function codecString(s: string): string {
+  const out = SURROGATE.test(s) ? wellFormed(s) : s;
+  return out.charCodeAt(0) === 0xfeff ? out.slice(1) : out;
+}
+
+/** `s` with each lone surrogate replaced by U+FFFD (String.toWellFormed). */
+function wellFormed(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        out += s[i] + s[i + 1];
+        i++;
+        continue;
+      }
+    }
+    out += c >= 0xd800 && c <= 0xdfff ? "\ufffd" : s[i];
+  }
+  return out;
 }

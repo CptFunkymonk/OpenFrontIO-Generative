@@ -111,12 +111,23 @@ export class WaterManager {
    * added to the minimap: the live components are then incremental and the
    * graph may be stale, and a restore rebuilds both (restoreSnapshot), so a
    * clone must too.
+   *
+   * A restore keeps a fresh labeling and a fresh graph exactly while the
+   * minimap's waterVersion is 0 (snapshot() stores no components then).
+   * Copying is exact only if this manager's own labeling and graph are
+   * still those first builds: no components were ever added
+   * (finalizeWaterChanges marks the graph dirty whenever it adds some) and
+   * the graph was never rebuilt. Otherwise the clone builds, as a restore
+   * does.
    */
   private prebuiltFor(
     miniMap: GameMap,
   ): { components: ConnectedComponents; graph: AbstractGraph } | null {
     if (
       this.miniMap.waterVersion() > 0 ||
+      this._waterGraphDirty ||
+      this._waterGraphVersion > 0 ||
+      this._dirtyMiniTiles.size > 0 ||
       this._miniWaterCC === null ||
       this._miniWaterGraph === null
     ) {

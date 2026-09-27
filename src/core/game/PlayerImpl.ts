@@ -1986,8 +1986,8 @@ export class PlayerImpl implements Player {
         createdAt: e.createdAt,
         isTemporary: e.isTemporary,
       })),
-      tiles: w.tiles(this._tiles),
-      borderTiles: w.tiles(this._borderTiles),
+      tiles: w.tileSet(this._tiles),
+      borderTiles: w.tileSet(this._borderTiles),
       units: this._units.map((u) => w.unit(u)),
       unitsVersion: this._myUnitsVersion,
       pastOutgoingAllianceRequests: this.pastOutgoingAllianceRequests.map((r) =>

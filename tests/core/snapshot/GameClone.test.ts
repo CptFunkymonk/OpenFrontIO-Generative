@@ -1,8 +1,11 @@
 import { Config } from "../../../src/core/configuration/Config";
 import { Executor } from "../../../src/core/execution/ExecutionManager";
-import { Game, UnitType } from "../../../src/core/game/Game";
+import { Game, GameMode, UnitType } from "../../../src/core/game/Game";
+import { GameImpl } from "../../../src/core/game/GameImpl";
 import { GameMapImpl } from "../../../src/core/game/GameMap";
+import { TileSet } from "../../../src/core/game/TileSet";
 import { GameRunner } from "../../../src/core/GameRunner";
+import { ConnectedComponents } from "../../../src/core/pathfinding/algorithms/ConnectedComponents";
 import { GameConfig, GameStartInfo } from "../../../src/core/Schemas";
 import {
   cloneGame,
@@ -14,6 +17,10 @@ import {
   decodeSnapshotValue,
   encodeSnapshotValue,
 } from "../../../src/core/snapshot/SnapshotCodec";
+import {
+  SnapshotReader,
+  SnapshotWriter,
+} from "../../../src/core/snapshot/SnapshotContext";
 import {
   createScriptedRunner,
   restoreScriptedRunner,
@@ -32,9 +39,10 @@ import {
  * snapshot restore, only faster: for the same game, the clone and
  * restoreGame(snapshotGame(game)) have the same object graph, the same
  * snapshot bytes and the same map arrays, and they stay hash- and
- * byte-identical tick by tick, through nukes, ships and water nukes. The
- * game is the scripted one of FullGameSnapshot.test.ts, which exercises
- * every intent and execution type.
+ * byte-identical tick by tick, through nukes, ships and water nukes. Clones
+ * of clones, and of restored games, stay on the straight run's track for a
+ * whole game. The game is the scripted one of FullGameSnapshot.test.ts,
+ * which exercises every intent and execution type, with the same variants.
  */
 
 const MAP = "world";
@@ -42,6 +50,19 @@ const TEST_TIMEOUT = 300_000;
 // Nukes and ships in flight at the clone, then this long in lockstep.
 const LOCKSTEP_TICKS = 600;
 const BYTES_EVERY = 50;
+// The straight run that chains of clones are held to, as in
+// FullGameSnapshot.test.ts.
+const TICKS = 1500;
+const CHECK_EVERY = 100;
+const WINDOW_START = 700;
+const WINDOW_TICKS = 40;
+
+const VARIANTS: [string, Partial<GameConfig>][] = [
+  ["free for all", {}],
+  // Water nukes rewrite terrain and the water graph mid-game.
+  ["water nukes", { waterNukes: true }],
+  ["teams", { gameMode: GameMode.Team, playerTeams: 2 }],
+];
 
 function hash(game: Game): number {
   return (game as unknown as { hash(): number }).hash();
@@ -185,10 +206,7 @@ function playUntil(
   }
 }
 
-describe.each<[string, Partial<GameConfig>]>([
-  ["free for all", {}],
-  ["water nukes", { waterNukes: true }],
-])("structural clone: %s", (_, overrides) => {
+describe.each(VARIANTS)("structural clone: %s", (_, overrides) => {
   const start = scriptedGameStart(overrides);
 
   test(
@@ -271,6 +289,97 @@ describe.each<[string, Partial<GameConfig>]>([
     TEST_TIMEOUT,
   );
 });
+
+interface Reference {
+  hashes: number[];
+  checkpoints: Map<number, Uint8Array>;
+  final: Uint8Array;
+  winnerTick: number | null;
+}
+
+/** The game played straight through: every hash, and bytes every 100 ticks. */
+async function playReference(start: GameStartInfo): Promise<Reference> {
+  const runner = await createScriptedRunner(MAP, start);
+  const hashes: number[] = [];
+  const checkpoints = new Map<number, Uint8Array>();
+  let winnerTick: number | null = null;
+  while (runner.game.ticks() < TICKS) {
+    const tick = runner.game.ticks();
+    if (tick % CHECK_EVERY === 0) checkpoints.set(tick, runner.snapshot());
+    stepScripted(runner);
+    hashes[runner.game.ticks()] = hash(runner.game);
+    if (winnerTick === null && runner.game.getWinner() !== null) {
+      winnerTick = runner.game.ticks();
+    }
+  }
+  return { hashes, checkpoints, final: runner.snapshot(), winnerTick };
+}
+
+function expectOnTrack(runner: GameRunner, ref: Reference): void {
+  const tick = runner.game.ticks();
+  if (hash(runner.game) !== ref.hashes[tick]) {
+    throw new Error(`hash diverged at tick ${tick}`);
+  }
+  const checkpoint = ref.checkpoints.get(tick);
+  if (checkpoint !== undefined) {
+    const diffs = diffSnapshots(runner.snapshot(), checkpoint);
+    if (diffs.length > 0) {
+      throw new Error(`state diverged at tick ${tick}:\n${diffs.join("\n")}`);
+    }
+  }
+}
+
+describe.each(VARIANTS)(
+  "structural clone chained through a game: %s",
+  (_, overrides) => {
+    const start = scriptedGameStart(overrides);
+    let reference: Reference;
+
+    beforeAll(async () => {
+      reference = await playReference(start);
+    }, TEST_TIMEOUT);
+
+    test(
+      "cloning every 100 ticks, each clone from the last, continues exactly like the straight run",
+      async () => {
+        let runner = await createScriptedRunner(MAP, start);
+        let winnerTick: number | null = null;
+        while (runner.game.ticks() < TICKS) {
+          stepScripted(runner);
+          expectOnTrack(runner, reference);
+          if (winnerTick === null && runner.game.getWinner() !== null) {
+            winnerTick = runner.game.ticks();
+          }
+          if (runner.game.ticks() % CHECK_EVERY === 0) {
+            runner = cloneRunner(runner, start);
+          }
+        }
+        expect(diffSnapshots(runner.snapshot(), reference.final)).toEqual([]);
+        expect(winnerTick).toBe(reference.winnerTick);
+      },
+      TEST_TIMEOUT,
+    );
+
+    test(
+      "cloning at every tick of a mid-game window, from a restored game, stays on track",
+      async () => {
+        const from = Math.floor(WINDOW_START / CHECK_EVERY) * CHECK_EVERY;
+        let runner = await restoreScriptedRunner(
+          MAP,
+          start,
+          reference.checkpoints.get(from)!,
+        );
+        while (runner.game.ticks() < WINDOW_START) stepScripted(runner);
+        while (runner.game.ticks() < WINDOW_START + WINDOW_TICKS) {
+          runner = cloneRunner(runner, start);
+          stepScripted(runner);
+          expectOnTrack(runner, reference);
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  },
+);
 
 describe("structural clone: sources", () => {
   const start = scriptedGameStart();
@@ -368,4 +477,147 @@ describe("structural clone: sources", () => {
     expect(() => copySnapshotData({ f: () => 1 }, new Map())).toThrow();
     expect(() => copySnapshotData({ d: new Date() }, new Map())).toThrow();
   });
+
+  test("copySnapshotData matches the codec on values the codec rewrites", () => {
+    class TileList extends Uint32Array {}
+    const words = new Uint32Array([7, 8, 9, 10]);
+    const holes: unknown[] = [1, , 3]; // eslint-disable-line no-sparse-arrays
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare.k = 1;
+    const odd = {
+      // TextEncoder writes lone surrogates as U+FFFD; the decoder drops a
+      // leading byte order mark. Keys too, and they may then collide.
+      strings: ["\ufeffabc", "\ufeff\ufeffx", "a\ud800b", "\udc00", "x\ud83d"],
+      pair: "\ud83d\ude00 ok",
+      "\ufeffkey": 1,
+      "a\ud800": 2,
+      "a\ufffd": 3,
+      numbers: [-0, NaN, Infinity, 2 ** 53 + 2, -(2 ** 53) + 1, 1.5],
+      big: [0n, -(2n ** 70n)],
+      holes,
+      missing: undefined,
+      bare,
+      sub: words.subarray(1, 3),
+      list: new TileList([4, 5]),
+      f64: new Float64Array([-0, NaN]),
+    };
+    const viaCodec = decodeSnapshotValue(encodeSnapshotValue(odd));
+    const copied = copySnapshotData(odd, new Map());
+    expect(
+      bytesEqual(encodeSnapshotValue(copied), encodeSnapshotValue(viaCodec)),
+    ).toBe(true);
+    expect(diffGraphs(copied, viaCodec)).toEqual([]);
+    expect(Object.keys(copied as object)).toEqual(
+      Object.keys(viaCodec as object),
+    );
+    const c = copied as typeof odd;
+    expect(c.strings).toEqual((viaCodec as typeof odd).strings);
+    expect(Object.getPrototypeOf(c.list)).toBe(Uint32Array.prototype);
+    expect([...c.sub]).toEqual([8, 9]);
+    expect(Object.is(c.numbers[0], -0)).toBe(true);
+    expect(() => copySnapshotData({ "\ufeff__proto__": 1 }, new Map())).toThrow(
+      /__proto__/,
+    );
+    expect(() =>
+      decodeSnapshotValue(encodeSnapshotValue({ "\ufeff__proto__": 1 })),
+    ).toThrow(/__proto__/);
+  });
+
+  test("a tile set written for a clone must be read back as a tile set", () => {
+    const game = {} as unknown as GameImpl;
+    const set = new TileSet([5, 3, 9]);
+    const tables = {
+      units: [],
+      attacks: [],
+      alliances: [],
+      allianceRequests: [],
+      execs: [],
+      stations: [],
+      railroads: [],
+      clusters: [],
+      playerIds: new Map<number, string>(),
+    };
+    // A snapshot lists the set; a clone's writer leaves a placeholder.
+    expect([...new SnapshotWriter(game).tileSet(set)]).toEqual([5, 3, 9]);
+    const w = new SnapshotWriter(game, { structural: true });
+    const placeholder = w.tileSet(set);
+    expect(placeholder.length).toBe(0);
+    // A plain tile list is always listed, TileSet or not.
+    expect([...w.tiles(set)]).toEqual([5, 3, 9]);
+    expect(w.tileSets!.size).toBe(1);
+
+    const unread = new SnapshotReader(game, {
+      ...tables,
+      tileSets: w.tileSets!,
+    });
+    expect(() => unread.checkTileSetsRead()).toThrow(/not read back/);
+    const r = new SnapshotReader(game, { ...tables, tileSets: w.tileSets! });
+    const copy = r.tileSet(placeholder);
+    expect(copy).not.toBe(set);
+    expect([...copy]).toEqual([5, 3, 9]);
+    r.checkTileSetsRead();
+    // A listed set reads back as itself.
+    expect([...r.tileSet(Uint32Array.from([2, 1]))]).toEqual([2, 1]);
+  });
+
+  test(
+    "the water graph is copied only while a restore would rebuild the same",
+    async () => {
+      const runner = await createScriptedRunner(MAP, start);
+      playUntil(runner, 200, () => false);
+      expect(runner.game.miniMap().waterVersion()).toBe(0);
+      const cloneFor = vi.spyOn(ConnectedComponents.prototype, "cloneFor");
+      try {
+        const deps = {
+          config: (gc: GameConfig) => new Config(gc, null, false, start.listed),
+        };
+        cloneGame(runner.game, deps);
+        expect(cloneFor).toHaveBeenCalledTimes(1);
+        cloneFor.mockClear();
+
+        // Components added without the minimap changing (finalizeWaterChanges
+        // on a minimap tile whose setWater is a no-op): a restore's fresh
+        // labeling no longer matches the live one, so the clone must build.
+        const wm = (
+          runner.game as unknown as {
+            _waterManager: {
+              _miniWaterCC: ConnectedComponents;
+              _waterGraphDirty: boolean;
+              _dirtyMiniTiles: Set<number>;
+            };
+          }
+        )._waterManager;
+        const mini = runner.game.miniMap();
+        let land = -1;
+        for (let t = 0; t < mini.width() * mini.height(); t++) {
+          if (mini.isLand(t) && !mini.isImpassable(t)) {
+            land = t;
+            break;
+          }
+        }
+        expect(land).toBeGreaterThanOrEqual(0);
+        wm._miniWaterCC.addWaterTiles([land]);
+        wm._waterGraphDirty = true;
+        wm._dirtyMiniTiles.add(land);
+        expect(mini.waterVersion()).toBe(0);
+
+        const clone = cloneRunner(runner, start);
+        expect(cloneFor).not.toHaveBeenCalled();
+        const restored = await restoreScriptedRunner(
+          MAP,
+          start,
+          runner.snapshot(),
+        );
+        expect(
+          diffGraphs(clone.game, restored.game, {
+            ignore: new Set([...DERIVED_FIELDS, "pristineHashCache"]),
+          }),
+        ).toEqual([]);
+        lockstep([restored, clone], 60);
+      } finally {
+        cloneFor.mockRestore();
+      }
+    },
+    TEST_TIMEOUT,
+  );
 });
