@@ -43,7 +43,7 @@ for the same reason `[ran]`.
 1. Open **`http://localhost:9000/?agent=apex`**.
 2. Click **Solo**. Pick a map and difficulty (the arena's opponents are
    **Impossible** nations; the headless watcher below uses 100 bots at
-   Impossible). Click **Start**.
+   Impossible). Click **Start Game**.
 3. **Do not click the map.** Within the first second of the game apex
    spawns, and the spawn phase ends at once (in singleplayer it ends as soon
    as your seat spawns, `[ran]`: `spawnPhase=false` at tick 8). Then it
@@ -70,19 +70,31 @@ Controls that still work while it plays `[code]`:
 
 - **`.` speeds the game up, `,` slows it down, `P` pauses** (default key
   binds `gameSpeedUp: "Period"`, `gameSpeedDown: "Comma"`, `pauseGame:
-"KeyP"` in `src/core/game/UserSettings.ts:54-56`; the singleplayer
-  server applies them, `src/client/LocalServer.ts:116-134`, four steps: slow,
-  normal, fast, fastest). The agent is paced by game ticks, not wall time, so
-  it plays the same game faster or slower. Not tested in this container
-  (headless), read in the code.
+"KeyP"` in `src/core/game/UserSettings.ts:54-56`). Speed: the
+  singleplayer server steps through slow, normal, fast, fastest
+  (`src/client/LocalServer.ts:116-134`). Pause: `src/client/InputHandler.ts:370-376`
+  emits `TogglePauseIntentEvent`, which
+  `src/client/hud/layers/GameRightSidebar.ts:107-116` accepts in
+  singleplayer, in replays and for the host of a private lobby, and sends as
+  a `toggle_pause` intent (`Transport.ts:853`, `LocalServer.ts:185-200`).
+  The agent is paced by game ticks, not wall time, so it plays the same game
+  faster or slower. `P` `[ran]`: pressed at tick 19, the game stood at tick
+  21 twelve seconds later (the pause takes effect at the end of the current
+  turn) and ran on after a second press. `.` and `,` were not measurable
+  here (the container's simulation was CPU-bound at under one tick a
+  second), so they are `[code]` only.
 - Pan and zoom as usual. Clicking the map also still works: see §16.4a.
 
-**To take your seat back**, open `http://localhost:9000/?agent=off` (or
-`?agent=`) in that tab. The choice is stored per tab in `sessionStorage`
-under `openfront.autopilot` (`src/client/AgentAutopilot.ts:20-46`), which is
-why it survives the client rewriting the URL and why a plain reload keeps the
-bot. A new tab starts clean; a _duplicated_ tab copies the session storage
-and keeps the bot.
+**To turn the bot off**, open `http://localhost:9000/?agent=off` (or
+`?agent=`) in that tab. **In singleplayer this ends the current game**
+`[ran]`: the game lives in the page, so the reload lands on the home page
+with the game gone (twice observed). Use it before you start the next game;
+taking a seat back _mid-game_ only works in a lobby (§16.4c). The choice is
+stored per tab in `sessionStorage` under `openfront.autopilot`
+(`src/client/AgentAutopilot.ts:20-46`), which is why it survives the client
+rewriting the URL and why a plain reload keeps the bot. A new tab starts
+clean; a _duplicated_ tab copies the session storage and keeps the bot
+(browser behaviour, not exercised here).
 
 The autopilot never starts on a replay or as a spectator
 (`src/client/ClientGameRunner.ts:705-710` `[code]`), so it cannot be used to
@@ -105,15 +117,18 @@ the console's level dropdown ("Default levels") to include **Verbose**
 | `[t] spawn plan (race): …`, `[t] spawn (race) at x,y`                                                       | The spawn search: candidates scored (snack = tribes to eat, threat = nations nearby), and the tile it chose.                                                                                                                                                                                |
 | `[t] status t=… tiles=… home=… cap=… tribes=… nations=… plans={…}`                                          | Periodic self-report: land, troops at home, troop cap, tribes and nations in contact, plans in flight.                                                                                                                                                                                      |
 | `[t] tn …`, `[t] snack …`, `[t] dip plan …`                                                                 | An expansion order, a tribe being eaten, the diplomacy plan (alliance slots and who it courts).                                                                                                                                                                                             |
-| `tick N, behind B, sent S, rate-limited R, last think T ms, errors E`                                       | _(Verbose)_ every few hundred ticks: `behind` is how many turns the replica still has to catch up (0 is healthy), `sent` intents so far, how many the client-side rate limit held back, the last decision's cost. `[ran]`: `behind 0 … last think 746.8 ms` at tick 4, `0.2 ms` at tick 54. |
+| `tick N, behind B, sent S, rate-limited R, last think T ms, errors E`                                       | _(Verbose)_ every 50 ticks, 5 s of game time (`AgentWorker.worker.ts:20`; `[ran]` at ticks 70, 121, 172, 241): `behind` is how many turns the replica still has to catch up (0 is healthy), `sent` intents so far, how many the client-side rate limit held back, the last decision's cost. `[ran]`: `behind 0 … last think 746.8 ms` at tick 4, `0.2 ms` at tick 54. |
 | `game over for the agent: …`                                                                                | Your seat won or died; the agent stops.                                                                                                                                                                                                                                                     |
 | `stopped: replica diverged from the real game at tick N; the agent stopped (did it mutate the game state?)` | The worker's replica and the real game produced different hashes. The agent is stopped and your seat goes idle. This never happened in the runs here; if you see it, it is a bug worth an issue (`src/agent/browser/AgentWorker.worker.ts:81-95` `[code]`).                                 |
 
 **Options.** Add `&agentOptions=<url-encoded JSON>` to hand apex any key of
-`src/agent/agents/apex/options.ts` (`AGENTS` in `src/agent/agents/index.ts`
-parses it). A key apex does not have makes the worker throw at start and the
-console shows `[agent] stopped: apex has no option "…" (it has …)`
-(`index.ts:createAgent` `[code]`). Keys a viewer may want:
+`src/agent/agents/apex/options.ts` (`createAgent` in
+`src/agent/agents/index.ts:43-58` checks the keys). A key apex does not have
+makes the worker throw at start, and the console shows, as an error after a
+few uncaught page errors, `[agent] stopped: agent init failed: Error: apex
+has no option "…" (it has thinkEvery, …)` `[ran]`. The list it prints is
+every option, some 400 names, so look the key up in `options.ts` instead.
+Keys a viewer may want:
 
 - `thinkEvery` (default 3): ticks between decisions. `{"thinkEvery":10}`
   makes it visibly more deliberate and cheaper; `1` is the most reactive.
@@ -149,9 +164,11 @@ autopilot only adds a second source of intents to the same `Transport`
 `[code]`. So in a singleplayer game you can attack, build and ally by hand
 while apex also issues orders for the same troops. Expect it to keep doing
 its own thing (it does not know you are there), so this is for nudging it,
-not for a coherent co-op. `[ran]`: 25 s into a solo game apex was playing
-(187 tiles), a scripted click on unowned land next to its border was
-accepted as an attack, exactly as without the autopilot.
+not for a coherent co-op. `[ran]`: in a solo game with apex playing, the
+attack ratio was set to 37% and a scripted click on unowned land next to
+its border produced a new outgoing attack of 13,007 troops (37% of the
+32,026 at home, which fell to 22,069) while apex kept issuing its own
+orders.
 
 ### b. Against it, in a private lobby
 
@@ -181,9 +198,12 @@ game. `[ran]` with two separate browser profiles. Steps:
 Why the second profile: the server identifies a player by a persistent ID
 that lives in the browser profile's `localStorage`
 (`src/client/Auth.ts:773-780`), and a join carrying an ID it already seated
-is treated as that player reconnecting (`src/server/GameServer.ts:453-457`,
-`joinClient` → `rejoinClient` `[code]`). Two ordinary tabs of one profile
-would therefore share one seat, and the bot would drive yours.
+is treated as that player reconnecting
+(`src/server/GameServer.ts:453-457` `getClientIdForPersistentId`, then the
+rejoin at 665-672, which "also closes the old WebSocket" `[code]`). `[ran]`:
+a second page opened in the bot's own profile got the bot's seat, and the
+first page's socket closed (`WebSocket is not open`). Two ordinary tabs of
+one profile therefore share one seat, and the bot would drive yours.
 
 `[ran]`: lobby `aoswGmvZkN`, host seat `AnonTopaz6`, bot seat `AnonComet`.
 The server drove turns at full speed (tick 1115 two minutes after start).
@@ -225,16 +245,23 @@ For a machine without a display, or to get screenshots and a trace, the
 repository has a Playwright script that does §16.2 by itself:
 
 ```bash
+# once: Playwright is not a project dependency (package.json has none)
+npm install --no-save --ignore-scripts playwright@1.56.1 && npx playwright install chromium
 npm run dev & # if not already up
 node .claude/skills/run-openfront/autopilot.mjs apex Pangaea 90
 # screenshots /tmp/openfront-run/autopilot-{0..8}.png, trace /tmp/openfront-run/autopilot-trace.json
 ```
 
-It opens `?agent=apex`, starts a solo game on the map you name against 100
-bots at Impossible, never clicks, prints every `[agent]` line and the seat's
-state every 10 s, and screenshots each time. Requirements and gotchas are in
-`.claude/skills/run-openfront/SKILL.md` (Chromium via Playwright; on a
-machine without it, `bash .claude/skills/run-openfront/setup.sh`).
+The `npm install --no-save` line is what `.claude/hooks/session-start.sh:58-64`
+does for cloud sessions (`--no-save` keeps `package.json` and the lockfile
+untouched); the cloud image has the browser pre-installed, your machine
+needs the `npx playwright install chromium`. The script opens `?agent=apex`,
+starts a solo game on the map you name against 100 bots at Impossible, never
+clicks, prints every `[agent]` line and the seat's state every 10 s, and
+screenshots each time. Requirements and gotchas are in
+`.claude/skills/run-openfront/SKILL.md`. `bash
+.claude/skills/run-openfront/setup.sh` is only for a minimal Ubuntu box with
+no browser libraries at all (it uses `apt-get download` and `dpkg`).
 
 `[ran]` on Pangaea (1000×1000, 29 nations): apex planned and sent its spawn
 at tick 4 (`last think 746.8 ms`), then
@@ -248,14 +275,21 @@ tick 65 spawnPhase=false tiles=661 troops=36702 gold=5900 alive=true
 
 with `behind 0` throughout and no divergence. (The container's 4 cores were
 shared with arena runs, load average 22, so the game advanced at under one
-tick a second; on your machine it runs at ten.)
+tick a second, and a later run at load 24 reached only tick 46 in 90 s; on
+your machine it runs at ten.)
 
-**Known wart:** the script's last line was `AUTOPILOT FAILED: the agent did
-not play` even though it had. Its success test looks for the literal text
-`spawn at` in the agent's lines, which is what `baseline` logs; apex logs
-`spawn (race) at x,y`. Judge the run by the `tiles=` trace and the
-screenshots, not by that line, until the check is loosened
-(`autopilot.mjs`, the `ok` expression at the end).
+**Two known warts** `[ran]` (four runs in all):
+
+- The script's last line is `AUTOPILOT FAILED: the agent did not play` even
+  when apex played. Its success test looks for the literal text `spawn at`
+  in the agent's lines, which is what `baseline` logs; apex logs
+  `spawn (race) at x,y`. Judge the run by the `tiles=` trace and the
+  screenshots, not by that line, until the check is loosened
+  (`autopilot.mjs`, the `ok` expression at the end; `/spawn .*at \d+,\d+/`
+  matches both).
+- If the page reloads under it (Vite reloads on any edit to `src/`, §16.8),
+  it crashes with `TypeError: Cannot read properties of null (reading
+'ticks')` at `autopilot.mjs:47` instead of saying so. Rerun it.
 
 ## 16.6 Arena games as pictures
 
@@ -317,9 +351,17 @@ the rest.
   spectator tab (the autopilot refuses those)? Did the game start (the
   worker is created only after the game worker initialises,
   `ClientGameRunner.ts:705`)?
-- **`[agent] stopped: apex has no option "…"`**: a typo in `agentOptions`;
-  the message lists the real keys. JSON must be URL-encoded
+- **`[agent] stopped: agent init failed: Error: apex has no option "…"`**:
+  a typo in `agentOptions`; the real keys are the fields of `ApexOptions` in
+  `src/agent/agents/apex/options.ts` (the message prints all of them, too
+  many to read). JSON must be URL-encoded
   (`encodeURIComponent('{"thinkEvery":10}')`).
+- **Apex never spawned in a lobby** (its seat is dead with 0 tiles once the
+  spawn phase ends): see §16.4b, the spawn timing in a timed phase.
+- **Two game tabs on one PC stall or crash.** The bot's tab runs two
+  simulations (the game and the agent's replica), so playing against it on
+  one machine is three. Two headless World games on one 4-core box with
+  2.5 GB free crashed both pages here `[ran]`; pick a smaller map.
 - **`[agent] stopped: replica diverged …`**: see §16.3. Reload with
   `?agent=off` to play on by hand.
 - **The page reloaded and the game vanished.** Vite reloads every open page

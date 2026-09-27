@@ -1753,7 +1753,8 @@ describe("H4 NationTargeting: a real game (Pangaea, arena setting, 3 minutes)", 
   let real: Census;
   beforeAll(async () => {
     real = await census(1800);
-  }, 60_000);
+    // 180 s: the 1,800-tick game blew a 60 s hook under load 27 on 4 cores.
+  }, 180_000);
 
   it("every nation attack or boat is sent on one of that nation's decision ticks, or is its opening", () => {
     expect(real.nations).toBe(29);

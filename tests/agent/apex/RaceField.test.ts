@@ -631,9 +631,9 @@ describe("spawn candidates", () => {
         `GiantWorldMap spawn search: ${best.toFixed(0)} ms: ${parts}`,
       );
       // Wall time, on a machine the suite may share with arena runs (3.1 s
-      // at load 17 on 4 cores): the bound only catches a regression by
-      // several times. The time is logged above.
-      expect(best).toBeLessThan(5000);
+      // at load 17 on 4 cores, 6.7 s at load 27): the bound only catches a
+      // regression by many times. The time is logged above.
+      expect(best).toBeLessThan(15_000);
     },
     TIMEOUT,
   );

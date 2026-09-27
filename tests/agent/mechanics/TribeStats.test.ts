@@ -1832,7 +1832,8 @@ describe("TribeStats (H3): tribes in the arena setting", () => {
     let real: RealGame;
     beforeAll(async () => {
       real = await playRealGame(GameMapType.Pangaea);
-    }, 60_000);
+      // 180 s: the 1,800-tick game blew a 60 s hook under load 27 on 4 cores.
+    }, 180_000);
 
     test("400 tribes on 52-tile discs (clipped at the map edge), 10,000 troops, no gold, each with its TribeExecution", () => {
       const { game, tribes, start } = real;
