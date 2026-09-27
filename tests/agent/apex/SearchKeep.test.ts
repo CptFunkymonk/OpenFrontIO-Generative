@@ -6,7 +6,8 @@
  * - Generation (a stand-in view of the game, as SearchCandidates.test.ts
  *   builds it): keep:Z for each bordering ally expiring within
  *   searchLapseLead that is strong (troops ≥ searchKeepMinShare of our
- *   home, or a cap ≥ 1.1 × ours) and outside the web's keep list;
+ *   home, or a cap ≥ 1.1 × ours) whose extension the web has not asked
+ *   (s.web.extensionAsked), in the web's keep list or not;
  *   keep:Z+gift for a strong expiring ally, kept or not, whose extension
  *   forecast is below searchKeepGiftP (not "traitor"), Neutral, not
  *   embargoed, the gold at most searchKeepGiftShare of ours; a foe mark on
@@ -66,6 +67,8 @@ interface Nat {
 interface Env {
   o?: Partial<ApexOptions>;
   allySet?: string[];
+  /** s.web.extensionAsked: the expiry the web asked the extension for. */
+  asked?: Record<string, number>;
   foes?: Record<string, number>;
   /** The extension forecast (NationModel.acceptsAlliance). */
   forecast?: { p: number; branch: string };
@@ -157,7 +160,7 @@ function view(nats: Nat[], env: Env = {}): SearchView {
     },
     host: {
       state: {
-        web: { allySet: env.allySet ?? [] },
+        web: { allySet: env.allySet ?? [], extensionAsked: env.asked ?? {} },
         search: { foes: env.foes ?? {} },
       },
       nationModel: () => nm,
@@ -177,7 +180,7 @@ function price(r: number, at: number, until: number): bigint {
 }
 
 describe("keep candidates", () => {
-  test("keep:Z for a strong expiring ally outside the keep list, with its steps", () => {
+  test("keep:Z for a strong expiring ally the web has not asked, with its steps", () => {
     const e = T + 400;
     const cands = KEEP.generate(
       view([
@@ -229,7 +232,7 @@ describe("keep candidates", () => {
     ]);
   });
 
-  test("off, in the keep list, or past the lead: no keep:Z; a foe mark is ended first", () => {
+  test("off, asked already, or past the lead: no keep:Z; the keep list does not matter; a foe mark is ended first", () => {
     const Z: Nat = {
       id: "Z",
       smallID: 1,
@@ -237,10 +240,20 @@ describe("keep candidates", () => {
       troops: 950_000,
       expiresAt: T + 400,
     };
-    expect(KEEP.generate(view([Z], { o: { searchKeep: false } }), NO_BASE)).toEqual(
-      [],
-    );
-    expect(KEEP.generate(view([Z], { allySet: ["Z"] }), NO_BASE)).toEqual([]);
+    expect(
+      KEEP.generate(view([Z], { o: { searchKeep: false } }), NO_BASE),
+    ).toEqual([]);
+    // The web asked this term's extension already: nothing to add.
+    expect(
+      KEEP.generate(view([Z], { asked: { Z: Z.expiresAt! } }), NO_BASE),
+    ).toEqual([]);
+    // An earlier term's ask, or the web's keep list, do not matter.
+    expect(
+      KEEP.generate(
+        view([Z], { asked: { Z: 100 }, allySet: ["Z"] }),
+        NO_BASE,
+      ).map((c) => c.name),
+    ).toEqual(["keep:Z"]);
     expect(
       KEEP.generate(view([{ ...Z, expiresAt: T + 501 }]), NO_BASE),
     ).toEqual([]);
@@ -269,9 +282,15 @@ describe("keep candidates", () => {
     ).toHaveLength(2);
   });
 
-  test("keep:Z+gift when the extension forecast is low, kept by the web or not, priced as B2's gifts", () => {
+  test("keep:Z+gift when the extension forecast is low, asked by the web or not, priced as B2's gifts", () => {
     const e = T + 400;
-    const Z: Nat = { id: "Z", smallID: 1, contact: 50, troops: 950_000, expiresAt: e };
+    const Z: Nat = {
+      id: "Z",
+      smallID: 1,
+      contact: 50,
+      troops: 950_000,
+      expiresAt: e,
+    };
     const low = { forecast: { p: 0.2, branch: "enough" }, relation: 12.5 };
     const cands = KEEP.generate(view([Z], low), NO_BASE);
     expect(cands.map((c) => c.name)).toEqual(["keep:Z", "keep:Z+gift"]);
@@ -285,10 +304,10 @@ describe("keep candidates", () => {
       [e + 1, { type: "allianceRequest", recipient: "Z" }],
     ]);
     expect(gift.lastSend).toBe(cands[0].lastSend);
-    // Kept by the web: the web asks the extension itself, so only the
-    // gift plan (with its renewal) differs from the base.
+    // Asked by the web already: only the gift plan (with its renewal)
+    // differs from the base.
     expect(
-      KEEP.generate(view([Z], { ...low, allySet: ["Z"] }), NO_BASE).map(
+      KEEP.generate(view([Z], { ...low, asked: { Z: e } }), NO_BASE).map(
         (c) => c.name,
       ),
     ).toEqual(["keep:Z+gift"]);
@@ -324,8 +343,10 @@ describe("keep candidates", () => {
       ),
     ).toEqual(["keep:Z"]);
     expect(
-      KEEP.generate(view([Z], { ...low, o: { searchKeepGift: false } }), NO_BASE)
-        .map((c) => c.name),
+      KEEP.generate(
+        view([Z], { ...low, o: { searchKeepGift: false } }),
+        NO_BASE,
+      ).map((c) => c.name),
     ).toEqual(["keep:Z"]);
   });
 
@@ -380,10 +401,6 @@ describe("keep:A played live", () => {
   ): void {
     w.probe.onTick = (ctx, host) => {
       if (ctx.tick !== at) return;
-      // The counter-accept put A in the web's keep list (the web itself is
-      // off here, so nobody asks its extension): keep:A is for allies
-      // outside it.
-      w.s.web.allySet.length = 0;
       const sv = liveView(w, { searchKeep: true, searchKeepMinShare: 0, ...o });
       const [c] = KEEP.generate(sv, NO_BASE);
       expect(c.name).toBe(`keep:${A}`);
@@ -391,11 +408,14 @@ describe("keep:A played live", () => {
     };
   }
 
-  const toA = (w: ReturnType<typeof allied>["w"], type: string) =>
+  /** Ticks of our sends of `type` to A from tick `from` on (before it:
+   *  the counter-accept's own request at tick 11). */
+  const toA = (w: ReturnType<typeof allied>["w"], type: string, from = 20) =>
     w
       .sent()
       .filter(
         (x) =>
+          x.tick >= from &&
           x.intent.type === type &&
           (x.intent as { recipient?: string }).recipient === A,
       )
@@ -467,7 +487,10 @@ describe("keep:A played live", () => {
     const friendly: number[] = [];
     while (w.game.ticks() < e + FRIENDLY_PAST + 1) {
       w.h.step();
-      if (N.relation(w.us) === Relation.Friendly) friendly.push(w.game.ticks());
+      // From the reset at `at` on (the alliance had made A Friendly).
+      if (w.game.ticks() > at && N.relation(w.us) === Relation.Friendly) {
+        friendly.push(w.game.ticks());
+      }
     }
     expect(toA(w, "donate_gold")).toEqual([at]);
     expect(gold).toBeGreaterThan(0n);

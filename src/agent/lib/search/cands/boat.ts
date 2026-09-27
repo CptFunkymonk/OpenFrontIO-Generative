@@ -17,8 +17,8 @@ import type { DirectiveStep } from "../../../agents/apex/state";
 import {
   cellOf,
   RaceGrid,
-  VoyageField,
   voyageAt,
+  VoyageField,
   voyageField,
 } from "../../RaceField";
 import { Prio } from "../../Scheduler";

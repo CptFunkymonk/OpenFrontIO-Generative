@@ -618,18 +618,24 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   //    (DiplomacyController planStrong, extensions, renewStrong,
   //    keepGifts; docs/14-m4-plan.md §2.7 item 7a). A base rule: the
   //    search's rollouts copy it. Off by default. ────────────────────────
-  /** Ask the extension of every bordering ally (land contact) that is
-   *  strong, in allySet (or the midgame keep set) or not: maxTroops(Z) at
+  /** Keep the strong bordering allies (land contact; maxTroops(Z) at
    *  least webKeepCapRatio times ours, or troops(Z) at least
-   *  webKeepTroopRatio times our cap. Asked at the web's lead (extendLead;
-   *  webExtendLead with webMidgame), sooner for webKeepGap. Arena quick@20,
-   *  UE's 32 games: former allies sent 214M of the 435M nation troops sent
-   *  at apex (51M after a lapse never asked, 162M after a refused
-   *  extension); 11 of the 13 unasked allies that attacked after their
-   *  lapse held 1.1x our cap or more. Screened quick@20, 32 games against
-   *  UE, with webKeepAsk off, webKeepGift on and webKeepRenewThreat off:
-   *  land at minute 20 +0.9 points [−0.03, +1.95], Δprogress −0.006
-   *  [−0.020, +0.004], eliminations before minute 20 4 against 4. */
+   *  webKeepTroopRatio times our cap), in allySet (or the midgame keep
+   *  set) or not: a fresh request the tick their alliance lapses
+   *  (webKeepRenew), gold for the friendship of one still refusing its
+   *  asked extension (webKeepGift), and, with webKeepAsk, the extension
+   *  asks themselves at the web's lead, sooner for webKeepGap; none of it
+   *  for an ally that could betray us at our cap (webKeepBetrayShare).
+   *  Arena quick@20, UE's 32 games: former allies sent 214M of the 435M
+   *  nation troops sent at apex (51M after a lapse never asked, 162M after
+   *  a refused extension); 11 of the 13 unasked allies that attacked after
+   *  their lapse held 1.1x our cap or more. The sub-options default to the
+   *  arm screened on quick@20 (32 games against UE, package WP7a v7: land
+   *  at minute 20 +0.9 points [−0.03, +1.95], but the gain sat in kept
+   *  alliances outliving the 20-minute cap; Δprogress −0.006 [−0.020,
+   *  +0.004], eliminations before minute 20 4 against 4) with the review's
+   *  guards (webKeepRenewMinP 0.8, webKeepBetrayShare, no gift for an
+   *  extension refused for our alliance count). */
   webKeepStrong: boolean;
   /** The strong rule's own extension asks (at the lead, sooner for
    *  webKeepGap). Off: a strong ally is asked only when the web keeps it
@@ -657,7 +663,14 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  A_max alliances with a forecast of at least webKeepRenewMinP. Needs
    *  webKeepStrong. */
   webKeepRenew: boolean;
-  /** Smallest forecast for the webKeepRenew request. */
+  /** Smallest forecast for the webKeepRenew request. A refused request
+   *  starts Config.allianceRequestCooldown (300 ticks) for every request
+   *  to that nation, the recall's too (PlayerImpl.canSendAllianceRequest),
+   *  so the default is recallMinP's 0.8: arena quick@20 Box g25, a renew
+   *  at p = 0.67 refused at tick 10,524, the recall of the same nation's
+   *  7.5M attack at 10,698 on cooldown; Africa g11, a renew at p = 0.70
+   *  accepted at 4,192 whose term lapsed at 7,198 with no renew possible
+   *  (p = 0), the nation's attacks from 7,671. */
   webKeepRenewMinP: number;
   /** Renew also when the nation would accept only because we threaten it
    *  (the forecast's branch "threat": our home out-troops it by the
@@ -681,6 +694,21 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   webKeepGiftShare: number;
   /** Give only while the extension forecast is below this. */
   webKeepGiftMinP: number;
+  /** No webKeepRenew request and no webKeepGift for a strong ally that
+   *  could betray us at our cap: its betrayal line (DiplomacyController
+   *  keepBetrayalLine; the Hard and Impossible nation breaks its alliance
+   *  with its juiciest bordering ally while that ally's troops and attacks,
+   *  with those of its other bordering players, are under 0.33 of its own,
+   *  or with its only bordering player while three times that player's
+   *  troops are under its own [PIN Betrayal]) at its next decision, or at
+   *  the end of the term the request or gift buys (Config.allianceDuration
+   *  on, its troops regrown to its cap: NationModel.troopsAt), is at least
+   *  this share of our cap. A kept giant ends the alliance itself at the
+   *  first decision that finds our home under the line (arena quick@20 v7:
+   *  Thailand at 16.1M against our 2.53M cap, 1,111 ticks after its second
+   *  gift; Antarctica at 6.5x our cap, 862 ticks after its third; Hellsö at
+   *  its 2.8x cap, 780 ticks after its gift). 0: no guard. */
+  webKeepBetrayShare: number;
 
   // ── Defense (§3.3) ───────────────────────────────────────────────────
   /** Recall an incoming nation attack by alliance (§3.3.2). E8. */
@@ -1351,8 +1379,8 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
    *  within searchLapseLead ticks), ask its extension at the expiry −
    *  extendLead and, if the alliance lapses anyway, a fresh alliance
    *  request the tick after the expiry. For strong allies (see
-   *  searchKeepMinShare) outside the web's keep list (s.web.allySet), which
-   *  the web lets lapse unasked. */
+   *  searchKeepMinShare) whose extension the web has not asked yet
+   *  (s.web.extensionAsked); the search decides which of them to keep. */
   searchKeep: boolean;
   /** An ally is strong for keep plans when its troops are at least this
    *  share of our home troops, or its cap at least 1.1 × ours (no home
@@ -1702,17 +1730,18 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
 
   // Package WP7a WEB KEEP.
   webKeepStrong: false,
-  webKeepAsk: true,
+  webKeepAsk: false,
   webKeepCapRatio: 1.1,
   webKeepTroopRatio: 1,
   webKeepGap: 600,
   webKeepRenew: true,
-  webKeepRenewMinP: 0.25,
-  webKeepRenewThreat: true,
-  webKeepGift: false,
+  webKeepRenewMinP: 0.8,
+  webKeepRenewThreat: false,
+  webKeepGift: true,
   webKeepGiftLead: 120,
   webKeepGiftShare: 0.9,
   webKeepGiftMinP: 0.5,
+  webKeepBetrayShare: 1,
 
   recall: true,
   recallMinP: 0.8,

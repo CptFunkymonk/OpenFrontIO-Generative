@@ -158,9 +158,23 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(deterrenceFloor(w.v(UE), A.id(), [])).toBeCloseTo(land, 6);
     // Its pick above A's troops is A, our target: strikeFloorReplicaFirm
     // keeps B's land line (the strike takes A).
-    const why: FloorWhy = { bind: null, kept: [] };
+    const why: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(w.v(FIRM), A.id(), [], why)).toBeCloseTo(land, 6);
-    expect(why).toEqual({ bind: B.id(), kept: [`${B.id()}:target`] });
+    expect(why.bind).toBe(B.id());
+    expect(why.kept).toEqual([`${B.id()}:target`]);
+    expect(why.land).toBeCloseTo(land, 6);
+    // why.land is A1's floor, the land lines alone (the wstrike log's
+    // land=, no longer a second evaluation with the replica off): with R1
+    // the floor is B's replica line and why.land its land line, the value
+    // with the replica off; with the replica off both are the land line.
+    const whyR1: FloorWhy = { bind: null, kept: [], land: 0 };
+    expect(deterrenceFloor(w.v(R1), A.id(), [], whyR1)).toBe(line);
+    expect(whyR1.bind).toBe(B.id());
+    expect(whyR1.land).toBe(deterrenceFloor(w.v(UE), A.id(), []));
+    expect(whyR1.land).toBeCloseTo(land, 6);
+    const whyUE: FloorWhy = { bind: null, kept: [], land: 0 };
+    expect(deterrenceFloor(w.v(UE), A.id(), [], whyUE)).toBe(whyUE.land);
+    expect(whyUE).toEqual({ bind: B.id(), kept: [], land: whyUE.land });
     // strikeBudget spends the difference: home − floor, under the purse.
     const floors: HomeFloors = {
       cap,
@@ -515,9 +529,11 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     // A strike on D: C borders B by land, is not the target and nobody's
     // victim; nothing attacks B and it borders no tribe. The line holds.
     expect(firmExit(v(FIRM), B, dB, line, D.id())).toBeNull();
-    const why: FloorWhy = { bind: null, kept: [] };
+    const why: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(v(FIRM), D.id(), [], why)).toBe(line);
-    expect(why).toEqual({ bind: B.id(), kept: [] });
+    expect(why).toEqual({ bind: B.id(), kept: [], land: why.land });
+    expect(why.land).toBe(deterrenceFloor(v(UE), D.id(), []));
+    expect(why.land).toBeGreaterThan(line);
     expect(deterrenceFloor(v(R1), D.id(), [])).toBe(line);
     // A strike on C: B's pick is the target, which the strike takes.
     expect(firmExit(v(FIRM), B, dB, line, C.id())).toBe("target");
@@ -554,10 +570,11 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(a.nm.canLandAttackUs(B.id(), lo, d)).toBe(false);
     expect(deterrenceFloor(a.v(R1), X.id(), [])).toBe(lo);
     expect(firmExit(a.v(FIRM), B, d, lo, X.id())).toBe("cannot");
-    const why: FloorWhy = { bind: null, kept: [] };
+    const why: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(a.v(FIRM), X.id(), [], why)).toBeCloseTo(land, 6);
     expect(deterrenceFloor(a.v(UE), X.id(), [])).toBeCloseTo(land, 6);
     expect(why.kept).toEqual([`${B.id()}:cannot`]);
+    expect(why.land).toBe(deterrenceFloor(a.v(UE), X.id(), []));
     // C launches elsewhere and its home drops: at lo B can attack us, and
     // its list picks us.
     C.setTroops(Math.round(0.8 * C.troops()));
@@ -622,7 +639,7 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
       const r1 = deterrenceFloor(v(R1), D.id(), []);
       expect(r1).toBeLessThan(land);
       expect(firmExit(v(FIRM), B, dB, r1, D.id())).toBe(reason);
-      const why: FloorWhy = { bind: null, kept: [] };
+      const why: FloorWhy = { bind: null, kept: [], land: 0 };
       expect(deterrenceFloor(v(FIRM), D.id(), [], why)).toBeCloseTo(land, 6);
       expect(why.kept).toEqual([`${B.id()}:${reason}`]);
     };
@@ -771,9 +788,10 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(deterrenceFloor(v(UE), null)).toBeCloseTo(land, 6);
     // K and W (on the shore, within reach) can boat us; B borders us.
     expect(boatLine(v(BOATS), 0)).toBe(K.troops());
-    const why: FloorWhy = { bind: null, kept: [] };
+    const why: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(v(BOATS), null, undefined, why)).toBe(K.troops());
     expect(why.bind).toBe("boats");
+    expect(why.land).toBeCloseTo(land, 6);
     // Never above A1's floor.
     K.setTroops(Math.round(2 * land));
     ({ v, land } = at(true));
@@ -836,9 +854,11 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     // decisions outruns B's growth.
     expect(line).toBeLessThan(H0);
     expect(H0).toBeLessThan(land);
-    const why: FloorWhy = { bind: null, kept: [] };
+    const why: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(v(REGROW), D.id(), [], why)).toBeCloseTo(H0, 6);
-    expect(why).toEqual({ bind: B.id(), kept: [] });
+    expect(why).toEqual({ bind: B.id(), kept: [], land: why.land });
+    expect(why.land).toBe(deterrenceFloor(v(UE), D.id(), []));
+    expect(why.land).toBeGreaterThan(H0);
     // A nation whose land line at d2 tops our cap: no home of ours regrows
     // there, and it keeps its land line.
     B.setTroops(Math.round(2.2 * config.maxTroops(me)));
@@ -850,7 +870,7 @@ describe("apex strike floor replica (package WP7b R1 FLOOR)", () => {
     expect(regrowLine(g.v(REGROW), B.id(), dg, safe)).toBe(Infinity);
     const lowered = deterrenceFloor(g.v(FIRM), D.id(), []);
     expect(lowered).toBeLessThan(landG);
-    const whyG: FloorWhy = { bind: null, kept: [] };
+    const whyG: FloorWhy = { bind: null, kept: [], land: 0 };
     expect(deterrenceFloor(g.v(REGROW), D.id(), [], whyG)).toBeCloseTo(
       landG,
       6,

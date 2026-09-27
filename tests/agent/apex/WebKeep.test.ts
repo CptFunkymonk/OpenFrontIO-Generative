@@ -29,6 +29,7 @@ import {
   friendPoints,
   goldChunk,
   keepAskTicks,
+  keepBetrayalLine,
   StrongAlly,
 } from "../../../src/agent/agents/apex/controllers/DiplomacyController";
 import { parseApexOptions } from "../../../src/agent/agents/apex/options";
@@ -272,7 +273,10 @@ describe("the strong rule's extensions", () => {
     test(`a strong bordering ally the web lets lapse is ${on ? "" : "not "}asked at the lead (webKeepStrong ${on})`, () => {
       // A holds 1.05x our cap (our home is at the cap): strong by troops,
       // not by cap (0.90x).
-      const w = synth({ webKeepStrong: on }, { [A]: 1.05, [B]: 0.3 });
+      const w = synth(
+        { webKeepStrong: on, webKeepAsk: true },
+        { [A]: 1.05, [B]: 0.3 },
+      );
       while (w.game.ticks() < 110) w.h.step();
       ally(w, A);
       const e = w.game.ticks() + 500;
@@ -305,7 +309,11 @@ describe("the strong rule's extensions", () => {
 
   test("strong by cap alone (maxTroops 1.25x ours, troops 0.3x our home) is asked too", () => {
     // A 6,000 tiles against our 6,000: the nation cap is x1.25.
-    const w = synth({ webKeepStrong: true }, { [A]: 0.3, [B]: 0.3 }, 60);
+    const w = synth(
+      { webKeepStrong: true, webKeepAsk: true },
+      { [A]: 0.3, [B]: 0.3 },
+      60,
+    );
     while (w.game.ticks() < 110) w.h.step();
     ally(w, A);
     const e = w.game.ticks() + 500;
@@ -322,7 +330,10 @@ describe("the strong rule's extensions", () => {
     // Arena quick@20 Alps g2 (v3, troops against our home): in the opening
     // four allies holding 1.05-1.63x our home were asked 2,000 ticks early.
     const asks = (on: boolean) => {
-      const w = synth({ webKeepStrong: on }, { [A]: 0.5, [B]: 0.3 });
+      const w = synth(
+        { webKeepStrong: on, webKeepAsk: true },
+        { [A]: 0.5, [B]: 0.3 },
+      );
       w.us.setTroops(Math.round(0.3 * w.cap));
       while (w.game.ticks() < 110) w.h.step();
       ally(w, A);
@@ -346,7 +357,10 @@ describe("the strong rule's extensions", () => {
 
   test("a weak ally, and a strong one that does not border us, are not asked by this rule", () => {
     // B: 0.5x our home and 0.90x our cap; C: 1.2x our home, beyond B.
-    const w = synth({ webKeepStrong: true }, { [B]: 0.5, [C]: 1.2 });
+    const w = synth(
+      { webKeepStrong: true, webKeepAsk: true },
+      { [B]: 0.5, [C]: 1.2 },
+    );
     while (w.game.ticks() < 110) w.h.step();
     ally(w, B);
     ally(w, C);
@@ -358,7 +372,7 @@ describe("the strong rule's extensions", () => {
     expect(extensionsTo(sent, C)).toEqual([]);
     expect(diplomacyMemory(w.s).strong).toEqual([]);
     // The same C bordering us (A's place) is asked.
-    const w2 = synth({ webKeepStrong: true }, { [A]: 1.2 });
+    const w2 = synth({ webKeepStrong: true, webKeepAsk: true }, { [A]: 1.2 });
     while (w2.game.ticks() < 110) w2.h.step();
     ally(w2, A);
     const e2 = w2.game.ticks() + 500;
@@ -367,7 +381,10 @@ describe("the strong rule's extensions", () => {
   });
 
   test("two strong expiries 100 ticks apart: the earlier is asked 600 before the later one's ask, and once both agree their terms end at least 600 apart", () => {
-    const w = synth({ webKeepStrong: true }, { [A]: 1.05, [B]: 1.05 });
+    const w = synth(
+      { webKeepStrong: true, webKeepAsk: true },
+      { [A]: 1.05, [B]: 1.05 },
+    );
     while (w.game.ticks() < 110) w.h.step();
     ally(w, A);
     ally(w, B);
@@ -420,7 +437,7 @@ describe("the strong rule's extensions", () => {
 
   test("webKeepGap 0: both are asked at the lead", () => {
     const w = synth(
-      { webKeepStrong: true, webKeepGap: 0 },
+      { webKeepStrong: true, webKeepAsk: true, webKeepGap: 0 },
       { [A]: 1.05, [B]: 1.05 },
     );
     while (w.game.ticks() < 110) w.h.step();
@@ -442,7 +459,13 @@ describe("with the midgame web (webMidgame)", () => {
     const share = { [A]: 1.2, [B]: 1.15, [E]: 1.05 };
     for (const on of [true, false]) {
       const w = synth(
-        { webMidgame: true, webFrom: 0, web: false, webKeepStrong: on },
+        {
+          webMidgame: true,
+          webFrom: 0,
+          web: false,
+          webKeepStrong: on,
+          webKeepAsk: true,
+        },
         share,
         40,
         true,
@@ -473,10 +496,34 @@ describe("with the midgame web (webMidgame)", () => {
 });
 
 describe("webKeepAsk off: the renew without the strong rule's asks", () => {
+  test("the flag's defaults are the screened arm with the review's guards: no asks, the renew at the recall's floor and not for a threat, the gift, the betrayal guard", () => {
+    const o = parseApexOptions({ webKeepStrong: true });
+    expect(o.webKeepAsk).toBe(false);
+    expect(o.webKeepRenew).toBe(true);
+    expect(o.webKeepRenewMinP).toBe(o.recallMinP);
+    expect(o.webKeepRenewThreat).toBe(false);
+    expect(o.webKeepGift).toBe(true);
+    expect(o.webKeepBetrayShare).toBe(1);
+    // A strong ally (1.2x our cap) the web lets lapse is not asked.
+    const w = synth({ webKeepStrong: true }, { [A]: 1.2 });
+    while (w.game.ticks() < 110) w.h.step();
+    ally(w, A);
+    const e = w.game.ticks() + 500;
+    expireAt(w, A, e);
+    const sent = run(w, e - 1);
+    expect(w.s.web.allySet).not.toContain(A);
+    expect(extensionsTo(sent, A)).toEqual([]);
+    expect(diplomacyMemory(w.s).strong!.map((r) => r.id)).toEqual([A]);
+    expect(diplomacyMemory(w.s).stats.keepAsks).toBeUndefined();
+  });
+
   test("a strong ally outside the web is not asked to extend, and still gets the fresh request at its lapse", () => {
+    // A 6,000 tiles against our 6,000 (its cap 1.25x ours), holding our
+    // cap: strong by cap, no threat to it, its request forecast 1.
     const w = synth(
       { webKeepStrong: true, webKeepAsk: false, web: false },
-      { [A]: 1.05 },
+      { [A]: 1.0 },
+      60,
     );
     w.game.addExecution(new PlayerExecution(w.us));
     while (w.game.ticks() < 110) w.h.step();
@@ -531,7 +578,9 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
   }
 
   test("a strong bordering ally whose alliance lapsed gets a fresh request the first tick we see it gone, with a passing forecast", () => {
-    const { w, lapsedAt, requests } = lapse({}, { [A]: 1.05 }, A);
+    // A 6,000 tiles against our 6,000 (its cap 1.25x ours), holding 1.2x
+    // our cap: no threat to it, its request forecast 1.
+    const { w, lapsedAt, requests } = lapse({}, { [A]: 1.2 }, A, 60);
     expect(requests.map((x) => x.tick)).toEqual([lapsedAt]);
     const f = nationModel(w.policy).acceptsAlliance(A, {
       kind: "request",
@@ -539,7 +588,8 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
       atTick: lapsedAt + 5,
       embargoStoppedBy: null,
     });
-    expect(f.p).toBeGreaterThanOrEqual(0.25);
+    expect(f.p).toBeGreaterThanOrEqual(0.8);
+    expect(f.branch).not.toBe("threat");
     expect(diplomacyMemory(w.s).stats.keepRenews).toBe(1);
     expect(w.h.logs.some((l) => l.includes("dip keep-renew nationaa p="))).toBe(
       true,
@@ -548,25 +598,38 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
 
   test("no renew for a weak ally, nor with webKeepRenew off, nor below webKeepRenewMinP", () => {
     expect(lapse({}, { [B]: 0.3 }, B).requests).toEqual([]);
-    expect(lapse({ webKeepRenew: false }, { [A]: 1.05 }, A).requests).toEqual(
-      [],
-    );
-    const high = lapse({ webKeepRenewMinP: 1.01 }, { [A]: 1.05 }, A);
+    expect(
+      lapse({ webKeepRenew: false }, { [A]: 1.2 }, A, 60).requests,
+    ).toEqual([]);
+    const high = lapse({ webKeepRenewMinP: 1.01 }, { [A]: 1.2 }, A, 60);
     expect(high.requests).toEqual([]);
     expect(high.w.h.logs.some((l) => l.includes("(not sent)"))).toBe(true);
+    // The default floor is the recall's (a refused request puts the recall
+    // on the 300-tick cooldown too): a forecast of 0.3 (A 7,000 tiles
+    // against our 5,000, holding 1.39x our cap) is not sent.
+    const o = parseApexOptions({});
+    expect(o.webKeepRenewMinP).toBe(0.8);
+    expect(o.webKeepRenewMinP).toBe(o.recallMinP);
+    const low = lapse({}, { [A]: 1.39 }, A, 70);
+    expect(low.requests).toEqual([]);
+    expect(
+      low.w.h.logs.some((l) =>
+        /dip keep-renew nationaa: p=0\.\d\d \w+ \(not sent\)/.test(l),
+      ),
+    ).toBe(true);
   });
 
   test("a strong ally that would accept only because we threaten it (we out-troop it) is renewed only with webKeepRenewThreat", () => {
     // A 6,000 tiles against our 6,000 (its cap 1.25x ours), holding 0.3x
     // our cap: our home out-troops it 3.3x.
-    const on = lapse({}, { [A]: 0.3 }, A, 60);
+    const on = lapse({ webKeepRenewThreat: true }, { [A]: 0.3 }, A, 60);
     expect(on.requests.map((x) => x.tick)).toEqual([on.lapsedAt]);
     expect(
       on.w.h.logs.some((l) =>
         l.includes("dip keep-renew nationaa p=1.00 threat"),
       ),
     ).toBe(true);
-    const off = lapse({ webKeepRenewThreat: false }, { [A]: 0.3 }, A, 60);
+    const off = lapse({}, { [A]: 0.3 }, A, 60);
     expect(off.requests).toEqual([]);
     expect(diplomacyMemory(off.w.s).stats.keepRenews).toBeUndefined();
     expect(
@@ -576,9 +639,9 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
         ),
       ),
     ).toBe(true);
-    // One we do not out-troop (7,000 tiles against our 5,000, holding
-    // 1.39x our cap, 95% of its own) is renewed either way.
-    const strong = lapse({ webKeepRenewThreat: false }, { [A]: 1.39 }, A, 70);
+    // One we do not out-troop (6,000 tiles against our 6,000, holding 1.2x
+    // our cap) is renewed either way.
+    const strong = lapse({}, { [A]: 1.2 }, A, 60);
     expect(strong.requests.map((x) => x.tick)).toEqual([strong.lapsedAt]);
     expect(
       strong.w.h.logs.some(
@@ -605,6 +668,88 @@ describe("the renew of a strong ally (webKeepRenew)", () => {
     ).toEqual([]);
     expect(diplomacyMemory(w.s).strongRenew![A]).toBeUndefined();
   });
+
+  test("no renew for an ally that could betray us at our cap within the bought term (webKeepBetrayShare): its line now or at the term's end at the share of our cap", () => {
+    // A 6,000 tiles against our 6,000 (its cap 1.25x ours), holding 0.9x
+    // our cap, bordering only us: its request forecast 1 (the tiles rule);
+    // its betrayal line is a third of its troops (the only-neighbour
+    // rule): 0.30-0.32x our cap at its decision (the model regrows it to
+    // there), 0.42x once regrown to its cap in the term.
+    const blocked = lapse({ webKeepBetrayShare: 0.36 }, { [A]: 0.9 }, A, 60);
+    expect(blocked.requests).toEqual([]);
+    expect(diplomacyMemory(blocked.w.s).stats.keepRenews).toBeUndefined();
+    const log = blocked.w.h.logs.find((l) =>
+      l.includes("dip keep-renew nationaa: betrayal line"),
+    )!;
+    expect(log).toBeDefined();
+    const m =
+      /betrayal line (\d+) at d=(\d+), (\d+) at (\d+) >= 0\.36x our cap (\d+) \(not sent\)/.exec(
+        log,
+      )!;
+    expect(m).not.toBeNull();
+    const [, now, d, later, end, cap] = m.map(Number);
+    expect(end).toBe(d + blocked.w.game.config().allianceDuration());
+    expect(now / cap).toBeGreaterThan(0.28);
+    expect(now / cap).toBeLessThan(0.36);
+    expect(later / cap).toBeGreaterThan(0.4);
+    expect(later / cap).toBeLessThan(0.43);
+    // A share above the projected line, or 0, lets the renew go.
+    const share = lapse({ webKeepBetrayShare: 0.45 }, { [A]: 0.9 }, A, 60);
+    expect(share.requests.map((x) => x.tick)).toEqual([share.lapsedAt]);
+    const off = lapse({ webKeepBetrayShare: 0 }, { [A]: 0.9 }, A, 60);
+    expect(off.requests.map((x) => x.tick)).toEqual([off.lapsedAt]);
+  });
+});
+
+describe("keepBetrayalLine", () => {
+  test("a third of the troops of a nation bordering only us; 0.33 of them less its other bordering players' troops and attacks otherwise, its other allies too unless we are a traitor; 0 for one not bordering us", () => {
+    // A borders us alone; B borders us and C; C borders B only.
+    const w = synth({ webKeepStrong: true }, { [A]: 1.0, [B]: 1.0, [C]: 0.1 });
+    while (w.game.ticks() < 110) w.h.step();
+    const nm = nationModel(w.policy);
+    const v = { game: w.game, me: w.us, nm };
+    const t = w.game.ticks();
+    const NA = w.nation(A);
+    const NB = w.nation(B);
+    const NC = w.nation(C);
+    expect(keepBetrayalLine(v, NA, t)).toBeCloseTo(NA.troops() / 3, 6);
+    expect(keepBetrayalLine(v, NB, t)).toBeCloseTo(
+      0.33 * NB.troops() - NC.troops(),
+      6,
+    );
+    expect(keepBetrayalLine(v, NC, t)).toBe(0);
+    // A weak nation with a strong neighbour cannot betray anyone: 0, not
+    // negative.
+    NB.setTroops(Math.round(0.1 * w.cap));
+    NC.setTroops(Math.round(1.0 * w.cap));
+    expect(keepBetrayalLine(v, NB, t)).toBe(0);
+    NB.setTroops(Math.round(1.0 * w.cap));
+    NC.setTroops(Math.round(0.1 * w.cap));
+    // C allied to B is B's other ally: counted as a threat all the same
+    // (isSafeToBetray's otherAllies)...
+    w.game.addExecution(new AllianceRequestExecution(NC, B));
+    w.h.step();
+    NB.incomingAllianceRequests()
+      .find((q) => q.requestor() === NC)
+      ?.accept();
+    expect(NB.isAlliedWith(NC)).toBe(true);
+    const t2 = w.game.ticks();
+    expect(keepBetrayalLine(v, NB, t2)).toBeCloseTo(
+      0.33 * NB.troops() - NC.troops(),
+      6,
+    );
+    // ...unless we are a traitor: betraying one costs B nothing.
+    ally(w, A);
+    w.game.addExecution(new BreakAllianceExecution(w.us, A));
+    w.h.step();
+    expect(w.us.isTraitor()).toBe(true);
+    const t3 = w.game.ticks();
+    expect(keepBetrayalLine(v, NB, t3)).toBeCloseTo(0.33 * NB.troops(), 6);
+    // Later, its troops regrown by the model: the line grows with them.
+    const d = t3 + w.game.config().allianceDuration();
+    expect(nm.troopsAt(B, d)).toBeGreaterThan(NB.troops());
+    expect(keepBetrayalLine(v, NB, d)).toBeCloseTo(0.33 * nm.troopsAt(B, d), 6);
+  });
 });
 
 describe("gold for a strong ally's friendship (webKeepGift)", () => {
@@ -615,7 +760,7 @@ describe("gold for a strong ally's friendship (webKeepGift)", () => {
    *  before tick 700); its expiry `e`; our gold `gold`. */
   function asked(options: Record<string, unknown>, gold: bigint) {
     const w = synth(
-      { webKeepStrong: true, webKeepGift: true, ...options },
+      { webKeepStrong: true, webKeepAsk: true, webKeepGift: true, ...options },
       { [A]: 1.39 },
       70,
     );
@@ -660,5 +805,81 @@ describe("gold for a strong ally's friendship (webKeepGift)", () => {
         l.includes("dip keep-gift nationaa unaffordable"),
       ),
     ).toHaveLength(1);
+  });
+
+  test("no gift for an ally that could betray us at our cap (webKeepBetrayShare), logged once", () => {
+    // A borders only us: its line is a third of its troops, 0.46x our cap
+    // now and 0.49x at the term's end (its cap 1.46x ours).
+    const blocked = asked({ webKeepBetrayShare: 0.45 }, 50_000_000n);
+    expect(extensionsTo(blocked.sent, A)).toHaveLength(1);
+    expect(blocked.gifts).toEqual([]);
+    expect(
+      blocked.w.h.logs.filter((l) =>
+        /dip keep-gift nationaa: betrayal line \d+ at d=\d+, \d+ at \d+ >= 0\.45x our cap \d+ \(not sent\)/.test(
+          l,
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(diplomacyMemory(blocked.w.s).stats.goldGifts).toBeUndefined();
+    expect(asked({ webKeepBetrayShare: 0.5 }, 50_000_000n).gifts).toHaveLength(
+      1,
+    );
+    expect(asked({ webKeepBetrayShare: 0 }, 50_000_000n).gifts).toHaveLength(1);
+  });
+
+  test("no gift for an extension refused for our alliance count unless another alliance of ours ends before the expiry", () => {
+    // Allied to A (strong), B and C: 3 of A_max 3, so A's extension is
+    // refused as tooMany and Friendly, decided after that test, cannot help
+    // until one of the others ends. C, beyond B, is not strong (no
+    // border), so its extension is never asked: its expiry counts.
+    const field = (cEndsBefore: number | null) => {
+      const w = synth(
+        { webKeepStrong: true, webKeepAsk: true, web: false },
+        { [A]: 1.39 },
+        70,
+      );
+      while (w.game.ticks() < 110) w.h.step();
+      ally(w, A);
+      ally(w, B);
+      ally(w, C);
+      w.us.addGold(50_000_000n - w.us.gold());
+      const e = w.game.ticks() + 400;
+      expireAt(w, A, e);
+      if (cEndsBefore !== null) expireAt(w, C, e - cEndsBefore);
+      const sent = run(w, e - 1);
+      const f = nationModel(w.policy).acceptsAlliance(A, {
+        kind: "extension",
+        createdAt: e - 130,
+        atTick: e - 100,
+        embargoStoppedBy: null,
+      });
+      return {
+        w,
+        e,
+        asks: extensionsTo(sent, A),
+        gifts: sent.filter(
+          (x) => x.i.type === "donate_gold" && x.i.recipient === A,
+        ),
+        branch: f.branch,
+      };
+    };
+    const kept = field(null);
+    expect(kept.asks).toHaveLength(1);
+    expect(kept.branch).toBe("tooMany");
+    expect(kept.gifts).toEqual([]);
+    expect(
+      kept.w.h.logs.filter((l) =>
+        l.includes(
+          "dip keep-gift nationaa: extension refused for our alliance count (3)",
+        ),
+      ),
+    ).toHaveLength(1);
+    // C's alliance ends 100 ticks before A's expiry, inside the gift lead:
+    // the gift goes while A's forecast is still tooMany.
+    const drops = field(100);
+    expect(drops.asks).toHaveLength(1);
+    expect(drops.gifts).toHaveLength(1);
+    expect(drops.gifts[0].tick).toBeGreaterThanOrEqual(drops.e - 120);
+    expect(drops.gifts[0].tick).toBeLessThan(drops.e - 100);
   });
 });

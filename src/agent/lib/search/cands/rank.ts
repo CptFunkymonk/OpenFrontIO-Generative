@@ -188,10 +188,8 @@ export function killsim(x: KillsimInput): KillsimResult {
         A *= D >= x.trigger * M ? 1 : 0.1;
         if (A > 0) {
           if (A >= S) {
-            D -= S;
-            lost += S;
-            S = 0;
-            break;
+            // The answer takes the whole stack: the strike is over.
+            return { killed: false, tiles: gained, lost: lost + S, ticks: t };
           }
           S -= A;
           D -= A;
@@ -265,12 +263,19 @@ export function rankScore(
     cfg.gameConfig().difficulty ?? Difficulty.Impossible,
   );
   if (mode === "prey") {
-    return -preyScore({ n, T, M, reserve: params.reserve, contact: info.contact });
+    return -preyScore({
+      n,
+      T,
+      M,
+      reserve: params.reserve,
+      contact: info.contact,
+    });
   }
   const S = sv.host.available("strike");
   if (!(S > 0)) return -Infinity;
   let inc = 0;
-  for (const a of me.incomingAttacks()) if (a.attacker() === N) inc += a.troops();
+  for (const a of me.incomingAttacks())
+    if (a.attacker() === N) inc += a.troops();
   if (mode === "killsim") {
     const home = me.troops();
     const cap = cfg.maxTroops(me);
@@ -303,7 +308,8 @@ export function rankScore(
   const reach = reachableTiles(game, me, N);
   const y = strikeYield(S, left, p, n, reach, KILL_FREE, inc + answer);
   const value =
-    y.tiles + (y.kill ? Number(N.gold()) / Math.max(1, sv.o.strikeGoldPerTile) : 0);
+    y.tiles +
+    (y.kill ? Number(N.gold()) / Math.max(1, sv.o.strikeGoldPerTile) : 0);
   return value / Math.max(1, y.spent);
 }
 

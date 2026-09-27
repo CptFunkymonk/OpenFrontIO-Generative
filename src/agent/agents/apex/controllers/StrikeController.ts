@@ -382,8 +382,10 @@ export function windowInput(
  * o.strikeFloorReplicaRegrow it is at least regrowLine (the replica for
  * the nation's next decision only); with o.strikeFloorReplicaBoats the
  * floor is at least min(A1's floor, boatLine). `why` (logs and tests only)
- * gets the nation whose line set the floor and the nations kept at their
- * land lines, by firmExit's reason or "regrow".
+ * gets the nation whose line set the floor, the nations kept at their
+ * land lines, by firmExit's reason or "regrow", and A1's floor itself (the
+ * land lines alone: what this returns with o.strikeFloorReplica off), so
+ * the log's land= costs no second evaluation.
  */
 export function deterrenceFloor(
   v: Pick<View, "o" | "wm" | "nm" | "game" | "me" | "tick" | "models"> &
@@ -492,7 +494,10 @@ export function deterrenceFloor(
       bind = "boats";
     }
   }
-  if (why !== undefined) why.bind = bind;
+  if (why !== undefined) {
+    why.bind = bind;
+    why.land = landFloor;
+  }
   return Math.max(floor, least);
 }
 
@@ -503,6 +508,9 @@ export interface FloorWhy {
   /** The nations kept at their land lines, as "id:reason" (firmExit's
    *  reason, or "regrow": regrowLine reached the land line). */
   kept: string[];
+  /** A1's floor, the land lines alone: deterrenceFloor's value with
+   *  o.strikeFloorReplica off (the wstrike log's land=). */
+  land: number;
 }
 
 /** firmExit: an enemy of the nation attacked by more than this share of
@@ -1358,9 +1366,17 @@ export class StrikeController implements Controller {
       const score = perTroop * (vulture ? VULTURE_BONUS : 1);
       if (best !== null && score <= best.score) continue;
       const k = (x: number) => `${Math.round(x / 1000)}k`;
-      // Package WP7b (logs): the nation whose line set det=, and the nations
-      // o.strikeFloorReplicaFirm kept at their land lines.
-      const floorWhy: FloorWhy = { bind: null, kept: [] };
+      // Package WP7b (logs): the nation whose line set det=, the nations
+      // o.strikeFloorReplicaFirm kept at their land lines, and A1's floor
+      // (land=), all from the one evaluation (review of WP7b, round 3, F5:
+      // the log evaluated the floor twice more, tripling the replica's cost
+      // on the ticks that already peak).
+      const floorWhy: FloorWhy = { bind: null, kept: [], land: 0 };
+      const logFloor = o.strikeFloorReplica && v.log !== undefined;
+      const det =
+        o.strikeDetNearTarget || logFloor
+          ? deterrenceFloor(v, info.id, near, floorWhy)
+          : 0;
       best = {
         info,
         N,
@@ -1383,18 +1399,12 @@ export class StrikeController implements Controller {
               (pocket ? " pocket" : "")
             : "") +
           (o.strikeDetNearTarget
-            ? ` det=${k(deterrenceFloor(v, info.id, near, floorWhy))}` +
+            ? ` det=${k(det)}` +
               (near !== undefined ? ` near=${near.length}` : "")
             : "") +
           // Package WP7b: the land-line floor the replica replaced (logs).
-          (o.strikeFloorReplica && v.log !== undefined
-            ? ` land=${k(
-                deterrenceFloor(
-                  { ...v, o: { ...o, strikeFloorReplica: false } },
-                  info.id,
-                  near,
-                ),
-              )}` +
+          (logFloor
+            ? ` land=${k(floorWhy.land)}` +
               (floorWhy.bind !== null ? ` bind=${floorWhy.bind}` : "") +
               (floorWhy.kept.length > 0
                 ? ` kept=${floorWhy.kept.join(",")}`

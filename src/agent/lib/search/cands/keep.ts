@@ -42,8 +42,16 @@ import type {
 // Made for strong allies only (troops ≥ searchKeepMinShare of our home, or
 // a cap ≥ KEEP_CAP_RATIO × ours: a nation land-attacks us once unallied
 // while our home is below its troops over 1.1, and no home deters a cap
-// that large, plan §1.4), outside the web's keep list (s.web.allySet: the
-// web asks the extension of the allies in it at the same lead).
+// that large, plan §1.4) whose extension the web has not asked yet
+// (s.web.extensionAsked). The plan's "outside the web's keep list" rule
+// made no plan at all on Africa g11 (stage 1): the web asks at the expiry
+// − extendLead (300) while T1 fires 500 ticks ahead, and an ally in the
+// keep list still lapses unasked under the web's stability wait
+// (DiplomacyController.extensions, webExtendStable: 8 of g11's lapses
+// were "not asked", 5 of them strong). When the web does ask later, the
+// plan's extension dedupes with it by key (`ext:<id>`), so the keep
+// rollout equals the base and loses on the margin: the cost is one
+// rollout per strong expiring ally.
 //
 // keep:Z+gift (searchKeepGift): the same with a gold gift before the
 // extension (DiplomacyController's pricing, B2's): friendPoints of relation
@@ -58,7 +66,8 @@ import type {
 // NationModel) is below searchKeepGiftP and not "traitor", while its
 // relation band is Neutral (Friendly needs no gift; below Neutral +100 may
 // not reach it), it is not embargoed, and the gold is at most
-// searchKeepGiftShare of ours.
+// searchKeepGiftShare of ours. An ally the web has asked already gets the
+// gift plan alone (its renewal is what differs from the base).
 //
 // Every step is read at its tick through the same Scheduler as the web's
 // sends, so a keep and the web's own extension of the same ally dedupe by
@@ -125,7 +134,11 @@ export function renewStep(id: PlayerID, at: number): DirectiveStep {
 }
 
 /** The gift step (B2's proposal). */
-export function giftStep(id: PlayerID, at: number, gold: bigint): DirectiveStep {
+export function giftStep(
+  id: PlayerID,
+  at: number,
+  gold: bigint,
+): DirectiveStep {
   return {
     at,
     label: `gift ${id} ${gold}`,
@@ -265,7 +278,7 @@ export const KEEP: CandidateGenerator = {
   generate(sv: SearchView, _base: BaseView): Candidate[] {
     const { o, game, me, t, kinds } = sv;
     if (!o.searchKeep || !kinds.has("keep")) return [];
-    const keepList = new Set(sv.host.state.web.allySet);
+    const asked = sv.host.state.web.extensionAsked;
     const out: Candidate[] = [];
     // The bordering allies by contact, as the core's nations (ties: the
     // scan's ascending smallID).
@@ -281,7 +294,7 @@ export const KEEP: CandidateGenerator = {
       const e = al.expiresAt();
       if (e - t > o.searchLapseLead || e <= t) continue;
       if (!strongAlly(sv, N)) continue;
-      out.push(...keepCandidates(sv, { N, e }, !keepList.has(n.id)));
+      out.push(...keepCandidates(sv, { N, e }, asked[n.id] !== e));
     }
     return out;
   },

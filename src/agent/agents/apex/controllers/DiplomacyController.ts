@@ -59,7 +59,10 @@ import { inStall } from "./ExpansionController";
 //                          renewStrong; not one we out-troop without
 //                          o.webKeepRenewThreat); one still refusing its asked
 //                          extension gets gold for Friendly
-//                          (o.webKeepGift, keepGifts).
+//                          (o.webKeepGift, keepGifts); neither renew nor gold
+//                          for an ally whose betrayal line, now or at the end
+//                          of the bought term, reaches our cap
+//                          (o.webKeepBetrayShare, keepBetrayalLine).
 //
 // The recall (§3.3.2) is the DefenseController's; both take the dedupe key
 // `ally:<id>`, so no nation gets two requests in a tick. Slots: requests from
@@ -209,6 +212,9 @@ export interface DiplomacyMemory {
    *  ally's alliance, for the fresh request at its lapse (set each
    *  decision; the entry of a lapsed one stays until onTick has seen it). */
   strongRenew?: Record<PlayerID, number>;
+  /** Package WP7a (o.webKeepGift): the `expiry:reason` each withheld
+   *  gift was last logged for (logs only). */
+  keepSkipped?: Record<PlayerID, string>;
   stats: {
     plans: number;
     requests: number;
@@ -280,6 +286,58 @@ export function keepAskTicks(
     }
     next = r;
   }
+}
+
+/** isSafeToBetray's share of the betrayer's troops, and the multiple of
+ *  rule (c) (NationAllianceBehavior.ts:450-457, :490) [PIN Betrayal]. */
+const BETRAY_SAFE_SHARE = 0.33;
+const BETRAY_ALONE_MULT = 3;
+
+/**
+ * Package WP7a (o.webKeepBetrayShare): the least troops of ours (home plus
+ * attacks) at which ally N cannot betray us at its decision d, by the Hard
+ * and Impossible rules [PIN Betrayal] (NationAllianceBehavior maybeBetray
+ * :404-461): (a) as its juiciest bordering ally (assumed: we usually are),
+ * it betrays while our troops and attacks plus those of its other bordering
+ * players (every non-friendly one, tribes too, and its other allies unless
+ * we are a traitor; isSafeToBetray :473-491) are below 0.33 of its troops;
+ * (c) as its only bordering player, while 3 times our troops are below its
+ * troops. N's troops are NationModel.troopsAt(N, d); its bordering players
+ * are N.nearby()'s (a getter with its own memo). 0 at Easy and Medium
+ * (other rules) and when N does not border us. The WP10b LeaderGuard has
+ * the full line (juiciest, gates, spans); this is its rule (a) and (c) at
+ * one decision, for the rare send it guards.
+ */
+export function keepBetrayalLine(
+  v: Pick<View, "game" | "me" | "nm">,
+  N: Player,
+  d: number,
+): number {
+  const { game, me, nm } = v;
+  const difficulty = game.config().gameConfig().difficulty;
+  if (difficulty !== Difficulty.Hard && difficulty !== Difficulty.Impossible) {
+    return 0;
+  }
+  const traitor = me.isTraitor();
+  let others = 0;
+  let count = 0;
+  let usThere = false;
+  for (const x of N.nearby()) {
+    if (!x.isPlayer() || x === N) continue;
+    const y = x as Player;
+    count++;
+    if (y === me) {
+      usThere = true;
+      continue;
+    }
+    if (N.isFriendly(y) && (traitor || !N.isAlliedWith(y))) continue;
+    others += y.troops();
+    for (const a of y.outgoingAttacks()) others += a.troops();
+  }
+  if (!usThere) return 0;
+  const T = nm.troopsAt(N.id(), d);
+  const alone = count === 1 ? T / BETRAY_ALONE_MULT : 0;
+  return Math.max(0, BETRAY_SAFE_SHARE * T - others, alone);
 }
 
 /** o.webMidgame's plan (planMid), plain data. */
@@ -594,7 +652,12 @@ export class DiplomacyController implements Controller {
    * of the time at each decision left, and at the renew's), after
    * hasTooManyAlliances [PIN FriendDonation]. One gift a term, while its
    * relation band is Neutral, from at most webKeepGiftShare of our gold;
-   * `donate:<id>` dedupes it with B2's gifts in a tick.
+   * `donate:<id>` dedupes it with B2's gifts in a tick. Review round 2:
+   * none for an extension refused for our alliance count unless enough of
+   * our other alliances end first (countDropsBefore; for the renew at the
+   * lapse, which counts one alliance fewer, Friendly's 67% is below
+   * webKeepRenewMinP), and none while N can betray us at our cap
+   * (betrayalBlocks).
    */
   private keepGifts(v: View, mem: DiplomacyMemory): void {
     const { o, me, nm, game, tick: t } = v;
@@ -613,14 +676,36 @@ export class DiplomacyController implements Controller {
       if (!a.agreedToExtend(me) || a.agreedToExtend(N)) continue;
       if (N.relation(me) !== Relation.Neutral) continue;
       if (me.hasEmbargoAgainst(N) || !me.canDonateGold(N)) continue;
+      const d = nm.nextDecision(id, t + 1);
       const f = nm.acceptsAlliance(id, {
         kind: "extension",
         createdAt: t,
-        atTick: nm.nextDecision(id, t + 1),
+        atTick: d,
         embargoStoppedBy: null,
       });
       if (f.p >= o.webKeepGiftMinP) continue;
       if (f.branch === "traitor" || f.branch === "spawnPhase") continue;
+      // Review D3: refused for our alliance count, Friendly (decided after
+      // hasTooManyAlliances) helps only once enough of our other alliances
+      // have ended (arena quick@20 v7: 9 of 18 gifts, 8.8M gold, went to
+      // such extensions; in g2, g12 and g19 none could help).
+      if (f.branch === "tooMany" && !this.countDropsBefore(v, N, e)) {
+        this.skipKeep(
+          v,
+          mem,
+          N,
+          e,
+          "count",
+          `extension refused for our alliance count (${me.alliances().length}) and too few of ours end before ${e}`,
+        );
+        continue;
+      }
+      // Review D1: no gold for an ally that can betray us at our cap.
+      const line = this.betrayalBlocks(v, N, d);
+      if (line !== null) {
+        this.skipKeep(v, mem, N, e, "betray", line);
+        continue;
+      }
       const paid = t + 1;
       const r = Math.min(
         FRIENDLY_FROM - 1,
@@ -660,6 +745,71 @@ export class DiplomacyController implements Controller {
   }
 
   /**
+   * Package WP7a, review D3: whether enough of our alliances other than
+   * the one with N end before `e` for its extension to pass
+   * hasTooManyAlliances (our alliances ≤ A_ext) at a decision of N before
+   * `e`: those expiring before N's last decision before `e`, whose
+   * extension we have not asked (an asked one may still be extended).
+   */
+  private countDropsBefore(v: View, N: Player, e: number): boolean {
+    const { o, me, nm, game } = v;
+    const slots = allySlots(game, me, o.allySlotsReserve);
+    const held = me.alliances();
+    let ending = 0;
+    for (const b of held) {
+      if (b.other(me) === N || b.agreedToExtend(me)) continue;
+      const eb = b.expiresAt();
+      if (eb < e && nm.nextDecision(N.id(), eb + 1) < e) ending++;
+    }
+    return held.length - ending <= slots.ext;
+  }
+
+  /**
+   * Package WP7a, review D1 (o.webKeepBetrayShare): why N's gift or renew
+   * is not sent, or null. Not while N's betrayal line (keepBetrayalLine)
+   * at its decision d, or at the end of the term a yes there buys (d +
+   * Config.allianceDuration, N's troops regrown to its cap:
+   * NationModel.troopsAt), is at least webKeepBetrayShare × our cap: our
+   * home cannot hold it, so a kept alliance ends at N's first decision
+   * that finds us its juiciest ally under the line (arena quick@20 v7:
+   * Thailand, 16.1M against our 2.53M home at the cap, broke it 1,111
+   * ticks after its second gift in World g0; Antarctica, 6.46x our cap,
+   * 862 ticks after its third in Giant World Map g30; Hellsö, 1.04x our
+   * cap at its gift and at its own 2.8x cap 811 ticks later, 780 ticks
+   * after it in Baikal g1). 0: no guard.
+   */
+  private betrayalBlocks(v: View, N: Player, d: number): string | null {
+    const share = v.o.webKeepBetrayShare;
+    if (!(share > 0)) return null;
+    const now = keepBetrayalLine(v, N, d);
+    const end = d + v.game.config().allianceDuration();
+    const later = keepBetrayalLine(v, N, end);
+    const cap = v.game.config().maxTroops(v.me);
+    if (Math.max(now, later) < share * cap) return null;
+    return (
+      `betrayal line ${Math.round(now)} at d=${d}, ${Math.round(later)} at ` +
+      `${end} >= ${share}x our cap ${Math.round(cap)}`
+    );
+  }
+
+  /** Package WP7a: logs why N's gift was not sent, once per expiry and
+   *  reason. */
+  private skipKeep(
+    v: View,
+    mem: DiplomacyMemory,
+    N: Player,
+    e: number,
+    reason: string,
+    why: string,
+  ): void {
+    const rec = (mem.keepSkipped ??= {});
+    const key = `${e}:${reason}`;
+    if (rec[N.id()] === key) return;
+    rec[N.id()] = key;
+    v.log?.(`${v.tick} dip keep-gift ${N.name()}: ${why} (not sent)`);
+  }
+
+  /**
    * Package WP7a (o.webKeepRenew, every tick): a strong bordering ally
    * (planStrong) whose alliance lapsed, its extension refused or not yet
    * agreed, gets a fresh request the first tick we see it gone, as
@@ -674,7 +824,13 @@ export class DiplomacyController implements Controller {
    * alliances and pending requests are below A_max (a request at A_max is
    * refused) and the forecast is at least webKeepRenewMinP, and not only
    * because we threaten it without o.webKeepRenewThreat; one attempt per
-   * lapse (the web's own requests retry after the 300-tick cooldown).
+   * lapse (the web's own requests retry after the 300-tick cooldown). A
+   * refused request starts that cooldown for the recall too
+   * (canSendAllianceRequest: Config.allianceRequestCooldown() ticks from
+   * any request's creation), so webKeepRenewMinP defaults to recallMinP's
+   * 0.8 (review D4: Box g25, the renew at p = 0.67 refused at 10,524, the
+   * recall of the same nation's 7.5M attack at 10,698 on cooldown). Not
+   * while N can betray us at our cap (betrayalBlocks, review D1).
    */
   private renewStrong(v: View, s: ApexState, mem: DiplomacyMemory): void {
     const { o, me, nm, game, tick: t } = v;
@@ -741,6 +897,12 @@ export class DiplomacyController implements Controller {
         v.log?.(
           `${t} dip keep-renew ${N.name()}: p=${f.p.toFixed(2)} threat, we out-troop it (not sent)`,
         );
+        continue;
+      }
+      // Review D1: an ally that can betray us at our cap keeps nothing.
+      const line = this.betrayalBlocks(v, N, d);
+      if (line !== null) {
+        v.log?.(`${t} dip keep-renew ${N.name()}: ${line} (not sent)`);
         continue;
       }
       if (stoppedBy === t && !offerEmbargoStop(v, s, N, Prio.Recall)) continue;
