@@ -66,30 +66,74 @@ export class WaterManager {
   private _miniStampArr: Uint16Array | null = null;
   private _miniStamp: number = 0;
 
+  /**
+   * `source` (a structural clone of the game, snapshot/GameClone.ts): the
+   * manager of the game these maps were copied from. While its minimap
+   * still has the map file's water, its components and graph are exactly
+   * what building them here would compute, so they are copied instead (with
+   * a fresh path cache, and search scratch made when first needed).
+   */
   constructor(
     private map: GameMap,
     private miniMap: GameMap,
     private disableNavMesh: boolean,
+    source?: WaterManager,
   ) {
     if (!disableNavMesh) {
-      this._miniWaterCC = new ConnectedComponents(miniMap);
-      this._miniWaterCC.initialize();
-      this._builderBFS = new BFSGrid(miniMap.width() * miniMap.height());
-      const graphBuilder = new AbstractGraphBuilder(
-        miniMap,
-        AbstractGraphBuilder.CLUSTER_SIZE,
-        undefined,
-        undefined,
-        this._miniWaterCC,
-        this._builderBFS,
-      );
-      this._miniWaterGraph = graphBuilder.build();
+      const prebuilt = source?.prebuiltFor(miniMap) ?? null;
+      if (prebuilt !== null) {
+        this._miniWaterCC = prebuilt.components;
+        this._miniWaterGraph = prebuilt.graph;
+      } else {
+        this._miniWaterCC = new ConnectedComponents(miniMap);
+        this._miniWaterCC.initialize();
+        const graphBuilder = new AbstractGraphBuilder(
+          miniMap,
+          AbstractGraphBuilder.CLUSTER_SIZE,
+          undefined,
+          undefined,
+          this._miniWaterCC,
+          this.builderBFS(),
+        );
+        this._miniWaterGraph = graphBuilder.build();
+      }
       this._miniWaterHPA = new AStarWaterHierarchical(
         miniMap,
         this._miniWaterGraph,
         { cachePaths: true },
       );
     }
+  }
+
+  /**
+   * Copies of the components and graph for a manager on `miniMap`, a copy of
+   * this manager's minimap; see the constructor. Null once water has been
+   * added to the minimap: the live components are then incremental and the
+   * graph may be stale, and a restore rebuilds both (restoreSnapshot), so a
+   * clone must too.
+   */
+  private prebuiltFor(
+    miniMap: GameMap,
+  ): { components: ConnectedComponents; graph: AbstractGraph } | null {
+    if (
+      this.miniMap.waterVersion() > 0 ||
+      this._miniWaterCC === null ||
+      this._miniWaterGraph === null
+    ) {
+      return null;
+    }
+    const components = this._miniWaterCC.cloneFor(miniMap);
+    return { components, graph: this._miniWaterGraph.cloneWith(components) };
+  }
+
+  // Minimap-sized scratch for graph builds (about 20 MB on the largest
+  // maps), made on the first build and reused: a clone that copies its
+  // graph may never build one.
+  private builderBFS(): BFSGrid {
+    this._builderBFS ??= new BFSGrid(
+      this.miniMap.width() * this.miniMap.height(),
+    );
+    return this._builderBFS;
   }
 
   snapshot(): WaterManagerState {
@@ -130,7 +174,7 @@ export class WaterManager {
         undefined,
         undefined,
         this._miniWaterCC,
-        this._builderBFS ?? undefined,
+        this.builderBFS(),
       ).build();
       this._miniWaterHPA?.setGraph(this._miniWaterGraph);
     }
@@ -191,7 +235,7 @@ export class WaterManager {
         this._miniWaterGraph ?? undefined,
         this._dirtyMiniTiles.size > 0 ? this._dirtyMiniTiles : undefined,
         this._miniWaterCC ?? undefined,
-        this._builderBFS ?? undefined,
+        this.builderBFS(),
       );
       this._miniWaterGraph = graphBuilder.build();
       this._dirtyMiniTiles.clear();

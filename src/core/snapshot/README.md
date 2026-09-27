@@ -22,6 +22,39 @@ A late-game World snapshot (400 bots, 650k owned tiles, about 1,000 units
 and executions) is about 2.7 MB raw and 1.2 MB gzipped. It takes about
 90 ms to write and 150 ms to restore in Node.
 
+## Structural clone
+
+`GameCloneSource.take(game)` then `.clone(deps)`, or `cloneGame(game, deps)`
+([GameClone.ts](GameClone.ts)), makes the game `restoreGame(snapshotGame(game))`
+would make, without the bytes. It is what forks use (`src/agent/Fork.ts`:
+`GameFork.clone`, `ForkSource`, `forkMany`).
+
+- The small object graph goes through the same `snapshot()` and
+  `restoreSnapshot()` as a restore. The records are copied with the codec's
+  semantics (`copySnapshotData`: plain data rebuilt, typed arrays copied, no
+  identity kept) and read with `readVersioned`, so `restoreSnapshot` sees
+  what it would after decoding. The copy is required: some records hold live
+  objects (`StatsSnapshot` stores the live stats tree under `z.unknown`), and
+  `restoreSnapshot` may keep what it reads.
+- The parts that scale with the map are copied as they are: player tile sets
+  (`TileSet.clone`, through the writer's structural mode, which leaves a
+  placeholder in the record), both maps (`GameMapImpl.clone`: terrain with its
+  edits, owners, fallout and defense), and the water components and graph
+  while the minimap still has the map file's water (`WaterManager`'s `source`;
+  after water nukes they are rebuilt, as a restore does).
+- One take serves any number of clones, all made before the game ticks again
+  (checked). To clone a state later, keep a clone and take from it.
+
+`tests/core/snapshot/GameClone.test.ts` holds a clone to a restore: the same
+object graph (`diffGraphs`), snapshot bytes and map arrays, and the same
+hashes and bytes for 600 ticks with nukes and ships in flight, with and
+without water nukes. It also checks that a clone shares no writable object
+with its game or with another clone.
+
+When a class's snapshot changes, the clone follows by itself; a field that
+restore rebuilds from the map (not from the record) needs its clone
+counterpart, and the tests above say so.
+
 ## Compatibility
 
 Snapshots must stay readable by later builds. Each stored object is a

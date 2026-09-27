@@ -1,8 +1,10 @@
 /**
  * Arena statistics and results directories: the per-entrant summary the
  * arena prints and writes to summary.json, the milestone metrics of
- * docs/11-roadmap.md §11.6, and readRun, which loads a results directory back
- * for the report tools, runs recorded before a field existed included.
+ * docs/11-roadmap.md §11.6, the troop-flow, strike, bomb, gold and search
+ * metrics of the M4 plan (§2.10), and readRun, which loads a results
+ * directory back for the report tools, runs recorded before a field existed
+ * included.
  *
  *   const run = readRun("arena-results/dev-champion");
  *   const labels = run.config!.entrants;
@@ -17,12 +19,20 @@ import { execFileSync } from "child_process";
 import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
-import type {
-  Difficulty,
-  GameMapSize,
-  GameMapType,
+import {
+  PlayerType,
+  type Difficulty,
+  type GameMapSize,
+  type GameMapType,
 } from "../../core/game/Game";
-import type { ArenaGameResult, SeatResult, StandingPoint } from "./ArenaGame";
+import type {
+  ArenaGameResult,
+  AttackRecord,
+  Received,
+  SeatResult,
+  StandingPoint,
+  TimelinePoint,
+} from "./ArenaGame";
 
 export const TICKS_PER_MINUTE = 600;
 
@@ -52,11 +62,38 @@ export function median(xs: readonly number[]): number | null {
   return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
 
+/** The q-quantile, interpolating between the order statistics (so the
+ *  0.5-quantile is the median); null for none. */
+export function quantile(xs: readonly number[], q: number): number | null {
+  if (xs.length === 0) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const at = Math.min(1, Math.max(0, q)) * (s.length - 1);
+  const lo = Math.floor(at);
+  const hi = Math.min(s.length - 1, lo + 1);
+  return s[lo] + (s[hi] - s[lo]) * (at - lo);
+}
+
 /** The fields of a StandingPoint the milestone metrics read. */
 export type StandingSample = Pick<
   StandingPoint,
   "minute" | "share" | "rank" | "medianNationShare" | "topNation"
 >;
+
+/** The fields of a TimelinePoint the flow and gold metrics read. */
+export type TimelineSample = Pick<
+  TimelinePoint,
+  "tick" | "tiles" | "share" | "troops" | "maxTroops" | "gold" | "alive"
+>;
+
+/** The fields of an AttackRecord the strike metrics read. */
+export type StrikeSample = Pick<
+  AttackRecord,
+  "startTick" | "target" | "boat" | "troopsLost" | "tilesGained"
+>;
+
+/** The fields of Received the pile-on and bomb metrics read. */
+export type ReceivedSample = Pick<Received, "attacks" | "nukes"> &
+  Partial<Pick<Received, "launches" | "nukeLog">>;
 
 /** What the summary reads of a seat: a SeatResult and a stored seat fit. */
 export type SummarySeat = Pick<
@@ -70,7 +107,22 @@ export type SummarySeat = Pick<
   };
   /** Missing from runs recorded before standings existed. */
   standings?: readonly StandingSample[];
+  // Read by the flow, strike, bomb and gold metrics. Every result has a
+  // timeline; the attack log and received were added in M1.
+  timeline?: readonly TimelineSample[];
+  attacks?: readonly StrikeSample[];
+  received?: ReceivedSample;
+  /** Read by the search metrics: a SeatResult's log in memory, or what
+   *  storedGame and readRun read out of it (seatLogStats). */
+  logs?: readonly string[];
+  logStats?: SeatLogStats;
 };
+
+/** A timeline's top three contenders, as LeaderPoint records them. */
+export interface LeaderSample {
+  tick: number;
+  leaders: readonly { type: string; share: number }[];
+}
 
 /** What the summary reads of a game: an ArenaGameResult and a StoredGame fit. */
 export interface SummaryGame {
@@ -81,6 +133,11 @@ export interface SummaryGame {
    *  replica divergence under --isolate, a simulation error. Null or missing
    *  (older files) if it ran to its end. */
   error?: string | null;
+  // Read by the nation and search metrics; hand-made results may lack them.
+  wallMs?: number;
+  /** type is a PlayerType or "team". */
+  winner?: { type: string } | null;
+  leaders?: readonly LeaderSample[];
 }
 
 /**
@@ -128,6 +185,496 @@ function known(values: (boolean | null)[]): {
   };
 }
 
+/**
+ * A seat's land share at a game minute, as the M4 plan reports it: its
+ * standing then (or the timeline sample at that tick); for a game that
+ * ended before the minute, the final share, or 0 if the seat was eliminated
+ * by then. Null when the game was cut short before it (a cap, an error) and
+ * for a minute nothing recorded.
+ */
+export function shareAt(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): number | null {
+  const s = r.seats[seat];
+  const tick = minute * TICKS_PER_MINUTE;
+  if (s.eliminatedAtTick !== null && s.eliminatedAtTick <= tick) return 0;
+  const point = s.standings?.find((p) => p.minute === minute);
+  if (point !== undefined) return point.share;
+  const sample = s.timeline?.find((p) => p.tick === tick);
+  if (sample !== undefined) return sample.share;
+  return s.result === "win" || s.result === "loss" ? s.finalShare : null;
+}
+
+/**
+ * Out before `minute`: eliminated before it. False for a seat that won,
+ * lived to the minute, or lost otherwise (another player won); null when
+ * the game was cut short before it (a cap, an error) with the seat alive.
+ */
+export function outBefore(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): boolean | null {
+  const s = r.seats[seat];
+  const tick = minute * TICKS_PER_MINUTE;
+  if (s.eliminatedAtTick !== null) return s.eliminatedAtTick < tick;
+  const over = s.result === "win" || s.result === "loss";
+  return over || r.ticks >= tick ? false : null;
+}
+
+/**
+ * Lost before `minute`, any cause: eliminated before it, or another player
+ * won before it (a nation's win counts as a loss). False for a seat that
+ * won or lived to the minute; null when the game was cut short before it.
+ */
+export function lostBefore(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): boolean | null {
+  const s = r.seats[seat];
+  const tick = minute * TICKS_PER_MINUTE;
+  // A loss without an elimination came when the game ended: someone won.
+  const lostAt = s.eliminatedAtTick ?? (s.result === "loss" ? r.ticks : null);
+  if (lostAt !== null) return lostAt < tick;
+  return s.result === "win" || r.ticks >= tick ? false : null;
+}
+
+/** Top 3 by land at `minute` (known as for the M3 rate; see standingAt). */
+export function top3At(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): boolean | null {
+  const p = standingAt(r, seat, minute);
+  return p === null ? null : typeof p === "string" ? p === "won" : p.rank <= 3;
+}
+
+// ── Troop flow, strikes, bombs and gold ──────────────────────────────────
+
+/** The flow metrics' window, in game minutes: [5, 15). */
+export const FLOW_MINUTES: readonly [number, number] = [5, 15];
+/** Home troops at or above this share of the cap are idle. */
+export const IDLE_SHARE = 0.95;
+/** A nation attack on us this many ticks after a strike's launch, or
+ *  sooner, piles on. */
+export const PILE_ON_TICKS = 300;
+/** Minutes at which the gold held is reported. */
+export const GOLD_MINUTES = [10, 15, 20] as const;
+
+/**
+ * Regrowth per tick of home troops `troops` under the cap `cap`:
+ * `troopIncreaseRate` for a Human, which every seat is (docs/13-mechanics.md
+ * §5.5): (10 + T^0.73 / 4) × (1 − T / M), and 0 at or above the cap.
+ */
+export function regrowth(troops: number, cap: number): number {
+  if (cap <= 0 || troops >= cap) return 0;
+  return (10 + Math.max(0, troops) ** 0.73 / 4) * (1 - troops / cap);
+}
+
+/** The most regrowth the cap allows: at the best home, near 0.42 × cap
+ *  (regrowth is concave in T; a golden-section search finds it). */
+export function peakRegrowth(cap: number): number {
+  if (cap <= 0) return 0;
+  const g = (Math.sqrt(5) - 1) / 2;
+  let lo = 0;
+  let hi = cap;
+  let x1 = hi - g * (hi - lo);
+  let x2 = lo + g * (hi - lo);
+  let f1 = regrowth(x1, cap);
+  let f2 = regrowth(x2, cap);
+  for (let i = 0; i < 64; i++) {
+    if (f1 < f2) {
+      lo = x1;
+      x1 = x2;
+      f1 = f2;
+      x2 = lo + g * (hi - lo);
+      f2 = regrowth(x2, cap);
+    } else {
+      hi = x2;
+      x2 = x1;
+      f2 = f1;
+      x1 = hi - g * (hi - lo);
+      f1 = regrowth(x1, cap);
+    }
+  }
+  return Math.max(f1, f2);
+}
+
+/** One seat's troop flow over a window, its strikes and what followed. */
+export interface SeatFlow {
+  /** Σ regrowth ÷ Σ peak regrowth at the timeline's regular samples in
+   *  the window with the seat alive: how much of its possible regrowth it
+   *  had. Null without such a sample. */
+  utilization: number | null;
+  /** The share of those samples with home ≥ IDLE_SHARE of the cap. */
+  idleShare: number | null;
+  /** What home paid per net tile over the window, attacks on us included:
+   *  (∫ regrowth − Δhome) ÷ Δtiles from its start to its end or the game's
+   *  (a win, or another's), whichever came first, the integral a left sum
+   *  over the samples between. Null unless the seat was alive at the start,
+   *  not eliminated by the end, and held more land then. */
+  allInPrice: number | null;
+  /** Land attacks on nations launched all game (boats are not strikes),
+   *  and the troops lost and tiles gained by those that ended. */
+  strikes: number;
+  strikeTroopsLost: number;
+  strikeTilesGained: number;
+  /** Nation attacks on us that began within PILE_ON_TICKS after a strike's
+   *  launch, counted once for each strike they follow. Null when it is not
+   *  known when nations attacked: runs recorded before Received.launches,
+   *  unless the seat's log has apex's `def why` lines. */
+  pileOns: number | null;
+}
+
+/** Ticks of the nation attacks on the seat, or null if unknown: the
+ *  recorder's launches, else (older runs) apex's `def why` log lines, else
+ *  none if the recorder counted none. */
+function nationAttackTicks(s: SummarySeat): number[] | null {
+  const launches = s.received?.launches;
+  if (launches !== undefined) {
+    return launches
+      .filter((l) => l.by.type === PlayerType.Nation)
+      .map((l) => l.tick);
+  }
+  const why = logStatsOf(s)?.defWhy ?? null;
+  if (why !== null) return why;
+  return s.received?.attacks.nation === 0 ? [] : null;
+}
+
+/** The timeline's regular samples, one every --timeline-every: all but the
+ *  extra one the arena takes where a game ends between two (the first
+ *  sample is at the interval, as ticks count from 1). */
+function regularSamples(
+  timeline: readonly TimelineSample[],
+): readonly TimelineSample[] {
+  if (timeline.length < 2 || timeline[0].tick <= 0) return timeline;
+  const every = timeline[0].tick;
+  return timeline.filter((p) => p.tick % every === 0);
+}
+
+export function seatFlow(
+  r: SummaryGame,
+  seat: number,
+  minutes: readonly [number, number] = FLOW_MINUTES,
+): SeatFlow {
+  const s = r.seats[seat];
+  const t0 = minutes[0] * TICKS_PER_MINUTE;
+  const t1 = minutes[1] * TICKS_PER_MINUTE;
+  const timeline = regularSamples(s.timeline ?? []);
+  let grown = 0;
+  let possible = 0;
+  let samples = 0;
+  let idle = 0;
+  for (const p of timeline) {
+    if (p.tick < t0 || p.tick >= t1 || !p.alive) continue;
+    grown += regrowth(p.troops, p.maxTroops);
+    possible += peakRegrowth(p.maxTroops);
+    samples++;
+    if (p.troops >= IDLE_SHARE * p.maxTroops) idle++;
+  }
+  // The price runs to the window's end or the game's, whichever is first,
+  // over every sample, the game's last one included.
+  const played = (s.timeline ?? []).filter(
+    (p) => p.tick >= t0 && p.tick <= t1 && p.alive,
+  );
+  const first = played[0];
+  const last = played[played.length - 1];
+  const out = s.eliminatedAtTick !== null && s.eliminatedAtTick <= t1;
+  let allInPrice: number | null = null;
+  if (first?.tick === t0 && !out && last.tiles > first.tiles) {
+    let integral = 0;
+    for (let i = 0; i + 1 < played.length; i++) {
+      const p = played[i];
+      integral +=
+        regrowth(p.troops, p.maxTroops) * (played[i + 1].tick - p.tick);
+    }
+    allInPrice =
+      (integral - (last.troops - first.troops)) / (last.tiles - first.tiles);
+  }
+  const strikes = (s.attacks ?? []).filter(
+    (a) => a.target.type === PlayerType.Nation && !a.boat,
+  );
+  const ended = strikes.filter((a) => a.troopsLost !== null);
+  const attacks = nationAttackTicks(s);
+  return {
+    utilization: possible > 0 ? grown / possible : null,
+    idleShare: samples > 0 ? idle / samples : null,
+    allInPrice,
+    strikes: strikes.length,
+    strikeTroopsLost: ended.reduce((a, x) => a + x.troopsLost!, 0),
+    strikeTilesGained: ended.reduce((a, x) => a + x.tilesGained, 0),
+    pileOns:
+      attacks === null
+        ? null
+        : strikes.reduce(
+            (n, a) =>
+              n +
+              attacks.filter(
+                (t) => t >= a.startTick && t <= a.startTick + PILE_ON_TICKS,
+              ).length,
+            0,
+          ),
+  };
+}
+
+/** A seat's timeline sample at a game minute, with the seat alive; null
+ *  otherwise (out or over by then, or not sampled). */
+export function sampleAt(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): TimelineSample | null {
+  const tick = minute * TICKS_PER_MINUTE;
+  const p = r.seats[seat].timeline?.find((x) => x.tick === tick);
+  return p?.alive ? p : null;
+}
+
+/** The gold a seat held at a game minute (sampleAt). */
+export function goldAt(
+  r: SummaryGame,
+  seat: number,
+  minute: number,
+): number | null {
+  return sampleAt(r, seat, minute)?.gold ?? null;
+}
+
+/**
+ * The first game minute a nation held `share` of the land, by the
+ * timeline's leaders (so to the timeline's resolution), or the minute a
+ * nation won if that came first: the win is at 80%. Null if no nation did,
+ * or the game records no leaders.
+ */
+export function nationReached(r: SummaryGame, share: number): number | null {
+  let tick: number | null = null;
+  for (const p of r.leaders ?? []) {
+    if (
+      p.leaders.some((l) => l.type === PlayerType.Nation && l.share >= share)
+    ) {
+      tick = p.tick;
+      break;
+    }
+  }
+  if (r.winner?.type === PlayerType.Nation && share <= 0.8) {
+    tick = Math.min(tick ?? r.ticks, r.ticks);
+  }
+  return tick === null ? null : tick / TICKS_PER_MINUTE;
+}
+
+/**
+ * A nation held `share` of the land before `minute` (nationReached): false
+ * if no nation did by then in a game that reached the minute or ended
+ * earlier; null if it was cut short before (a cap, an error) or records no
+ * leaders.
+ */
+export function nationBefore(
+  r: SummaryGame,
+  seat: number,
+  share: number,
+  minute: number,
+): boolean | null {
+  if (r.leaders === undefined && r.winner === undefined) return null;
+  const at = nationReached(r, share);
+  if (at !== null && at < minute) return true;
+  const s = r.seats[seat];
+  const over = s.result === "win" || s.result === "loss";
+  return over || r.ticks >= minute * TICKS_PER_MINUTE ? false : null;
+}
+
+// ── Search, from the agent's log ─────────────────────────────────────────
+
+/** Lines AgentHost keeps of a seat's log (its MAX_LOG_LINES): a log this
+ *  long may have lost later lines, so the counts read from it are short. */
+export const LOG_LINES_KEPT = 2000;
+
+/**
+ * Searches, as the agent logged them. The SearchController logs one line a
+ * search, `search <t> <trigger> cands=<n> chosen=<plan> gain=<ΔV> base=<V>
+ * h=<h> te=<tick-equivalents> ms=<ms>` (a refused one without `chosen=`, a
+ * log-only one with `mode=plans`), and `search-check <t0> +<h> ok|MISMATCH`
+ * for each checkpoint of a chosen rollout against the live game.
+ */
+export interface SearchLogStats {
+  /** What logged them: the SearchController's `search <t> <trigger> ...`
+   *  lines (plan.md §2.10), or the act3 prototype's `PROBE {json}`. */
+  format: "search" | "probe";
+  /** Searches run, by the trigger that fired each (the prototype logs its
+   *  mode instead). */
+  searches: number;
+  byTrigger: Record<string, number>;
+  /** Searches the budget refused: `search` lines without a chosen plan. */
+  skipped: number;
+  /** Searches that chose a plan other than the base, by the plan's kind
+   *  (its name up to the first ":"). */
+  acts: number;
+  actsByKind: Record<string, number>;
+  /** The predicted gains (ΔV over the base) of the acts, added up. */
+  gain: number;
+  /** What the searches cost: wall milliseconds, and tick-equivalents (null
+   *  for the prototype, which logs none). */
+  ms: number;
+  te: number | null;
+  /** Checkpoints of the chosen rollouts against the live game, and those
+   *  that did not match. */
+  checks: number;
+  mismatches: number;
+}
+
+/** What the summary reads out of a seat's log. */
+export interface SeatLogStats {
+  lines: number;
+  /** The log reached LOG_LINES_KEPT: lines after it were not kept. */
+  truncated: boolean;
+  /** Ticks of apex's `def why` lines, one for each nation attack on it
+   *  (a land attack, or a boat's when it lands): the pile-on fallback for
+   *  runs recorded before Received.launches. Null for a log without apex's
+   *  defence lines (`def ...`): an agent that does not log them. */
+  defWhy: number[] | null;
+  /** Null if the seat logged no search. */
+  search: SearchLogStats | null;
+}
+
+const LOG_LINE = /^\[(\d+)\] (?:\d+ )?(.*)$/;
+
+/** Reads a seat's log lines (as AgentHost writes them, `[tick] message`). */
+export function seatLogStats(lines: readonly string[]): SeatLogStats {
+  const defWhy: number[] = [];
+  let defence = false;
+  let search: SearchLogStats | null = null;
+  const searches = (format: SearchLogStats["format"]): SearchLogStats => {
+    search ??= {
+      format,
+      searches: 0,
+      byTrigger: {},
+      skipped: 0,
+      acts: 0,
+      actsByKind: {},
+      gain: 0,
+      ms: 0,
+      te: null,
+      checks: 0,
+      mismatches: 0,
+    };
+    if (format === "search") search.format = "search";
+    return search;
+  };
+  const num = (v: unknown) => {
+    const n = typeof v === "string" ? Number(v) : v;
+    return typeof n === "number" && Number.isFinite(n) ? n : 0;
+  };
+  const act = (s: SearchLogStats, chosen: string, gain: unknown) => {
+    s.acts++;
+    const kind = chosen.split(":")[0];
+    s.actsByKind[kind] = (s.actsByKind[kind] ?? 0) + 1;
+    s.gain += num(gain);
+  };
+  for (const line of lines) {
+    const m = LOG_LINE.exec(line);
+    if (m === null) continue;
+    const msg = m[2];
+    if (msg.startsWith("def ")) {
+      defence = true;
+      if (msg.startsWith("def why ")) defWhy.push(Number(m[1]));
+    } else if (msg.startsWith("search ")) {
+      // search <t> <trigger> cands=<n> chosen=<plan> gain=<ΔV> base=<V>
+      //   h=<h> te=<tick-equivalents> ms=<ms>
+      const words = msg.split(" ").slice(2);
+      const kv: Record<string, string> = {};
+      for (const w of words) {
+        const eq = w.indexOf("=");
+        if (eq > 0) kv[w.slice(0, eq)] = w.slice(eq + 1);
+      }
+      const s = searches("search");
+      const trigger = words.find((w) => !w.includes("=")) ?? "?";
+      if (kv.chosen === undefined) {
+        s.skipped++;
+        continue;
+      }
+      s.searches++;
+      s.byTrigger[trigger] = (s.byTrigger[trigger] ?? 0) + 1;
+      // Log-only searches (searchMode "plans") choose but never act.
+      if (kv.chosen !== "base" && kv.mode !== "plans") {
+        act(s, kv.chosen, kv.gain);
+      }
+      s.ms += num(kv.ms);
+      if (kv.te !== undefined) s.te = (s.te ?? 0) + num(kv.te);
+    } else if (msg.startsWith("search-check ")) {
+      // search-check <t0> +<h> ok|MISMATCH
+      const s = searches("search");
+      s.checks++;
+      if (/\bMISMATCH\b/.test(msg)) s.mismatches++;
+    } else if (msg.startsWith("PROBE {")) {
+      const p = parseJson(msg.slice(6));
+      if (p === null || typeof p.chosen !== "string") continue;
+      const s = searches("probe");
+      s.searches++;
+      const mode = typeof p.mode === "string" ? p.mode : "?";
+      s.byTrigger[mode] = (s.byTrigger[mode] ?? 0) + 1;
+      // "plans" rolls out and logs, never acts.
+      if (p.chosen !== "base" && mode !== "plans") act(s, p.chosen, p.gain);
+      s.ms += num(p.totalMs);
+    } else if (msg.startsWith("PROBE_CHECK {")) {
+      const c = parseJson(msg.slice(12));
+      if (c === null) continue;
+      const s = searches("probe");
+      s.checks++;
+      if (!sameSnap(c.pred, c.live)) s.mismatches++;
+    }
+  }
+  return {
+    lines: lines.length,
+    truncated: lines.length >= LOG_LINES_KEPT,
+    defWhy: defence ? defWhy : null,
+    search,
+  };
+}
+
+function parseJson(text: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    return typeof v === "object" && v !== null
+      ? (v as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The prototype's checkpoint: predicted and live tiles, home, outgoing. */
+function sameSnap(a: unknown, b: unknown): boolean {
+  if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false;
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+  return [...keys].every((k) => x[k] === y[k]);
+}
+
+/** A seat's log stats: as stored, else read from its log in memory. */
+export function logStatsOf(s: SummarySeat): SeatLogStats | undefined {
+  return (
+    s.logStats ?? (s.logs === undefined ? undefined : seatLogStats(s.logs))
+  );
+}
+
+/** A game log (games/gameNNN.log) split into each seat's lines, by the
+ *  `## agent (clientID)` line the arena writes before them. */
+export function splitGameLog(text: string): Map<string, string[]> {
+  const seats = new Map<string, string[]>();
+  let lines: string[] | null = null;
+  for (const line of text.split("\n")) {
+    const head = /^## .* \(([^()\s]+)\)$/.exec(line);
+    if (head !== null) {
+      lines = [];
+      seats.set(head[1], lines);
+    } else if (lines !== null && line.length > 0) {
+      lines.push(line);
+    }
+  }
+  return seats;
+}
+
 export interface EntrantSummary {
   label: string;
   games: number;
@@ -168,6 +715,149 @@ export interface EntrantSummary {
   top3At10Games: number;
   /** M5: median game minutes of the games won; null if none was. */
   medianWinMinutes: number | null;
+  // The M4 plan's metrics (plan.md §2.10). Runs recorded before a field
+  // existed count as unknown, as above.
+  /** Lost before minute 20, any cause: eliminated, or another player won
+   *  (a nation's win counts). Known as eliminatedBefore20 is. */
+  lostBefore20: number | null;
+  lostBefore20Games: number;
+  /** Troop flow over FLOW_MINUTES (seatFlow): the mean per-game regrowth
+   *  utilization and idle share, over the games alive in the window. */
+  utilization: number | null;
+  idleShare: number | null;
+  flowGames: number;
+  /** The median per-game all-in price over the window, troops per net
+   *  tile, over the games that gained land in it (SeatFlow.allInPrice). */
+  allInPrice: number | null;
+  allInPriceGames: number;
+  /** Land attacks on nations, all game; troops lost per tile gained, over
+   *  those that ended (null if they gained none). */
+  strikes: number;
+  strikePrice: number | null;
+  /** Nation attacks on us within PILE_ON_TICKS after a strike, per strike,
+   *  over the games that know when nations attacked; null if none does or
+   *  they launched no strike. */
+  pileOnsPerStrike: number | null;
+  pileOns: number;
+  pileOnStrikes: number;
+  /** Atom and hydrogen bombs, and MIRVs, aimed at us. */
+  bombsReceived: number;
+  mirvsReceived: number;
+  /** Our land share when each was launched, median over all of them, from
+   *  the games that recorded the nuke log (null if none did or none came). */
+  shareAtBombs: number | null;
+  shareAtMirvs: number | null;
+  /** Gold held at GOLD_MINUTES, over the games alive and sampled then. */
+  gold: {
+    minute: number;
+    games: number;
+    median: number | null;
+    p75: number | null;
+    max: number | null;
+  }[];
+  /** Games in which a nation held half the land, and the median first
+   *  minute it did (nationReached); the same for a nation's win (80%).
+   *  `known` counts the games that record leaders or a winner. */
+  nationHalf: { games: number; known: number; medianMinute: number | null };
+  nationWin: { games: number; known: number; medianMinute: number | null };
+  /** Seats whose log reached LOG_LINES_KEPT: their log-read counts (search,
+   *  and the `def why` pile-on fallback) may be short. */
+  truncatedLogs: number;
+  /** The searches the seats logged; null if none did. */
+  search: SearchSummary | null;
+}
+
+/** The searches an entrant's seats logged (SearchLogStats), added up. */
+export interface SearchSummary {
+  /** Games with a search logged. */
+  games: number;
+  format: "search" | "probe" | "mixed";
+  searches: number;
+  skipped: number;
+  byTrigger: Record<string, number>;
+  acts: number;
+  actsByKind: Record<string, number>;
+  /** The acts' predicted gains, added up. */
+  gain: number;
+  ms: number;
+  /** Search time ÷ the game's own time (plan.md §1.8): Σ search ms ÷
+   *  Σ (wall ms − search ms), over the games with a search and a wall time,
+   *  and its range by game. */
+  R: number | null;
+  rangeR: [number, number] | null;
+  /** Σ tick-equivalents ÷ Σ ticks played, over the games whose search lines
+   *  log them: the budget's deterministic R (§2.6). */
+  ticksR: number | null;
+  checks: number;
+  mismatches: number;
+}
+
+const add = (into: Record<string, number>, from: Record<string, number>) => {
+  for (const [k, v] of Object.entries(from)) into[k] = (into[k] ?? 0) + v;
+};
+
+function searchSummary(
+  rows: readonly { r: SummaryGame; seat: number }[],
+): SearchSummary | null {
+  const games = rows.flatMap(({ r, seat }) => {
+    const s = logStatsOf(r.seats[seat])?.search ?? null;
+    return s === null ? [] : [{ r, s }];
+  });
+  if (games.length === 0) return null;
+  const formats = new Set(games.map((g) => g.s.format));
+  const byTrigger: Record<string, number> = {};
+  const actsByKind: Record<string, number> = {};
+  for (const { s } of games) {
+    add(byTrigger, s.byTrigger);
+    add(actsByKind, s.actsByKind);
+  }
+  const sum = (f: (s: SearchLogStats) => number) =>
+    games.reduce((a, g) => a + f(g.s), 0);
+  const timed = games.filter(
+    ({ r, s }) => r.wallMs !== undefined && r.wallMs > s.ms,
+  );
+  const ratios = timed.map(({ r, s }) => s.ms / (r.wallMs! - s.ms));
+  const own = timed.reduce((a, { r, s }) => a + r.wallMs! - s.ms, 0);
+  const ticked = games.filter(({ s }) => s.te !== null);
+  const ticks = ticked.reduce((a, { r }) => a + r.ticks, 0);
+  return {
+    games: games.length,
+    format: formats.size === 1 ? [...formats][0] : "mixed",
+    searches: sum((s) => s.searches),
+    skipped: sum((s) => s.skipped),
+    byTrigger,
+    acts: sum((s) => s.acts),
+    actsByKind,
+    gain: sum((s) => s.gain),
+    ms: sum((s) => s.ms),
+    R: timed.length === 0 ? null : timed.reduce((a, g) => a + g.s.ms, 0) / own,
+    rangeR:
+      ratios.length === 0 ? null : [Math.min(...ratios), Math.max(...ratios)],
+    ticksR:
+      ticked.length === 0 || ticks === 0
+        ? null
+        : ticked.reduce((a, g) => a + g.s.te!, 0) / ticks,
+    checks: sum((s) => s.checks),
+    mismatches: sum((s) => s.mismatches),
+  };
+}
+
+/** Games in which a nation reached `share`, and the median minute. */
+function nationStat(
+  rows: readonly { r: SummaryGame }[],
+  share: number,
+): EntrantSummary["nationHalf"] {
+  const known = rows.filter(
+    ({ r }) => r.leaders !== undefined || r.winner !== undefined,
+  );
+  const minutes = known
+    .map(({ r }) => nationReached(r, share))
+    .filter((m) => m !== null);
+  return {
+    games: minutes.length,
+    known: known.length,
+    medianMinute: median(minutes),
+  };
 }
 
 export function summarize(
@@ -193,20 +883,45 @@ export function summarize(
     );
   const aboveMedian = above((p) => p.medianNationShare);
   const aboveTop = above((p) => p.topNation?.share ?? 0);
-  const top3 = known(
-    at(10).map((p) =>
-      p === null ? null : typeof p === "string" ? p === "won" : p.rank <= 3,
-    ),
+  const top3 = known(rows.map(({ r, seat }) => top3At(r, seat, 10)));
+  const out20 = known(rows.map(({ r, seat }) => outBefore(r, seat, 20)));
+  const lost20 = known(rows.map(({ r, seat }) => lostBefore(r, seat, 20)));
+
+  const flows = rows.map(({ r, seat }) => seatFlow(r, seat));
+  const utilization = flows.flatMap((f) =>
+    f.utilization === null ? [] : [f.utilization],
   );
-  const out20 = known(
-    rows.map(({ r, seat }) => {
-      const s = r.seats[seat];
-      const tick = 20 * TICKS_PER_MINUTE;
-      if (s.eliminatedAtTick !== null) return s.eliminatedAtTick < tick;
-      const over = s.result === "win" || s.result === "loss";
-      return over || r.ticks >= tick ? false : null;
-    }),
+  const idle = flows.flatMap((f) =>
+    f.idleShare === null ? [] : [f.idleShare],
   );
+  const prices = flows.flatMap((f) =>
+    f.allInPrice === null ? [] : [f.allInPrice],
+  );
+  const lost = flows.reduce((a, f) => a + f.strikeTroopsLost, 0);
+  const gained = flows.reduce((a, f) => a + f.strikeTilesGained, 0);
+  const piled = flows.filter((f) => f.pileOns !== null);
+  const pileOnStrikes = piled.reduce((a, f) => a + f.strikes, 0);
+  const pileOns = piled.reduce((a, f) => a + f.pileOns!, 0);
+
+  const nukes = seats.map((s) => s.received?.nukes);
+  const logged = seats.flatMap((s) => s.received?.nukeLog ?? []);
+  const shareAtType = (bombs: boolean) =>
+    median(
+      logged.filter((n) => (n.type === "mirv") !== bombs).map((n) => n.share),
+    );
+  const gold = GOLD_MINUTES.map((minute) => {
+    const held = rows.flatMap(({ r, seat }) => {
+      const g = goldAt(r, seat, minute);
+      return g === null ? [] : [g];
+    });
+    return {
+      minute,
+      games: held.length,
+      median: median(held),
+      p75: quantile(held, 0.75),
+      max: held.length === 0 ? null : Math.max(...held),
+    };
+  });
   return {
     label,
     games: rows.length,
@@ -243,6 +958,31 @@ export function summarize(
         .filter(({ r, seat }) => r.seats[seat].result === "win")
         .map(({ r }) => r.gameMinutes),
     ),
+    lostBefore20: lost20.rate,
+    lostBefore20Games: lost20.games,
+    utilization: utilization.length === 0 ? null : mean(utilization),
+    idleShare: idle.length === 0 ? null : mean(idle),
+    flowGames: utilization.length,
+    allInPrice: median(prices),
+    allInPriceGames: prices.length,
+    strikes: flows.reduce((a, f) => a + f.strikes, 0),
+    strikePrice: gained > 0 ? lost / gained : null,
+    pileOnsPerStrike: pileOnStrikes > 0 ? pileOns / pileOnStrikes : null,
+    pileOns,
+    pileOnStrikes,
+    bombsReceived: nukes.reduce(
+      (a, n) => a + (n === undefined ? 0 : n.atom + n.hydrogen),
+      0,
+    ),
+    mirvsReceived: nukes.reduce((a, n) => a + (n?.mirv ?? 0), 0),
+    shareAtBombs: shareAtType(true),
+    shareAtMirvs: shareAtType(false),
+    gold,
+    nationHalf: nationStat(rows, 0.5),
+    nationWin: nationStat(rows, 0.8),
+    truncatedLogs: seats.filter((s) => logStatsOf(s)?.truncated === true)
+      .length,
+    search: searchSummary(rows),
   };
 }
 
@@ -280,16 +1020,43 @@ export const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
 const rateOf = (rate: number | null, games: number) =>
   rate === null ? "–" : `${pct(rate)} of ${games}`;
 
+/** 1.2M, 340k, 12: an amount of gold or troops, short. */
+export function amount(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (a >= 1e3) return `${(v / 1e3).toFixed(0)}k`;
+  return v.toFixed(0);
+}
+
+/** "44 strike, 27 break": counts by name, most first. */
+function counts(by: Record<string, number>): string {
+  const list = Object.entries(by).sort(
+    (a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0),
+  );
+  return list.length === 0 ? "–" : list.map(([k, v]) => `${v} ${k}`).join(", ");
+}
+
+function markdownTable(header: string[], rows: string[][]): string {
+  const line = (cells: string[]) => `| ${cells.join(" | ")} |`;
+  return [
+    line(header),
+    `|${header.map(() => "---").join("|")}|`,
+    ...rows.map(line),
+  ].join("\n");
+}
+
 /**
- * The summary as a Markdown table, one row per entrant. "errored" counts the
- * games among `games` that stopped early on an error, "crashed" the jobs
- * whose worker died. An entrant with no games (another entrant's --game
- * rerun) shows "–" where a mean over nothing would read as a result.
+ * The summary as Markdown: the milestone table, one row per entrant, then
+ * the flow, strike, bomb, gold, nation and search table (flowTable).
+ * "errored" counts the games among `games` that stopped early on an error,
+ * "crashed" the jobs whose worker died. An entrant with no games (another
+ * entrant's --game rerun) shows "–" where a mean over nothing would read as
+ * a result.
  */
 export function summaryTable(summaries: readonly EntrantSummary[]): string {
   const header =
     "| entrant | games | wins | win rate (95% CI) | progress | peak land | final land | placement | eliminated | " +
-    "≥ median @3 | ≥ top @3 | top 3 @10 | out < 20 min | win time | agent errors | errored | crashed | think p95 |";
+    "≥ median @3 | ≥ top @3 | top 3 @10 | out < 20 min | lost < 20 min | win time | agent errors | errored | crashed | think p95 |";
   const rule = `|${header
     .split("|")
     .slice(1, -1)
@@ -303,11 +1070,99 @@ export function summaryTable(summaries: readonly EntrantSummary[]): string {
       `${some(s.meanPlacement.toFixed(1))} | ${s.eliminated} | ` +
       `${rateOf(s.m3AboveMedian, s.m3Games)} | ${rateOf(s.m3AboveTop, s.m3Games)} | ` +
       `${rateOf(s.top3At10, s.top3At10Games)} | ${rateOf(s.eliminatedBefore20, s.eliminatedBefore20Games)} | ` +
+      `${rateOf(s.lostBefore20, s.lostBefore20Games)} | ` +
       `${s.medianWinMinutes === null ? "–" : `${s.medianWinMinutes.toFixed(1)} min`} | ` +
       `${s.agentErrors} | ${s.errored} | ${s.crashed} | ${some(`${s.thinkMsP95Max.toFixed(1)} ms`)} |`
     );
   });
-  return [header, rule, ...rows].join("\n");
+  return [[header, rule, ...rows].join("\n"), flowTable(summaries)].join(
+    "\n\n",
+  );
+}
+
+/**
+ * The M4 plan's metrics as a Markdown table, one row per entrant: troop flow
+ * over minutes 5-15, strikes and the pile-ons after them, bombs received,
+ * gold, the minute a nation took half the land or won, and the searches
+ * logged. "–" where nothing is known.
+ */
+export function flowTable(summaries: readonly EntrantSummary[]): string {
+  const [m0, m1] = FLOW_MINUTES;
+  const header = [
+    "entrant",
+    `utilization m${m0}-${m1}`,
+    `idle m${m0}-${m1}`,
+    `all-in price m${m0}-${m1}`,
+    "strikes",
+    "pile-ons / strike",
+    "bombs (MIRVs) in",
+    "our share at bombs",
+    `gold @${GOLD_MINUTES.join("/")}`,
+    "nation ≥ 50%",
+    "nation won",
+    "searches",
+    "acts",
+    "predicted gain",
+    "R",
+    "checks",
+    "logs cut",
+  ];
+  const na = "–";
+  const rows = summaries.map((s) => {
+    const search = s.search;
+    const nation = (n: EntrantSummary["nationHalf"]) =>
+      n.known === 0
+        ? na
+        : `${n.games} of ${n.known}` +
+          (n.medianMinute === null ? "" : `, ${n.medianMinute.toFixed(1)} min`);
+    return [
+      s.label,
+      s.utilization === null
+        ? na
+        : `${s.utilization.toFixed(3)} of ${s.flowGames}`,
+      s.idleShare === null ? na : pct(s.idleShare),
+      s.allInPrice === null
+        ? na
+        : `${s.allInPrice.toFixed(0)} of ${s.allInPriceGames}`,
+      `${s.strikes}${s.strikePrice === null ? "" : `, ${s.strikePrice.toFixed(1)}/tile`}`,
+      s.pileOnsPerStrike === null
+        ? na
+        : `${s.pileOnsPerStrike.toFixed(2)} (${s.pileOns} in ${s.pileOnStrikes})`,
+      `${s.bombsReceived}${s.mirvsReceived ? ` (${s.mirvsReceived})` : ""}`,
+      s.shareAtBombs === null && s.shareAtMirvs === null
+        ? na
+        : [
+            s.shareAtBombs === null ? null : pct(s.shareAtBombs),
+            s.shareAtMirvs === null ? null : `MIRVs ${pct(s.shareAtMirvs)}`,
+          ]
+            .filter((t) => t !== null)
+            .join("; "),
+      s.gold
+        .map((g) => (g.median === null ? na : amount(g.median)))
+        .join(" / "),
+      nation(s.nationHalf),
+      nation(s.nationWin),
+      search === null
+        ? na
+        : `${search.searches}${search.skipped ? ` (${search.skipped} skipped)` : ""}`,
+      search === null
+        ? na
+        : `${search.acts}${search.acts > 0 ? `: ${counts(search.actsByKind)}` : ""}`,
+      search === null ? na : amount(search.gain),
+      search === null || search.R === null
+        ? na
+        : `${search.R.toFixed(2)}` +
+          (search.rangeR === null || search.games < 2
+            ? ""
+            : ` (${search.rangeR[0].toFixed(2)}-${search.rangeR[1].toFixed(2)})`) +
+          (search.ticksR === null ? "" : `, ticks ${search.ticksR.toFixed(2)}`),
+      search === null
+        ? na
+        : `${search.checks}, ${search.mismatches} mismatch${search.mismatches === 1 ? "" : "es"}`,
+      String(s.truncatedLogs),
+    ];
+  });
+  return markdownTable(header, rows);
 }
 
 // ── Results directories ──────────────────────────────────────────────────
@@ -352,10 +1207,12 @@ export interface Shard {
 
 /**
  * A seat as stored in games/gameNNN.json: its SeatResult without the full
- * log (that is in gameNNN.log). The fields SeatResult marks as added later
- * (standings, received, attacks, stats.forkMs) are missing from older files.
+ * log (that is in gameNNN.log), with what the summary reads out of the log.
+ * The fields SeatResult marks as added later (standings, received, attacks,
+ * stats.forkMs) are missing from older files, and so is logStats, which
+ * readRun then reads from gameNNN.log.
  */
-export type StoredSeat = Omit<SeatResult, "logs">;
+export type StoredSeat = Omit<SeatResult, "logs"> & { logStats?: SeatLogStats };
 
 /** A game as stored in games/gameNNN.json. */
 export type StoredGame = Omit<ArenaGameResult, "seats"> & {
@@ -438,7 +1295,10 @@ export function storedGame(
     game,
     entrant,
     ...rest,
-    seats: seats.map(({ logs, ...s }) => s),
+    seats: seats.map(({ logs, ...s }) => ({
+      ...s,
+      logStats: seatLogStats(logs),
+    })),
   };
 }
 
@@ -546,10 +1406,31 @@ export interface Run {
 }
 
 /**
+ * A stored game whose seats all have their logStats: those recorded without
+ * (runs from before it existed) read them from the game's log beside it. A
+ * seat the log has no lines under, or a game without a log, stays without.
+ */
+function withLogStats<T extends { seats: StoredSeat[] }>(
+  game: T,
+  logFile: string,
+): T {
+  if (game.seats.every((s) => s.logStats !== undefined)) return game;
+  if (!fs.existsSync(logFile)) return game;
+  const bySeat = splitGameLog(fs.readFileSync(logFile, "utf8"));
+  for (const s of game.seats) {
+    const lines = bySeat.get(s.clientID);
+    if (s.logStats === undefined && lines !== undefined) {
+      s.logStats = seatLogStats(lines);
+    }
+  }
+  return game;
+}
+
+/**
  * Loads a results directory. Runs recorded before a field existed load with
  * it null (provenance) or missing (the M1 seat fields); their game files get
  * `game` and `entrant` from the index and the entrant count, the only place
- * that ever has to derive them.
+ * that ever has to derive them, and their seats' logStats from the logs.
  */
 export function readRun(dir: string): Run {
   const gamesDir = path.join(dir, "games");
@@ -583,12 +1464,15 @@ export function readRun(dir: string): Run {
     .readdirSync(gamesDir)
     .filter((f) => f.endsWith(".json"))
     .map((f) =>
-      place(
-        JSON.parse(fs.readFileSync(path.join(gamesDir, f), "utf8")) as Omit<
-          StoredGame,
-          "game" | "entrant"
-        > &
-          Partial<Pick<StoredGame, "game" | "entrant">>,
+      withLogStats(
+        place(
+          JSON.parse(fs.readFileSync(path.join(gamesDir, f), "utf8")) as Omit<
+            StoredGame,
+            "game" | "entrant"
+          > &
+            Partial<Pick<StoredGame, "game" | "entrant">>,
+        ),
+        path.join(gamesDir, f.replace(/\.json$/, ".log")),
       ),
     )
     .sort((a, b) => a.index - b.index);

@@ -225,7 +225,10 @@ describe("summarize", () => {
       rows([game(seat({ standings: undefined }))]),
       0,
     );
-    const table = summaryTable([known, unknown]).split("\n");
+    // The milestone table, then the M4 plan's (ArenaMetrics.test.ts).
+    const [milestones, flow] = summaryTable([known, unknown]).split("\n\n");
+    expect(flow.split("\n")).toHaveLength(4);
+    const table = milestones.split("\n");
     expect(table).toHaveLength(4);
     const cells = (line: string) =>
       line
@@ -244,6 +247,7 @@ describe("summarize", () => {
     expect(col(b, "≥ top @3")).toBe("–");
     expect(col(b, "win time")).toBe("–");
     expect(col(b, "out < 20 min")).toBe("0.0% of 1");
+    expect(col(b, "lost < 20 min")).toBe("0.0% of 1");
 
     // An entrant with no games (another entrant's --game rerun) shows no
     // means over nothing.

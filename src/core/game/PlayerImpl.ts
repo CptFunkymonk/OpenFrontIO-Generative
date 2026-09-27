@@ -2061,8 +2061,8 @@ export class PlayerImpl implements Player {
         isTemporary: e.isTemporary,
       });
     }
-    this._tiles = new TileSet(s.tiles);
-    this._borderTiles = new TileSet(s.borderTiles);
+    this._tiles = r.tileSet(s.tiles);
+    this._borderTiles = r.tileSet(s.borderTiles);
     this._units = s.units.map((u) => r.unit(u));
     this._myUnitsVersion = s.unitsVersion;
     this.myUnitsMemo = new Map();

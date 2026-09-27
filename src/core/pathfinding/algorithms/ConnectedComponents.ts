@@ -59,6 +59,21 @@ export class ConnectedComponents {
     };
   }
 
+  /**
+   * An independent copy of this labeling for `map`, a copy of this one's
+   * map: the same labels, sizes (holes included) and union-find state.
+   */
+  cloneFor(map: GameMap): ConnectedComponents {
+    const c = new ConnectedComponents(map, this.accessTerrainDirectly);
+    c.componentIds =
+      this.componentIds === null ? null : this.componentIds.slice();
+    c._componentSizes = this._componentSizes.slice();
+    c.parents = this.parents.slice();
+    c.maxId = this.maxId;
+    c.landMarker = this.landMarker;
+    return c;
+  }
+
   /** Replaces initialize() when restoring a snapshot. */
   restoreSnapshot(s: ConnectedComponentsState): void {
     this.componentIds = s.componentIds.slice();

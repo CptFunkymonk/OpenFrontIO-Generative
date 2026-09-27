@@ -7,7 +7,9 @@ import { AbstractGraph, AbstractNode } from "./AbstractGraph";
 import { BFSGrid } from "./BFS.Grid";
 
 export class AStarWaterHierarchical implements PathFinder<number> {
-  private tileBFS: BFSGrid;
+  // Map-sized BFS scratch for the nearest-node search, made on first use:
+  // a game copied for lookahead may never route a ship.
+  private tileBFS: BFSGrid | null = null;
   private abstractAStar: AbstractGraphAStar;
   private localAStar: AStarWaterBounded;
   private localAStarMultiCluster: AStarWaterBounded;
@@ -21,9 +23,6 @@ export class AStarWaterHierarchical implements PathFinder<number> {
       cachePaths?: boolean;
     } = {},
   ) {
-    // BFS for nearest node search
-    this.tileBFS = new BFSGrid(map.width() * map.height());
-
     const clusterSize = graph.clusterSize;
 
     // AbstractGraphAStar for abstract graph routing
@@ -321,6 +320,7 @@ export class AStarWaterHierarchical implements PathFinder<number> {
     const candidateNodes = cluster.nodeIds.map((id) => this.graph.getNode(id)!);
     const maxDistance = clusterSize * clusterSize;
 
+    this.tileBFS ??= new BFSGrid(this.map.width() * this.map.height());
     return this.tileBFS.search(
       this.map.width(),
       this.map.height(),

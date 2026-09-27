@@ -1,6 +1,12 @@
 import { Game, Player, PlayerType, UnitType } from "../../core/game/Game";
 import { ClientID, IntentSchema } from "../../core/Schemas";
-import { AgentContext, AgentIntent, IntentBudgetRemaining } from "../Agent";
+import {
+  AgentContext,
+  AgentIntent,
+  IntentBudgetRemaining,
+  IntentBudgetState,
+  LimiterState,
+} from "../Agent";
 import { GameFork } from "../Fork";
 import {
   INTENTS_PER_MINUTE,
@@ -97,12 +103,17 @@ class Limiter {
 /**
  * IntentBudget semantics (IntervalLimiter ×2) on the fork clock tick×100 ms.
  *
- * `fromLive(remaining, now)` cannot see the live limiters' private state, so
- * it assumes both windows began at `now` and that every intent missing from
+ * Exact (package WP1, docs/14-m4-plan.md §2.2) when built from the live
+ * limiters' state (`fromLive(remaining, now, state)`, `fromContext`): the
+ * mirror starts as the live budget is, times moved onto the fork clock, so
+ * a rollout's sends are limited exactly as the live policy's would be.
+ * Without the state (a context that does not expose it), `fromLive`
+ * assumes both windows began at `now` and that every intent missing from
  * each limit was spent in them: the mirror never grants more than the live
- * budget in its first second and minute. Built from a full budget it is
- * exactly a new IntentBudget created at `now`. A non-finite `remaining`
- * (rate limiting off) gives a mirror without limits.
+ * budget in its first second and minute, but can grant less than it later
+ * (a window the live limiter restarts sooner). Built from a full budget it
+ * is exactly a new IntentBudget created at `now`. A non-finite `remaining`
+ * or a null state (rate limiting off) gives a mirror without limits.
  */
 export class BudgetMirror {
   private constructor(
@@ -110,10 +121,42 @@ export class BudgetMirror {
     private readonly perMinute: Limiter | null,
   ) {}
 
+  /** The live budget of `ctx` at its tick, on the fork clock (tick ×
+   *  msPerTick): exact when the context exposes budgetState. */
+  static fromContext(ctx: AgentContext): BudgetMirror {
+    const nowMs = ctx.tick * ctx.game.config().msPerTick();
+    const remaining = ctx.budget();
+    const state = ctx.budgetState?.();
+    return BudgetMirror.fromLive(remaining, nowMs, state);
+  }
+
+  /** `state` (IntentBudget.state(), as AgentContext.budgetState returns
+   *  it): null means rate limiting is off; undefined means unknown, and
+   *  the mirror is built from `remaining` alone. */
   static fromLive(
     remaining: IntentBudgetRemaining,
     nowMs: number,
+    state?: IntentBudgetState | null,
   ): BudgetMirror {
+    if (state === null) return new BudgetMirror(null, null);
+    if (state !== undefined) {
+      // The live clock's reading maps to `nowMs` on the fork clock (the
+      // same in the arena, where both count game time).
+      const shift = nowMs - state.nowMs;
+      const exact = (n: number, intervalMs: number, l: LimiterState) =>
+        new Limiter(
+          n,
+          intervalMs,
+          l.content,
+          l.lastDripMs + shift,
+          l.windowStartMs + shift,
+          l.usedInWindow,
+        );
+      return new BudgetMirror(
+        exact(INTENTS_PER_SECOND, 1000, state.perSecond),
+        exact(INTENTS_PER_MINUTE, 60_000, state.perMinute),
+      );
+    }
     if (!isFinite(remaining.perSecond) || !isFinite(remaining.perMinute)) {
       return new BudgetMirror(null, null);
     }
@@ -235,12 +278,11 @@ export class Lookahead {
       return null;
     }
     if (replay.length > 0) withReplay(f, replay);
-    const nowMs = ctx.tick * ctx.game.config().msPerTick();
     this.info.set(f, {
       spawn,
       tick: ctx.tick,
       gameID: ctx.gameID,
-      budget: BudgetMirror.fromLive(ctx.budget(), nowMs),
+      budget: BudgetMirror.fromContext(ctx),
     });
     this.charge(f, performance.now() - start);
     return f;
@@ -341,11 +383,32 @@ function withReplay(f: GameFork, replay: readonly AgentIntent[]): void {
 
 /** AgentHost.isValid without the forbidden list (AgentIntent excludes those
  *  types): the wire schema and the size bound. */
-function isValidIntent(intent: AgentIntent): boolean {
+export function isValidIntent(intent: AgentIntent): boolean {
   return (
     IntentSchema.safeParse(intent).success &&
     JSON.stringify(intent).length <= MAX_INTENT_BYTES
   );
+}
+
+/**
+ * Package WP1: one rollout tick, as Lookahead.rollout steps it. `policy`
+ * plays `me` (the fork's player) at the fork's tick, its sends limited by
+ * `budget` on the fork clock; the valid intents it returns are what the
+ * fork's next step is given, as AgentHost would deliver them at latency 1.
+ * Returns those intents.
+ */
+export function stepRollout(
+  f: GameFork,
+  me: Player,
+  gameID: string,
+  policy: RolloutPolicy,
+  budget: BudgetMirror,
+): AgentIntent[] {
+  const g = f.game;
+  const view: SimView = { game: g, me, tick: g.ticks(), gameID, budget };
+  const intents = policy.step(view).filter(isValidIntent);
+  f.step(intents);
+  return intents;
 }
 
 /** The result fields read from the player at the end of a rollout. */

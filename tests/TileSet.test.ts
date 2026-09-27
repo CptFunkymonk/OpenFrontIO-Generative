@@ -138,4 +138,55 @@ describe("TileSet", () => {
       expect(tileSet.has(v)).toBe(reference.has(v));
     }
   });
+  it("toUint32Array lists the live entries in iteration order", () => {
+    const random = new PseudoRandom(7);
+    const s = new TileSet();
+    for (let op = 0; op < 5000; op++) {
+      const v = random.nextInt(0, 300);
+      if (random.chance(3)) s.delete(v);
+      else s.add(v);
+      if (op % 250 === 0) {
+        expect(s.toUint32Array()).toEqual(Uint32Array.from(s));
+      }
+    }
+    expect(new TileSet().toUint32Array()).toEqual(new Uint32Array(0));
+  });
+
+  it("clone behaves exactly like the original from then on, and is independent", () => {
+    const random = new PseudoRandom(99);
+    const original = new TileSet();
+    for (let op = 0; op < 3000; op++) {
+      const v = random.nextInt(0, 400);
+      if (random.chance(3)) original.delete(v);
+      else original.add(v);
+    }
+    const clone = original.clone();
+    const reference = new Set(original);
+    expect([...clone]).toEqual([...original]);
+    // The same further operations on both, tombstones and compactions
+    // included, keep them equal to each other and to a native Set.
+    const ops = new PseudoRandom(5);
+    for (let op = 0; op < 20000; op++) {
+      const v = ops.nextInt(0, 400);
+      if (ops.chance(3)) {
+        const d = reference.delete(v);
+        expect(original.delete(v)).toBe(d);
+        expect(clone.delete(v)).toBe(d);
+      } else {
+        reference.add(v);
+        original.add(v);
+        clone.add(v);
+      }
+      if (op % 1000 === 0) {
+        expect([...clone]).toEqual([...reference]);
+        expect([...original]).toEqual([...reference]);
+      }
+    }
+    // Independent: changing the clone leaves the original alone.
+    const before = [...original];
+    for (let v = 0; v < 400; v++) clone.delete(v);
+    clone.add(12345);
+    expect([...original]).toEqual(before);
+    expect([...clone]).toEqual([12345]);
+  });
 });

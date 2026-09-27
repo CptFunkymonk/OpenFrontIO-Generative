@@ -9,6 +9,7 @@ import type {
 import type { GameImpl } from "../game/GameImpl";
 import type { TileRef } from "../game/GameMap";
 import type { Railroad } from "../game/Railroad";
+import { TileSet } from "../game/TileSet";
 import type { Cluster, TrainStation } from "../game/TrainStation";
 import { PseudoRandom } from "../PseudoRandom";
 import { SnapshotError, SnapshotType, Versioned } from "./SnapshotType";
@@ -60,8 +61,19 @@ export class SnapshotWriter {
   readonly stations = new RefTable<TrainStation>();
   readonly railroads = new RefTable<Railroad>();
   readonly clusters = new RefTable<Cluster>();
+  /**
+   * Structural mode (GameClone): a TileSet is not listed. `tiles` returns an
+   * empty placeholder and records the set under it here; the clone copies
+   * the set itself (SnapshotReader.tileSet). Null when writing a snapshot.
+   */
+  readonly tileSets: Map<Uint32Array, TileSet> | null;
 
-  constructor(readonly game: GameImpl) {}
+  constructor(
+    readonly game: GameImpl,
+    opts: { structural?: boolean } = {},
+  ) {
+    this.tileSets = opts.structural === true ? new Map() : null;
+  }
 
   player(p: Player): number {
     return p.smallID();
@@ -116,6 +128,14 @@ export class SnapshotWriter {
   }
 
   tiles(tiles: Iterable<TileRef>): Uint32Array {
+    if (tiles instanceof TileSet) {
+      if (this.tileSets !== null) {
+        const placeholder = new Uint32Array(0);
+        this.tileSets.set(placeholder, tiles);
+        return placeholder;
+      }
+      return tiles.toUint32Array();
+    }
     return Uint32Array.from(tiles);
   }
 
@@ -139,6 +159,8 @@ export class SnapshotReader {
       clusters: Cluster[];
       /** Player id by small id, readable before player shells are filled. */
       playerIds: Map<number, string>;
+      /** Structural mode: the sets behind SnapshotWriter.tileSets placeholders. */
+      tileSets?: ReadonlyMap<Uint32Array, TileSet>;
     },
   ) {}
 
@@ -213,5 +235,14 @@ export class SnapshotReader {
 
   random(state: readonly number[]): PseudoRandom {
     return PseudoRandom.fromState(state);
+  }
+
+  /**
+   * A TileSet holding `tiles` in their order, or, for a structural-mode
+   * placeholder, a copy of the set it stands for.
+   */
+  tileSet(tiles: Uint32Array): TileSet {
+    const source = this.tables.tileSets?.get(tiles);
+    return source !== undefined ? source.clone() : new TileSet(tiles);
   }
 }

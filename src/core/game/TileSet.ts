@@ -217,6 +217,37 @@ export class TileSet implements ReadonlyTileSet {
     return this.values();
   }
 
+  /**
+   * The live entries in iteration order, as `Uint32Array.from(this)` gives
+   * them, without the per-element iterator protocol.
+   */
+  toUint32Array(): Uint32Array {
+    const out = new Uint32Array(this.size_);
+    const dense = this.dense;
+    let n = 0;
+    for (let i = 0; i < this.denseLen; i++) {
+      const v = dense[i];
+      if (v !== TOMBSTONE) out[n++] = v;
+    }
+    return out;
+  }
+
+  /**
+   * An independent copy with the same internal layout (dense order,
+   * tombstones and hash table), so it behaves exactly like this set from
+   * here on. Taken between ticks, when no iteration is in progress: the copy
+   * starts with none.
+   */
+  clone(): TileSet {
+    const c = new TileSet();
+    c.dense = this.dense.slice();
+    c.denseLen = this.denseLen;
+    c.size_ = this.size_;
+    c.table = this.table.slice();
+    c.tableUsed = this.tableUsed;
+    return c;
+  }
+
   /** Rewrites dense storage without tombstones, preserving insertion order. */
   private compact(capacity: number): void {
     const compacted = new Uint32Array(Math.max(capacity, 16));

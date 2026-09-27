@@ -9,15 +9,20 @@
  *   npm run arena:compare -- arena-results/ab arena-results/ab \
  *     --entrant-a baseline --entrant-b 1
  *
- * For B − A: wins, with an exact sign test on the discordant games; mean
- * Δprogress, Δpeak land and Δsurvival with seeded bootstrap 95% intervals
- * and the better/worse/tie split; the milestone metrics of both; breakdowns
- * by map category and by map; the games B lost most in, with the command
- * that reruns each with images; and which code each side ran, with a warning
- * when it had local changes or is not HEAD. A game that crashed, or stopped
- * early on an error, on either side is left out of the pairs and warned of.
- * Writes compare.md and compare.json into --out (default: B's directory) and
- * prints compare.md.
+ * For B − A: wins, with an exact sign test on the discordant games; how
+ * many pairs are the same game on both sides; mean Δprogress, Δpeak land,
+ * Δland at minutes 10, 15 and 20 and Δsurvival, each with a seeded bootstrap
+ * 95% interval, the median, the better/worse/tie split and a sign test on
+ * it; out before minute 20, lost before it any cause and top 3 at minute 10
+ * as paired counts with sign tests; the M4 plan's metrics (troop flow,
+ * strikes, pile-ons, bombs, gold, searches, R, checkpoint mismatches) paired
+ * the same way; the milestone metrics of both; breakdowns by map category
+ * and by map; the games B lost most in, with the command that reruns each
+ * with images; and which code each side ran, with a warning when it had
+ * local changes or is not HEAD. A game that crashed, or stopped early on an
+ * error, on either side, or whose seat had agent errors or never spawned, is
+ * left out of the pairs and warned of. Writes compare.md and compare.json
+ * into --out (default: B's directory) and prints compare.md.
  */
 import { execFileSync } from "child_process";
 import fs from "fs";
@@ -27,21 +32,36 @@ import { maps as MAP_INFO, mapCategoryOrder } from "../../core/game/Game";
 import { PseudoRandom } from "../../core/PseudoRandom";
 import { isMain } from "./Cli";
 import {
+  amount,
   CrashedGame,
   DECISIVE_PATHS,
   EntrantSummary,
+  FLOW_MINUTES,
+  GOLD_MINUTES,
+  goldAt,
+  logStatsOf,
+  lostBefore,
   mean,
+  median,
+  nationBefore,
+  outBefore,
   pct,
+  PILE_ON_TICKS,
   progress,
   provenance,
   readRun,
   Run,
   RunConfig,
+  sampleAt,
+  SeatFlow,
+  seatFlow,
+  shareAt,
   StoredGame,
   StoredSeat,
   summarize,
   summaryTable,
   TICKS_PER_MINUTE,
+  top3At,
 } from "./Summary";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -211,12 +231,26 @@ export interface Pairing {
   duplicates: string[];
 }
 
+/** Why a side's seat cannot stand in a pair though its game ran: agent
+ *  errors (its play may have been cut or skewed) or no spawn (it never
+ *  played). Empty if it can. A seat recorded before spawnTiles is taken as
+ *  spawned. */
+export function invalidSeat(g: SideGame): string[] {
+  const s = g.game.seats[g.seat];
+  const why: string[] = [];
+  if (s.stats.errors > 0) why.push(`${s.stats.errors} agent error(s)`);
+  if (s.spawnTiles === 0) why.push("no spawn");
+  return why;
+}
+
 /**
  * Pairs A's and B's games by gameID, in game-number order. A game id both
  * have on different maps (the same seed with a different pool or draw) does
  * not pair. Neither does a game that crashed on a side (its other side's
  * game, or the crash alone if it crashed on both) or stopped early on an
  * error there: its result is cut short, and would count as a quick loss.
+ * Nor a game where a side's seat had agent errors or never spawned
+ * (invalidSeat).
  */
 export function pairGames(
   a: readonly SideGame[],
@@ -261,6 +295,15 @@ export function pairGames(
         reason = `maps differ: ${x.game.map} in A, ${y.game.map} in B`;
       } else if (failed(x) || failed(y)) {
         reason = `errored in ${failed(x) ? (failed(y) ? "both" : "A") : "B"}`;
+      } else if (invalidSeat(x).length > 0 || invalidSeat(y).length > 0) {
+        reason = [
+          ...(invalidSeat(x).length > 0
+            ? [`${invalidSeat(x).join(", ")} in A`]
+            : []),
+          ...(invalidSeat(y).length > 0
+            ? [`${invalidSeat(y).join(", ")} in B`]
+            : []),
+        ].join("; ");
       } else {
         pairs.push({ a: x, b: y });
         continue;
@@ -305,6 +348,24 @@ export interface Outcome {
   /** Game minutes until eliminated: a seat never eliminated survived the
    *  whole game, a winner the whole cap. */
   survivalMinutes: number;
+  /** Land share at minutes 10, 15 and 20 (Summary.ts shareAt): a game that
+   *  ended earlier counts its final share, 0 if the seat was out by then;
+   *  null if the game was cut short before it. */
+  land: { at10: number | null; at15: number | null; at20: number | null };
+  /** Won; out before minute 20; lost before it, any cause (a nation's win
+   *  counts); top 3 by land at minute 10; a nation held half the land, or
+   *  won, before minute 20. Null where the game cannot tell. */
+  events: {
+    win: boolean;
+    outBefore20: boolean | null;
+    lostBefore20: boolean | null;
+    top3At10: boolean | null;
+    nationHalfBefore20: boolean | null;
+    nationWonBefore20: boolean | null;
+  };
+  /** The M4 plan's per-game metrics (DIAGNOSTICS by key), null where the
+   *  game does not record what they need. */
+  diagnostics: Record<string, number | null>;
 }
 
 export interface PairRow {
@@ -312,23 +373,46 @@ export interface PairRow {
   gameID: string;
   map: string;
   categories: string[];
+  /** The two sides played the same game: equal timelines and outcomes. */
+  identical: boolean;
   a: Outcome;
   b: Outcome;
   /** B − A. */
   delta: { progress: number; peakShare: number; survivalMinutes: number };
 }
 
-/** A per-game metric for both sides and their paired difference B − A. */
+/** A per-game metric for both sides and their paired difference B − A,
+ *  over the pairs where both sides know it. */
 export interface DeltaStats {
+  /** Pairs where both sides know the metric. */
+  pairs: number;
   meanA: number;
   meanB: number;
   meanDelta: number;
+  /** Median difference; null with no pairs. */
+  medianDelta: number | null;
   /** Bootstrap 95% interval of the mean difference; null with no pairs. */
   ci95: [number, number] | null;
-  /** Games where B's value is above, below or equal to A's. */
+  /** Games where B's value is above, below or within the metric's
+   *  tolerance of A's (for every metric here, above is better or, among the
+   *  diagnostics, simply higher). */
   better: number;
   worse: number;
   ties: number;
+  /** Exact sign test on better against worse: the discordant pairs. */
+  signTestP: number;
+}
+
+/** A per-game event (won, out, lost, top 3) on both sides, over the pairs
+ *  where both sides know it. */
+export interface EventStats {
+  pairs: number;
+  a: number;
+  b: number;
+  /** Discordant pairs: the event on one side only. */
+  aOnly: number;
+  bOnly: number;
+  signTestP: number;
 }
 
 /** Paired results over a subset of games: a map category or one map. */
@@ -373,6 +457,8 @@ export interface CompareReport {
   head: { commit: string | null; dirty: boolean | null };
   warnings: string[];
   paired: number;
+  /** Paired games the two sides played identically (PairRow.identical). */
+  identical: number;
   wins: {
     a: number;
     b: number;
@@ -384,6 +470,17 @@ export interface CompareReport {
   progress: DeltaStats;
   peakShare: DeltaStats;
   survivalMinutes: DeltaStats;
+  /** Land share at minutes 10, 15 and 20 (Outcome.land). */
+  land: { at10: DeltaStats; at15: DeltaStats; at20: DeltaStats };
+  events: {
+    outBefore20: EventStats;
+    lostBefore20: EventStats;
+    top3At10: EventStats;
+    nationHalfBefore20: EventStats;
+    nationWonBefore20: EventStats;
+  };
+  /** The M4 plan's metrics, paired, in DIAGNOSTICS order. */
+  diagnostics: { key: string; name: string; stats: DeltaStats }[];
   bootstrap: { resamples: number; seed: number };
   /** The arena summary of each side over the paired games only. */
   milestones: { a: EntrantSummary; b: EntrantSummary };
@@ -400,8 +497,182 @@ export interface Side {
   entrant: number;
 }
 
+/** Differences within this much count as ties: 0.1 points of land, as the
+ *  M4 plan's paired tables (paired19.py) count them. */
+export const SHARE_TOLERANCE = 0.001;
+/** The same for progress, which is peak land ÷ 0.8 short of a win. */
+export const PROGRESS_TOLERANCE = SHARE_TOLERANCE / 0.8;
+
+/** A per-game metric of the M4 plan (plan.md §2.10), paired in the report. */
+export interface Diagnostic {
+  key: string;
+  name: string;
+  /** How a value and a difference show in compare.md. */
+  show: (v: number) => string;
+  diff: (v: number) => string;
+  value: (g: SideGame, flow: SeatFlow) => number | null;
+}
+
+const fixed = (digits: number) => (v: number) => v.toFixed(digits);
+const signedFixed = (digits: number) => (v: number) => signed(v, digits);
+const signedAmount = (v: number) =>
+  `${v < 0 ? "-" : "+"}${amount(Math.abs(v))}`;
+const points = (v: number) => `${signed(v * 100, 1)} pp`;
+
+/** A seat's searches as its log records them: none (0) for a log without
+ *  one, null without a log. */
+function searchOf(g: SideGame) {
+  const log = logStatsOf(g.game.seats[g.seat]);
+  return log === undefined ? undefined : log.search;
+}
+
+export const DIAGNOSTICS: readonly Diagnostic[] = [
+  {
+    key: "utilization",
+    name: `utilization m${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]}`,
+    show: fixed(3),
+    diff: signedFixed(3),
+    value: (_, f) => f.utilization,
+  },
+  {
+    key: "idleShare",
+    name: `idle m${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]}`,
+    show: pct,
+    diff: points,
+    value: (_, f) => f.idleShare,
+  },
+  {
+    key: "allInPrice",
+    name: `all-in price m${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]}`,
+    show: fixed(0),
+    diff: signedFixed(0),
+    value: (_, f) => f.allInPrice,
+  },
+  {
+    key: "strikes",
+    name: "strikes",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g, f) =>
+      g.game.seats[g.seat].attacks === undefined ? null : f.strikes,
+  },
+  {
+    key: "strikePrice",
+    name: "strike price",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (_, f) =>
+      f.strikeTilesGained > 0 ? f.strikeTroopsLost / f.strikeTilesGained : null,
+  },
+  {
+    key: "pileOnsPerStrike",
+    name: "pile-ons / strike",
+    show: fixed(2),
+    diff: signedFixed(2),
+    value: (_, f) =>
+      f.pileOns === null || f.strikes === 0 ? null : f.pileOns / f.strikes,
+  },
+  {
+    key: "nationAttacks",
+    name: "nation attacks received",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g) => g.game.seats[g.seat].received?.attacks.nation ?? null,
+  },
+  {
+    key: "bombsReceived",
+    name: "bombs received",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g) => {
+      const n = g.game.seats[g.seat].received?.nukes;
+      return n === undefined ? null : n.atom + n.hydrogen;
+    },
+  },
+  {
+    key: "mirvsReceived",
+    name: "MIRVs received",
+    show: fixed(2),
+    diff: signedFixed(2),
+    value: (g) => g.game.seats[g.seat].received?.nukes.mirv ?? null,
+  },
+  ...GOLD_MINUTES.map(
+    (minute): Diagnostic => ({
+      key: `gold${minute}`,
+      name: `gold @${minute}`,
+      show: amount,
+      diff: signedAmount,
+      value: (g) => goldAt(g.game, g.seat, minute),
+    }),
+  ),
+  // The troop cap, which cities raise and bombs cut (WP8 measures it).
+  ...[15, 20].map(
+    (minute): Diagnostic => ({
+      key: `cap${minute}`,
+      name: `cap @${minute}`,
+      show: amount,
+      diff: signedAmount,
+      value: (g) => sampleAt(g.game, g.seat, minute)?.maxTroops ?? null,
+    }),
+  ),
+  {
+    key: "searches",
+    name: "searches",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g) => {
+      const s = searchOf(g);
+      return s === undefined ? null : (s?.searches ?? 0);
+    },
+  },
+  {
+    key: "acts",
+    name: "acts",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g) => {
+      const s = searchOf(g);
+      return s === undefined ? null : (s?.acts ?? 0);
+    },
+  },
+  {
+    key: "gain",
+    name: "predicted gain",
+    show: amount,
+    diff: signedAmount,
+    value: (g) => {
+      const s = searchOf(g);
+      return s === undefined ? null : (s?.gain ?? 0);
+    },
+  },
+  {
+    key: "R",
+    name: "R (search ÷ game time)",
+    show: fixed(2),
+    diff: signedFixed(2),
+    value: (g) => {
+      const s = searchOf(g);
+      if (s === undefined) return null;
+      if (s === null) return 0;
+      const wall = g.game.wallMs;
+      return wall > s.ms ? s.ms / (wall - s.ms) : null;
+    },
+  },
+  {
+    key: "mismatches",
+    name: "checkpoint mismatches",
+    show: fixed(1),
+    diff: signedFixed(1),
+    value: (g) => {
+      const s = searchOf(g);
+      return s === undefined ? null : (s?.mismatches ?? 0);
+    },
+  },
+];
+
 function outcome(g: SideGame, capMinutes: number | null): Outcome {
   const s = g.game.seats[g.seat];
+  const flow = seatFlow(g.game, g.seat);
   return {
     index: g.game.index,
     result: s.result,
@@ -415,23 +686,94 @@ function outcome(g: SideGame, capMinutes: number | null): Outcome {
         : s.result === "win"
           ? Math.max(capMinutes ?? 0, g.game.gameMinutes)
           : g.game.gameMinutes,
+    land: {
+      at10: shareAt(g.game, g.seat, 10),
+      at15: shareAt(g.game, g.seat, 15),
+      at20: shareAt(g.game, g.seat, 20),
+    },
+    events: {
+      win: s.result === "win",
+      outBefore20: outBefore(g.game, g.seat, 20),
+      lostBefore20: lostBefore(g.game, g.seat, 20),
+      top3At10: top3At(g.game, g.seat, 10),
+      nationHalfBefore20: nationBefore(g.game, g.seat, 0.5, 20),
+      nationWonBefore20: nationBefore(g.game, g.seat, 0.8, 20),
+    },
+    diagnostics: Object.fromEntries(
+      DIAGNOSTICS.map((d) => [d.key, d.value(g, flow)]),
+    ),
+  };
+}
+
+/** Both sides played the same game: the same length, result and timeline
+ *  (tiles, troops, cap, gold every sample). */
+export function identicalGames(x: SideGame, y: SideGame): boolean {
+  const s = x.game.seats[x.seat];
+  const t = y.game.seats[y.seat];
+  return (
+    x.game.ticks === y.game.ticks &&
+    s.result === t.result &&
+    s.eliminatedAtTick === t.eliminatedAtTick &&
+    s.peakShare === t.peakShare &&
+    s.finalShare === t.finalShare &&
+    JSON.stringify(s.timeline) === JSON.stringify(t.timeline)
+  );
+}
+
+/** Paired statistics of a metric over the pairs where both values are
+ *  known; differences within `tolerance` are ties. */
+export function pairedStats(
+  values: readonly (readonly [number | null, number | null])[],
+  tolerance = 0,
+): DeltaStats {
+  const known = values.filter(
+    (v): v is readonly [number, number] => v[0] !== null && v[1] !== null,
+  );
+  const deltas = known.map(([a, b]) => b - a);
+  const better = deltas.filter((d) => d > tolerance).length;
+  const worse = deltas.filter((d) => d < -tolerance).length;
+  return {
+    pairs: known.length,
+    meanA: mean(known.map(([a]) => a)),
+    meanB: mean(known.map(([, b]) => b)),
+    meanDelta: mean(deltas),
+    medianDelta: median(deltas),
+    ci95: bootstrapMeanCI(deltas),
+    better,
+    worse,
+    ties: deltas.length - better - worse,
+    signTestP: signTest(better, worse),
+  };
+}
+
+/** Paired counts of an event over the pairs where both sides know it. */
+export function eventStats(
+  values: readonly (readonly [boolean | null, boolean | null])[],
+): EventStats {
+  const known = values.filter(
+    (v): v is readonly [boolean, boolean] => v[0] !== null && v[1] !== null,
+  );
+  const aOnly = known.filter(([a, b]) => a && !b).length;
+  const bOnly = known.filter(([a, b]) => b && !a).length;
+  return {
+    pairs: known.length,
+    a: known.filter(([a]) => a).length,
+    b: known.filter(([, b]) => b).length,
+    aOnly,
+    bOnly,
+    signTestP: signTest(aOnly, bOnly),
   };
 }
 
 function deltaStats(
   rows: readonly PairRow[],
   metric: keyof PairRow["delta"],
+  tolerance: number,
 ): DeltaStats {
-  const deltas = rows.map((r) => r.delta[metric]);
-  return {
-    meanA: mean(rows.map((r) => r.a[metric])),
-    meanB: mean(rows.map((r) => r.b[metric])),
-    meanDelta: mean(deltas),
-    ci95: bootstrapMeanCI(deltas),
-    better: deltas.filter((d) => d > 0).length,
-    worse: deltas.filter((d) => d < 0).length,
-    ties: deltas.filter((d) => d === 0).length,
-  };
+  return pairedStats(
+    rows.map((r) => [r.a[metric], r.b[metric]]),
+    tolerance,
+  );
 }
 
 function breakdown(name: string, rows: readonly PairRow[]): Breakdown {
@@ -576,6 +918,7 @@ export function compareRuns(
           "unknown",
         ]),
       ],
+      identical: identicalGames(x, y),
       a: oa,
       b: ob,
       delta: {
@@ -627,6 +970,31 @@ export function compareRuns(
       `${stopped.length} game(s) stopped early on an error and are left out ` +
         `of the pairs, where each would weigh in as a quick loss: ` +
         `${stopped.join("; ")}.`,
+    );
+  }
+  const invalid = pairing.unpaired.flatMap((u) => {
+    const seatOf = (s: Side, index: number | null) =>
+      sideGames(s.run, s.entrant).find((g) => g.game.index === index);
+    const sides = (
+      [
+        ["A", seatOf(a, u.a)],
+        ["B", seatOf(b, u.b)],
+      ] as const
+    ).flatMap(([name, g]) =>
+      g === undefined || (g.game.error ?? null) !== null
+        ? []
+        : invalidSeat(g).length === 0
+          ? []
+          : [`${invalidSeat(g).join(", ")} in ${name}`],
+    );
+    return sides.length === 0
+      ? []
+      : [`game ${u.game} (${u.map}) ${sides.join(", ")}`];
+  });
+  if (invalid.length > 0) {
+    warnings.push(
+      `${invalid.length} game(s) are left out of the pairs because a seat ` +
+        `had agent errors or never spawned: ${invalid.join("; ")}.`,
     );
   }
   if (pairing.duplicates.length > 0) {
@@ -687,12 +1055,21 @@ export function compareRuns(
   const seatsOf = (side: "a" | "b") =>
     pairing.pairs.map((p) => ({ r: p[side].game, seat: p[side].seat }));
 
+  const land = (at: keyof Outcome["land"]) =>
+    pairedStats(
+      rows.map((r) => [r.a.land[at], r.b.land[at]]),
+      SHARE_TOLERANCE,
+    );
+  const event = (e: keyof Outcome["events"]) =>
+    eventStats(rows.map((r) => [r.a.events[e], r.b.events[e]]));
+
   return {
     a: ai,
     b: bi,
     head,
     warnings,
     paired: rows.length,
+    identical: rows.filter((r) => r.identical).length,
     wins: {
       a: rows.filter(winA).length,
       b: rows.filter(winB).length,
@@ -700,9 +1077,24 @@ export function compareRuns(
       bOnly,
       signTestP: signTest(aOnly, bOnly),
     },
-    progress: deltaStats(rows, "progress"),
-    peakShare: deltaStats(rows, "peakShare"),
-    survivalMinutes: deltaStats(rows, "survivalMinutes"),
+    progress: deltaStats(rows, "progress", PROGRESS_TOLERANCE),
+    peakShare: deltaStats(rows, "peakShare", SHARE_TOLERANCE),
+    survivalMinutes: deltaStats(rows, "survivalMinutes", 0),
+    land: { at10: land("at10"), at15: land("at15"), at20: land("at20") },
+    events: {
+      outBefore20: event("outBefore20"),
+      lostBefore20: event("lostBefore20"),
+      top3At10: event("top3At10"),
+      nationHalfBefore20: event("nationHalfBefore20"),
+      nationWonBefore20: event("nationWonBefore20"),
+    },
+    diagnostics: DIAGNOSTICS.map((d) => ({
+      key: d.key,
+      name: d.name,
+      stats: pairedStats(
+        rows.map((r) => [r.a.diagnostics[d.key], r.b.diagnostics[d.key]]),
+      ),
+    })),
     bootstrap: { resamples: BOOTSTRAP_RESAMPLES, seed: BOOTSTRAP_SEED },
     milestones: {
       a: summarize(`A: ${ai.label}`, seatsOf("a"), 0),
@@ -779,19 +1171,44 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     d: DeltaStats,
     each: (v: number) => string,
     diff: (v: number) => string,
-  ) => [
+  ) =>
+    d.pairs === 0
+      ? [name, "–", "–", "–", "–", "–", "–", "–", "0"]
+      : [
+          name,
+          each(d.meanA),
+          each(d.meanB),
+          diff(d.meanDelta),
+          ci(d, diff),
+          d.medianDelta === null ? "–" : diff(d.medianDelta),
+          `${d.better} / ${d.worse} / ${d.ties}`,
+          pValue(d.signTestP),
+          String(d.pairs),
+        ];
+  const event = (name: string, e: EventStats) => [
     name,
-    each(d.meanA),
-    each(d.meanB),
-    diff(d.meanDelta),
-    ci(d, diff),
-    `${d.better} / ${d.worse} / ${d.ties}`,
+    String(e.a),
+    String(e.b),
+    String(e.aOnly),
+    String(e.bOnly),
+    pValue(e.signTestP),
+    String(e.pairs),
   ];
   const prog = (v: number) => v.toFixed(3);
   const dProg = (v: number) => signed(v, 3);
-  const pp = (v: number) => `${signed(v * 100, 1)} pp`;
   const min = (v: number) => `${v.toFixed(1)} min`;
   const dMin = (v: number) => `${signed(v, 1)} min`;
+  const pairedHeader = (counts: string) => [
+    "",
+    "A",
+    "B",
+    "B − A",
+    "95% CI",
+    "median Δ",
+    counts,
+    "sign test p",
+    "pairs",
+  ];
   const breakdownRows = (bs: Breakdown[]) =>
     bs.map((x) => [
       x.name,
@@ -837,19 +1254,63 @@ export function compareMarkdown(r: CompareReport, root = ROOT): string {
     `Wins: A ${r.wins.a}, B ${r.wins.b}. Discordant: A only ${r.wins.aOnly}, ` +
       `B only ${r.wins.bOnly}; sign test p = ${pValue(r.wins.signTestP)}.`,
     "",
-    table(
-      ["", "A", "B", "B − A", "95% CI", "B better / worse / tie"],
-      [
-        metric("progress", r.progress, prog, dProg),
-        metric("peak land", r.peakShare, pct, pp),
-        metric("survival", r.survivalMinutes, min, dMin),
-      ],
-    ),
+    `Identical games: ${r.identical} of ${r.paired} (the same result and ` +
+      `timeline on both sides).`,
+    "",
+    table(pairedHeader("B better / worse / tie"), [
+      metric("progress", r.progress, prog, dProg),
+      metric("peak land", r.peakShare, pct, points),
+      metric("land @10", r.land.at10, pct, points),
+      metric("land @15", r.land.at15, pct, points),
+      metric("land @20", r.land.at20, pct, points),
+      metric("survival", r.survivalMinutes, min, dMin),
+    ]),
     "",
     `Intervals: percentile bootstrap of the mean paired difference, ` +
       `${r.bootstrap.resamples} resamples, seed ${r.bootstrap.seed}. Progress is ` +
-      `1 for a win, else peak land ÷ 0.8; survival counts a seat never ` +
-      `eliminated as surviving the game, a winner the cap.`,
+      `1 for a win, else peak land ÷ 0.8; land @m is the share at minute m, ` +
+      `the final share for a game that ended earlier and 0 once out; ` +
+      `survival counts a seat never eliminated as surviving the game, a ` +
+      `winner the cap. Better and worse: B above or below A by more than ` +
+      `${(SHARE_TOLERANCE * 100).toFixed(1)} points of land (progress likewise); ` +
+      `the sign test is the exact two-sided binomial on those discordant pairs.`,
+    "",
+    table(
+      ["", "A", "B", "A only", "B only", "sign test p", "pairs"],
+      [
+        event("out < 20 min", r.events.outBefore20),
+        event("lost < 20 min, any cause", r.events.lostBefore20),
+        event("top 3 @10", r.events.top3At10),
+        event("a nation ≥ 50% < 20 min", r.events.nationHalfBefore20),
+        event("a nation won < 20 min", r.events.nationWonBefore20),
+      ],
+    ),
+    "",
+    `Counts of games. Lost before minute 20 counts a nation's win as a loss; ` +
+      `out before it only an elimination.`,
+    "",
+    `## The M4 plan's metrics (paired games)`,
+    "",
+    table(
+      pairedHeader("B higher / lower / tie"),
+      r.diagnostics.map((d) => {
+        const def = DIAGNOSTICS.find((x) => x.key === d.key);
+        return metric(
+          d.name,
+          d.stats,
+          def?.show ?? fixed(2),
+          def?.diff ?? signedFixed(2),
+        );
+      }),
+    ),
+    "",
+    `Means over the pairs where both sides record the metric. Flow over ` +
+      `minutes ${FLOW_MINUTES[0]}-${FLOW_MINUTES[1]} (Summary.ts seatFlow): ` +
+      `utilization is regrowth ÷ peak regrowth, idle the share of samples ` +
+      `at ≥ 95% of the cap, the all-in price (regrowth − Δhome) ÷ Δtiles. ` +
+      `Strikes are land attacks on nations; a pile-on is a nation attack on ` +
+      `us within ${PILE_ON_TICKS} ticks after one. Searches, acts, gain and ` +
+      `R come from the agent's log.`,
     "",
     `## Milestones (paired games)`,
     "",

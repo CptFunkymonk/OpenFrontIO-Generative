@@ -1,11 +1,15 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import type { StandingPoint } from "../../src/agent/arena/ArenaGame";
 import {
   bootstrapMeanCI,
   compareMarkdown,
   compareRuns,
+  DIAGNOSTICS,
   entrantLabels,
+  eventStats,
+  pairedStats,
   pairGames,
   rerunCommand,
   selectEntrant,
@@ -14,8 +18,10 @@ import {
 } from "../../src/agent/arena/Compare";
 import { mergeRuns } from "../../src/agent/arena/Merge";
 import { mean, readRun, Run, StoredSeat } from "../../src/agent/arena/Summary";
-import { maps as MAP_INFO } from "../../src/core/game/Game";
-import { COMMIT, writeRun } from "./util/SyntheticRuns";
+import { maps as MAP_INFO, PlayerType } from "../../src/core/game/Game";
+import { COMMIT, seat as storedSeat, writeRun } from "./util/SyntheticRuns";
+
+const NATION = PlayerType.Nation;
 
 // The paired report: its statistics against known values, pairing by game
 // id, entrant selection, and a whole report on made-up results directories
@@ -36,6 +42,59 @@ describe("statistics", () => {
     // Past 2^1024 without overflow.
     expect(signTest(1500, 1300) / 0.0001684116226437612).toBeCloseTo(1, 10);
     expect(signTest(1100, 1100)).toBe(1);
+  });
+
+  test("paired statistics over the pairs both sides know, with ties", () => {
+    const values: [number | null, number | null][] = [
+      [1, 2],
+      [null, 3],
+      [2, 2.0005],
+      [3, 1],
+      [4, null],
+    ];
+    const d = pairedStats(values, 0.001);
+    expect(d).toMatchObject({
+      pairs: 3,
+      meanA: 2,
+      meanDelta: expect.closeTo((1 + 0.0005 - 2) / 3, 12),
+      medianDelta: expect.closeTo(0.0005, 12),
+      better: 1,
+      worse: 1,
+      ties: 1,
+      signTestP: 1,
+    });
+    expect(d.meanB).toBeCloseTo((2 + 2.0005 + 1) / 3, 12);
+    // Without a tolerance the small difference counts.
+    expect(pairedStats(values)).toMatchObject({ better: 2, worse: 1, ties: 0 });
+    expect(pairedStats([[null, 1]])).toMatchObject({
+      pairs: 0,
+      medianDelta: null,
+      ci95: null,
+      signTestP: 1,
+    });
+    // Ten pairs all better: p = 2 / 2^10.
+    expect(
+      pairedStats(Array.from({ length: 10 }, () => [0, 1])).signTestP,
+    ).toBe(0.001953125);
+  });
+
+  test("paired events: discordant pairs and their sign test", () => {
+    const e = eventStats([
+      [true, false],
+      [false, true],
+      [true, true],
+      [null, true],
+      [false, false],
+      [false, true],
+    ]);
+    expect(e).toEqual({
+      pairs: 5,
+      a: 2,
+      b: 3,
+      aOnly: 1,
+      bOnly: 2,
+      signTestP: 1,
+    });
   });
 
   test("bootstrap: a point for constant differences, the mean covered", () => {
@@ -429,6 +488,239 @@ describe("the report", () => {
         "Error: boom.",
     ]);
     expect(r.milestones.b.errored).toBe(0);
+  });
+
+  test("seats with agent errors or no spawn are left out, loudly", () => {
+    const args = ["--agent", "baseline", ...POOL];
+    const stats = (errors: number) => ({
+      ...storedSeat("baseline", 0).stats,
+      errors,
+    });
+    writeRun(dir("a"), args, {
+      seat: (job) => ({
+        peakShare: 0.2,
+        ...(job.game === 4 ? { spawnTiles: 0 } : { spawnTiles: 40 }),
+      }),
+    });
+    writeRun(dir("b"), args, {
+      seat: (job) => ({
+        peakShare: 0.3,
+        // Recorded before spawnTiles: taken as spawned.
+        ...(job.game === 1 ? { stats: stats(3) } : {}),
+        ...(job.game === 5 ? { stats: stats(1), spawnTiles: 0 } : {}),
+      }),
+    });
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(3);
+    expect(r.unpaired.map((u) => [u.game, u.reason])).toEqual([
+      [1, "3 agent error(s) in B"],
+      [4, "no spawn in A"],
+      [5, "1 agent error(s), no spawn in B"],
+    ]);
+    expect(r.warnings).toEqual([
+      "3 game(s) are left out of the pairs because a seat had agent " +
+        "errors or never spawned: game 1 (Iceland) 3 agent error(s) in B; " +
+        "game 4 (Iceland) no spawn in A; game 5 (World) 1 agent error(s), " +
+        "no spawn in B.",
+    ]);
+    expect(r.milestones.b.agentErrors).toBe(0);
+    expect(compareMarkdown(r)).toContain("| 4 | Iceland |");
+  });
+
+  test("land by minute, events, identical games and the plan's metrics", () => {
+    // g 0-5: Onion, Iceland, World, Onion, Iceland, World.
+    const point = (minute: number, share: number, rank = 4): StandingPoint => ({
+      minute,
+      tick: minute * 600,
+      share,
+      rank,
+      players: 10,
+      nationsAlive: 8,
+      medianNationShare: 0.05,
+      topNation: { name: "Finland", share: 0.3 },
+    });
+    const timeline = [300, 600, 900].map((tick) => ({
+      tick,
+      tiles: tick,
+      share: 0.1,
+      troops: 1000,
+      maxTroops: 2000,
+      gold: tick,
+      alive: true,
+    }));
+    const noNukes = { atom: 0, hydrogen: 0, mirv: 0, mirvWarhead: 0 };
+    const base: Partial<StoredSeat> = {
+      standings: [point(10, 0.1), point(15, 0.1), point(20, 0.1)],
+      timeline,
+      peakShare: 0.1,
+      finalShare: 0.1,
+      received: {
+        attacks: { nation: 0, bot: 0, human: 0 },
+        attackTroops: { nation: 0, bot: 0, human: 0 },
+        nukes: noNukes,
+        firstNukeTick: null,
+        eliminatedBy: null,
+      },
+    };
+    const A: Partial<StoredSeat>[] = [
+      base,
+      base,
+      base,
+      base,
+      // A nation won at minute 12: lost, but not out.
+      {
+        ...base,
+        result: "loss",
+        standings: [point(10, 0.1)],
+        finalShare: 0.05,
+      },
+      base,
+    ];
+    const B: Partial<StoredSeat>[] = [
+      base,
+      {
+        ...base,
+        standings: [point(10, 0.2, 2), point(15, 0.25, 2), point(20, 0.3, 2)],
+        peakShare: 0.3,
+        finalShare: 0.3,
+      },
+      // 0.02 points more at minute 20: a tie.
+      {
+        ...base,
+        standings: [point(10, 0.1), point(15, 0.1), point(20, 0.1002)],
+        finalShare: 0.1002,
+      },
+      // Out at minute 12.
+      {
+        ...base,
+        result: "loss",
+        eliminatedAtTick: 7200,
+        standings: [point(10, 0.15, 3)],
+        peakShare: 0.15,
+        finalShare: 0,
+      },
+      base,
+      // The same game, three bombs more on record.
+      {
+        ...base,
+        received: { ...base.received!, nukes: { ...noNukes, atom: 3 } },
+      },
+    ];
+    const args = ["--agent", "baseline", ...POOL];
+    writeRun(dir("a"), args, {
+      seat: (job) => A[job.game],
+      ticks: (job) => (job.game === 4 ? 7200 : 12000),
+      // Finland held 55% at minute 11 and won at 12.
+      game: (job) =>
+        job.game === 4
+          ? {
+              winner: { name: "Finland", type: NATION, isAgent: false },
+              leaders: [
+                {
+                  tick: 6600,
+                  leaders: [{ name: "Finland", type: NATION, share: 0.55 }],
+                },
+              ],
+            }
+          : {},
+    });
+    writeRun(dir("b"), args, {
+      seat: (job) => B[job.game],
+      ticks: (job) => (job.game === 3 ? 7200 : 12000),
+      // B's seat logged searches in game 1.
+      log: (job) =>
+        [
+          `## baseline (AGENT000)`,
+          ...(job.game === 1
+            ? [
+                "[2400] search 2400 T3 cands=3 chosen=strike:x:1 gain=900 te=600 ms=500",
+                "[3000] search 3000 T7 cands=2 chosen=base gain=0 te=300 ms=250",
+              ]
+            : []),
+        ].join("\n"),
+    });
+    const r = compareRuns(
+      { run: readRun(dir("a")), entrant: 0 },
+      { run: readRun(dir("b")), entrant: 0 },
+      { head: { commit: COMMIT, dirty: false } },
+    );
+    expect(r.paired).toBe(6);
+    expect(r.identical).toBe(2);
+    expect(r.pairs.map((p) => p.identical)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+    ]);
+    // Minute 10: +0.1 in g1, +0.05 in g3 (still alive then).
+    expect(r.land.at10).toMatchObject({
+      pairs: 6,
+      better: 2,
+      worse: 0,
+      ties: 4,
+    });
+    expect(r.land.at10.meanDelta).toBeCloseTo(0.15 / 6, 12);
+    // Minute 15: B out in g3 (0), A's game over in g4 (its final 0.05).
+    expect(r.land.at15).toMatchObject({ better: 2, worse: 1, ties: 3 });
+    expect(r.land.at15.meanDelta).toBeCloseTo((0.15 - 0.1 + 0.05) / 6, 12);
+    // Minute 20: g2's 0.0002 is a tie.
+    expect(r.land.at20).toMatchObject({ better: 2, worse: 1, ties: 3 });
+    expect(r.land.at20.meanDelta).toBeCloseTo((0.2 + 0.0002 - 0.1 + 0.05) / 6);
+    expect(r.land.at20.signTestP).toBe(1);
+    const once = { pairs: 6, a: 1, b: 0, aOnly: 1, bOnly: 0, signTestP: 1 };
+    expect(r.events).toEqual({
+      outBefore20: { pairs: 6, a: 0, b: 1, aOnly: 0, bOnly: 1, signTestP: 1 },
+      lostBefore20: { pairs: 6, a: 1, b: 1, aOnly: 1, bOnly: 1, signTestP: 1 },
+      top3At10: { pairs: 6, a: 0, b: 2, aOnly: 0, bOnly: 2, signTestP: 0.5 },
+      nationHalfBefore20: once,
+      nationWonBefore20: once,
+    });
+    expect(r.milestones.a).toMatchObject({
+      eliminatedBefore20: 0,
+      lostBefore20: 1 / 6,
+    });
+    expect(r.diagnostics.map((d) => d.key)).toEqual(
+      DIAGNOSTICS.map((d) => d.key),
+    );
+    const bombs = r.diagnostics.find((d) => d.key === "bombsReceived")!.stats;
+    expect(bombs).toMatchObject({ pairs: 6, meanA: 0, meanB: 0.5, better: 1 });
+    // A's logs hold no seat's lines: its searches are unknown.
+    const searches = r.diagnostics.find((d) => d.key === "searches")!.stats;
+    expect(searches.pairs).toBe(0);
+    const inB = r.pairs.map((p) => [
+      p.b.diagnostics.searches,
+      p.b.diagnostics.acts,
+      p.b.diagnostics.gain,
+    ]);
+    expect(inB).toEqual([
+      [0, 0, 0],
+      [2, 1, 900],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    ]);
+    // 750 ms of search in a game of 1,000 ms (the synthetic wall time).
+    expect(r.pairs[1].b.diagnostics.R).toBe(3);
+
+    const md = compareMarkdown(r);
+    expect(md).toContain(
+      "Identical games: 2 of 6 (the same result and timeline on both sides).",
+    );
+    expect(md).toContain("| land @10 | 10.0% | 12.5% | +2.5 pp |");
+    expect(md).toContain("| out < 20 min | 0 | 1 | 0 | 1 | 1 | 6 |");
+    expect(md).toContain(
+      "| lost < 20 min, any cause | 1 | 1 | 1 | 1 | 1 | 6 |",
+    );
+    expect(md).toContain("| bombs received | 0.0 | 0.5 | +0.5 |");
+    expect(md).toContain("| searches | – | – | – | – | – | – | – | 0 |");
+    expect(md).toContain("| a nation won < 20 min | 1 | 0 | 1 | 0 | 1 | 6 |");
   });
 
   test("loud warnings: unknown, stale or dirty code, other settings", () => {

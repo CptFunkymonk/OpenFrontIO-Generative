@@ -1042,6 +1042,16 @@ export interface ApexOptions extends RaceFieldOptions, SchedulerOptions {
   /** Fork budget outside the spawn search, in ms per 10 s of game time
    *  (roadmap §11.4). */
   forkMsPer10s: number;
+
+  // ── Search (docs/14-m4-plan.md §2.9; each package appends its own
+  // sub-block) ───────────────────────────────────────────────────────────
+  // Package WP1, the hook: exact rollout copies (ApexPolicy.forRolloutWith)
+  // and the directive (setDirective) are always built; they act only when
+  // a LiveSearch plays a plan.
+  /** The live search (WP2's SearchController, a LiveSearch given to the
+   *  policy by ApexAgent): off, the policy never forks for a search. On
+   *  without a LiveSearch, the policy throws at its first tick. */
+  search: boolean;
 }
 
 function deepFreeze<T>(o: T): T {
@@ -1330,6 +1340,9 @@ export const APEX_DEFAULTS: Readonly<ApexOptions> = deepFreeze({
   },
 
   forkMsPer10s: 1000,
+
+  // Search: package WP1 (the hook).
+  search: false,
 } satisfies ApexOptions);
 
 /**

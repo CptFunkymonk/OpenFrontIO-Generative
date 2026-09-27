@@ -68,6 +68,10 @@ export interface RunSketch {
   error?: (job: ArenaJob) => string | null;
   /** Frame names (game000-t600.png) each game wrote into images/. */
   images?: (job: ArenaJob) => string[];
+  /** Each game's other fields (its winner, leaders, ...). */
+  game?: (job: ArenaJob) => Partial<StoredGame>;
+  /** Each game's log (default: a header naming the game only). */
+  log?: (job: ArenaJob) => string;
   commit?: string | null;
   dirty?: boolean | null;
 }
@@ -132,6 +136,7 @@ export function writeRun(
       leaders: [],
       images,
       error: sketch.error?.(job) ?? null,
+      ...sketch.game?.(job),
     };
     played.push(stored);
     const name = `game${String(stored.index).padStart(3, "0")}`;
@@ -139,7 +144,10 @@ export function writeRun(
       path.join(dir, "games", `${name}.json`),
       JSON.stringify(stored, null, 1),
     );
-    fs.writeFileSync(path.join(dir, "games", `${name}.log`), `## ${name}`);
+    fs.writeFileSync(
+      path.join(dir, "games", `${name}.log`),
+      sketch.log?.(job) ?? `## ${name}`,
+    );
   }
   const { entrants, suite, shard, range, argv: args, from, ...config } = o;
   const labels = entrants.map((e) => e.label);

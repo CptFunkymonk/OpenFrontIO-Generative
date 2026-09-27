@@ -269,6 +269,7 @@ export class AgentHost {
       random: this.random,
       send: (intent) => this.send(intent),
       budget: () => this.budget.remaining(),
+      budgetState: () => this.budget.state(),
       fork: () => this.fork(),
       log: (message) => this.log(message),
     };

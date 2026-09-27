@@ -25,9 +25,14 @@
  * end: the full snapshot bytes, which cover what the hash does not (gold,
  * relations, attacks, executions and their PRNG state); diffSnapshots names
  * any difference.
+ *
+ * Forks come in two kinds with the same contract: a snapshot restore
+ * (ctx.fork(), new GameFork with bytes) and a structural clone
+ * (GameFork.clone, ForkSource and forkMany: one take of the game, any number
+ * of forks). The last tests hold the clones to the same standard.
  */
 import path from "path";
-import { Agent, AgentIntent } from "../../src/agent/Agent";
+import { Agent, AgentContext, AgentIntent } from "../../src/agent/Agent";
 import { AgentHost } from "../../src/agent/AgentHost";
 import { createAgent } from "../../src/agent/agents";
 import { BASELINE_DEFAULTS } from "../../src/agent/agents/BaselineAgent";
@@ -37,7 +42,12 @@ import {
   type ArenaGameSpec,
 } from "../../src/agent/arena/ArenaGame";
 import { NodeMapLoader } from "../../src/agent/arena/NodeMapLoader";
-import { GameFork, TerrainSource } from "../../src/agent/Fork";
+import {
+  forkMany,
+  ForkSource,
+  GameFork,
+  TerrainSource,
+} from "../../src/agent/Fork";
 import {
   Difficulty,
   Game,
@@ -298,6 +308,8 @@ function forkingAgent(
   latency: number,
   count: number,
   forks: GameFork[],
+  // How to fork from inside the tick; default ctx.fork(), `count` times.
+  make?: (ctx: AgentContext, count: number) => GameFork[],
 ): (inner: Agent) => Agent {
   return (inner) => ({
     name: "forking",
@@ -309,7 +321,11 @@ function forkingAgent(
       const troops = Math.floor(ctx.me.troops() / 10);
       expect(ctx.send({ type: "attack", targetID: null, troops })).toBe("ok");
       if (ctx.tick === at) {
-        for (let i = 0; i < count; i++) forks.push(ctx.fork());
+        if (make !== undefined) {
+          forks.push(...make(ctx, count));
+        } else {
+          for (let i = 0; i < count; i++) forks.push(ctx.fork());
+        }
       }
     },
   });
@@ -388,18 +404,27 @@ describe("fork fidelity (H10)", () => {
       expect(arena.host.me().hasSpawned()).toBe(false);
       expect(arena.inFlight()).toEqual([]);
       const fork = arena.host.fork();
+      // The structural clone too: spawn-phase lookahead forks here.
+      const clone = GameFork.clone(arena.game, arena.gameStart, ME);
       expect(fork.game.inSpawnPhase()).toBe(true);
+      expect(clone.game.inSpawnPhase()).toBe(true);
       arena.host.tick();
 
-      const {
-        results: [r],
-      } = lockstep(arena, [{ fork }], LOCKSTEP_TICKS / 2);
-      expect(r.intentTypes.spawn).toBe(1);
+      const { results } = lockstep(
+        arena,
+        [{ fork }, { fork: clone }],
+        LOCKSTEP_TICKS / 2,
+      );
       expect(arena.game.inSpawnPhase()).toBe(false);
-      expect(fork.game.inSpawnPhase()).toBe(false);
-      expect(fork.game.playerByClientID(ME)!.hasSpawned()).toBe(true);
-      expect(r.firstDivergence).toBeNull();
-      expect(r.snapshotDiffs).toEqual([]);
+      for (const [r, f] of results.map(
+        (x, i) => [x, [fork, clone][i]] as const,
+      )) {
+        expect(r.intentTypes.spawn).toBe(1);
+        expect(f.game.inSpawnPhase()).toBe(false);
+        expect(f.game.playerByClientID(ME)!.hasSpawned()).toBe(true);
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
+      }
     },
     TIMEOUT,
   );
@@ -511,6 +536,199 @@ describe("fork fidelity (H10)", () => {
       expect(forkMs).toBeLessThan(5000);
       expect(r.firstDivergence).toBeNull();
       expect(r.snapshotDiffs).toEqual([]);
+    },
+    TIMEOUT,
+  );
+  test(
+    "structural clones (GameFork.clone, forkMany) stay identical for 600 ticks like a restore, and never touch the real game",
+    async () => {
+      const arena = await newArena({
+        gameID: "FORKFID1",
+        map: GameMapType.Onion,
+      });
+      arena.play(WARMUP_TICKS);
+      expect(arena.inFlight()).toEqual([]);
+      const { gameStart, game } = arena;
+      const restored = arena.host.fork();
+      const cloned = GameFork.clone(game, gameStart, ME);
+      const many = forkMany(game, gameStart, ME, 3);
+      for (const f of [cloned, ...many]) {
+        expect(f.game.ticks()).toBe(game.ticks());
+        expect(hash(f.game)).toBe(hash(game));
+        expect(
+          diffSnapshots(snapshotGame(f.game), snapshotGame(restored.game)),
+        ).toEqual([]);
+      }
+
+      const { results } = lockstep(
+        arena,
+        [restored, cloned, ...many].map((fork) => ({ fork })),
+        LOCKSTEP_TICKS,
+      );
+      for (const r of results) {
+        expect(r.ticksCompared).toBe(LOCKSTEP_TICKS);
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
+      }
+
+      // Hash for hash with the game of the first test, which forked once by
+      // snapshot: five forks, three of them clones of one take, left the
+      // real game exactly as one did.
+      const twin = await newArena({
+        gameID: "FORKFID1",
+        map: GameMapType.Onion,
+      });
+      twin.play(WARMUP_TICKS + LOCKSTEP_TICKS);
+      expect(twin.hashes).toEqual(arena.hashes);
+      expect(
+        diffSnapshots(twin.runner.snapshot(), arena.runner.snapshot()),
+      ).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "forks of one take are independent: one given other intents diverges, the rest do not",
+    async () => {
+      const arena = await newArena({
+        gameID: "FORKMANY",
+        map: GameMapType.Onion,
+      });
+      arena.play(WARMUP_TICKS);
+      const { game, gameStart } = arena;
+      const source = new ForkSource(game, gameStart, ME);
+      const [ahead, odd, a] = source.forks(3);
+      const bytes = snapshotGame(a.game, { gameID: gameStart.gameID });
+      // One fork stepped ahead alone changes neither its siblings nor what
+      // the source hands out next.
+      ahead.advance(50);
+      const b = source.fork();
+      for (const f of [a, b]) {
+        expect(
+          diffSnapshots(
+            snapshotGame(f.game, { gameID: gameStart.gameID }),
+            bytes,
+          ),
+        ).toEqual([]);
+      }
+      const forkTick = game.ticks();
+      const troops = Math.floor(arena.host.me().troops() / 2);
+      const {
+        results: [rOdd, rA, rB],
+      } = lockstep(
+        arena,
+        [
+          // An extra attack in its first step, sent as the agent.
+          {
+            fork: odd,
+            intentsFor: (turn, real) =>
+              turn === forkTick
+                ? [
+                    ...real,
+                    { type: "attack", targetID: null, troops, clientID: ME },
+                  ]
+                : real,
+          },
+          { fork: a },
+          { fork: b },
+        ],
+        LOCKSTEP_TICKS / 2,
+      );
+      expect(rOdd.firstDivergence).toBe(forkTick + 1);
+      for (const r of [rA, rB]) {
+        expect(r.firstDivergence).toBeNull();
+        expect(r.snapshotDiffs).toEqual([]);
+      }
+      // The source refuses once the game has moved on.
+      expect(() => source.fork()).toThrow(/tick/);
+    },
+    TIMEOUT,
+  );
+
+  test.each([1, 3])(
+    "clones made from inside the agent's tick need the same replay of intents in flight (latency %i)",
+    async (latency) => {
+      const forks: GameFork[] = [];
+      // Read when the agent forks, during play: set by then.
+      let start: GameStartInfo | null = null;
+      const arena = await newArena({
+        gameID: `FORKCLN${latency}`,
+        map: GameMapType.Onion,
+        latencyTicks: latency,
+        wrap: forkingAgent(WARMUP_TICKS, latency, 2, forks, (ctx, n) =>
+          new ForkSource(ctx.game, start!, ctx.clientID).forks(n),
+        ),
+      });
+      start = arena.gameStart;
+      arena.play(WARMUP_TICKS);
+      expect(forks).toHaveLength(2);
+      const forkTick = arena.game.ticks();
+      expect(forks[0].game.ticks()).toBe(forkTick);
+      const inFlight = new Set(arena.inFlight());
+      expect(inFlight.size).toBeGreaterThanOrEqual(latency);
+      const notInFlight = (real: StampedIntent[]) =>
+        real.filter((x) => !inFlight.has(x));
+      const {
+        results: [replayed, dropped],
+      } = lockstep(
+        arena,
+        [
+          { fork: forks[0] },
+          { fork: forks[1], intentsFor: (_, real) => notInFlight(real) },
+        ],
+        LOCKSTEP_TICKS / 2,
+      );
+      expect(replayed.firstDivergence).toBeNull();
+      expect(replayed.snapshotDiffs).toEqual([]);
+      expect(dropped.firstDivergence).toBe(forkTick + 1);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "clone time on World mid-game against a restore, and fidelity there",
+    async () => {
+      const arena = await newArena({
+        gameID: "FORKWRLD",
+        map: GameMapType.World,
+      });
+      arena.play(WORLD_FORK_TICK);
+      expect(arena.inFlight()).toEqual([]);
+      const { game, gameStart, host } = arena;
+      const median = (xs: number[]) =>
+        [...xs].sort((x, y) => x - y)[xs.length >> 1];
+      const restoreMs: number[] = [];
+      const cloneMs: number[] = [];
+      let fork: GameFork | null = null;
+      for (let i = 0; i < 3; i++) {
+        let t = performance.now();
+        host.fork();
+        restoreMs.push(performance.now() - t);
+        t = performance.now();
+        fork = GameFork.clone(game, gameStart, ME);
+        cloneMs.push(performance.now() - t);
+      }
+      const t = performance.now();
+      const many = new ForkSource(game, gameStart, ME).forks(3);
+      const manyMs = (performance.now() - t) / 3;
+      const {
+        results: [r, ...rm],
+      } = lockstep(
+        arena,
+        [fork!, ...many].map((f) => ({ fork: f })),
+        WORLD_LOCKSTEP_TICKS,
+      );
+      console.log(
+        `World tick ${WORLD_FORK_TICK}: fork by snapshot and restore ` +
+          `${median(restoreMs).toFixed(0)} ms, by structural clone ` +
+          `${median(cloneMs).toFixed(0)} ms, ${manyMs.toFixed(0)} ms each ` +
+          `for 3 from one take (medians of 3)`,
+      );
+      expect(median(cloneMs)).toBeLessThan(median(restoreMs));
+      for (const x of [r, ...rm]) {
+        expect(x.firstDivergence).toBeNull();
+        expect(x.snapshotDiffs).toEqual([]);
+      }
     },
     TIMEOUT,
   );

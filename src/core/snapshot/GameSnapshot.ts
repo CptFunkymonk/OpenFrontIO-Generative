@@ -15,11 +15,12 @@ import {
   TeamGameSpawnAreas,
   Unit,
 } from "../game/Game";
-import { GameImpl, GameSnapshot } from "../game/GameImpl";
+import { GameImpl, GameSnapshot, GameState } from "../game/GameImpl";
 import { GameMap, GameMapImpl, GameMapSnapshot } from "../game/GameMap";
 import { PlayerImpl, PlayerSnapshot } from "../game/PlayerImpl";
 import { Railroad, RailroadSnapshot } from "../game/Railroad";
 import { StatsImpl } from "../game/StatsImpl";
+import type { TileSet } from "../game/TileSet";
 import {
   Cluster,
   ClusterSnapshot,
@@ -110,11 +111,31 @@ export function snapshotGame(
   return encodeSnapshotValue(snapshotGameData(game, opts));
 }
 
-/** The snapshot as plain data, before encoding. Exposed for tests/tools. */
-export function snapshotGameData(game: Game, opts: SnapshotOptions = {}): Root {
-  const g = game as GameImpl;
-  const w = new SnapshotWriter(g);
+/**
+ * Every stored object but the maps, as the snapshot's tables hold them (see
+ * Root). Shared by the snapshot and the structural clone (GameClone.ts).
+ */
+export interface SnapshotRecords {
+  game: Versioned;
+  players: Versioned[];
+  units: Versioned[];
+  attacks: Versioned[];
+  alliances: Versioned[];
+  allianceRequests: Versioned[];
+  stations: Versioned[];
+  railroads: Versioned[];
+  clusters: Versioned[];
+  execs: ExecRecord[];
+}
 
+/**
+ * Writes the players, the game state and every table they reference, in
+ * table order, with `w` assigning the references.
+ */
+export function writeSnapshotRecords(
+  g: GameImpl,
+  w: SnapshotWriter,
+): SnapshotRecords {
   const players = g.allPlayers().map((p) => {
     return w.versioned(PlayerSnapshot, (p as PlayerImpl).snapshot(w));
   });
@@ -181,21 +202,8 @@ export function snapshotGameData(game: Game, opts: SnapshotOptions = {}): Root {
       w.versioned(ClusterSnapshot, c.snapshot(w)),
     );
   }
-
   return {
-    magic: SNAPSHOT_MAGIC,
-    format: SNAPSHOT_FORMAT_VERSION,
-    gitCommit: opts.gitCommit ?? "",
-    gameID: opts.gameID ?? null,
-    tick: g.ticks(),
-    // Canonical (schema) key order, which is what a restored game holds.
-    gameConfig: GameConfigSchema.parse(g.config().gameConfig()),
     game: gameState,
-    map: w.versioned(GameMapSnapshot, (g.map() as GameMapImpl).snapshot()),
-    miniMap: w.versioned(
-      GameMapSnapshot,
-      (g.miniMap() as GameMapImpl).snapshot(),
-    ),
     players,
     units,
     attacks,
@@ -205,6 +213,38 @@ export function snapshotGameData(game: Game, opts: SnapshotOptions = {}): Root {
     railroads,
     clusters,
     execs,
+  };
+}
+
+/** The snapshot as plain data, before encoding. Exposed for tests/tools. */
+export function snapshotGameData(game: Game, opts: SnapshotOptions = {}): Root {
+  const g = game as GameImpl;
+  const w = new SnapshotWriter(g);
+  const rec = writeSnapshotRecords(g, w);
+
+  return {
+    magic: SNAPSHOT_MAGIC,
+    format: SNAPSHOT_FORMAT_VERSION,
+    gitCommit: opts.gitCommit ?? "",
+    gameID: opts.gameID ?? null,
+    tick: g.ticks(),
+    // Canonical (schema) key order, which is what a restored game holds.
+    gameConfig: GameConfigSchema.parse(g.config().gameConfig()),
+    game: rec.game,
+    map: w.versioned(GameMapSnapshot, (g.map() as GameMapImpl).snapshot()),
+    miniMap: w.versioned(
+      GameMapSnapshot,
+      (g.miniMap() as GameMapImpl).snapshot(),
+    ),
+    players: rec.players,
+    units: rec.units,
+    attacks: rec.attacks,
+    alliances: rec.alliances,
+    allianceRequests: rec.allianceRequests,
+    stations: rec.stations,
+    railroads: rec.railroads,
+    clusters: rec.clusters,
+    execs: rec.execs,
   };
 }
 
@@ -280,6 +320,33 @@ export function restoreGame(bytes: Uint8Array, deps: RestoreDeps): Game {
     readVersioned(GameMapSnapshot, root.miniMap),
   );
 
+  const game = newRestoredGame(state, config, deps);
+  const playerShells = restoreSnapshotRecords(game, state, root);
+
+  // Tile ownership lives in the players' tile lists, not the map snapshot.
+  const map = deps.gameMap;
+  for (const p of playerShells) {
+    const id = p.smallID();
+    for (const tile of p.tiles()) map.setOwnerID(tile, id);
+  }
+  return game;
+}
+
+/**
+ * The empty game a restore fills: players, teams and executions come from
+ * the records. `cloneOf` is the game a structural clone copies its maps from
+ * (GameClone.ts).
+ */
+export function newRestoredGame(
+  state: GameState,
+  config: Config,
+  maps: {
+    gameMap: GameMap;
+    miniGameMap: GameMap;
+    teamGameSpawnAreas?: TeamGameSpawnAreas;
+  },
+  cloneOf?: GameImpl,
+): GameImpl {
   const humans = state.humans.map(newPlayerInfo);
   const nations = state.nations.map(
     (n) =>
@@ -288,19 +355,34 @@ export function restoreGame(bytes: Uint8Array, deps: RestoreDeps): Game {
         newPlayerInfo(n.playerInfo),
       ),
   );
-  const game = new GameImpl(
+  return new GameImpl(
     humans,
     nations,
-    deps.gameMap,
-    deps.miniGameMap,
+    maps.gameMap,
+    maps.miniGameMap,
     config,
     new StatsImpl(),
-    deps.teamGameSpawnAreas,
+    maps.teamGameSpawnAreas,
     true,
+    cloneOf,
   );
+}
 
+/**
+ * Restores every record onto `game` (from newRestoredGame): an empty shell
+ * per row, then each shell filled, then the game state. Returns the player
+ * shells in record order. `tileSets` resolves structural-mode placeholders
+ * (SnapshotWriter.tileSets). Records are read with readVersioned, so they
+ * must be this call's own copy: restore may keep what it reads.
+ */
+export function restoreSnapshotRecords(
+  game: GameImpl,
+  state: GameState,
+  records: Omit<SnapshotRecords, "game">,
+  tileSets?: ReadonlyMap<Uint32Array, TileSet>,
+): PlayerImpl[] {
   // Pass 1: an empty shell for every object, so references resolve.
-  const players = root.players.map((p) => readVersioned(PlayerSnapshot, p));
+  const players = records.players.map((p) => readVersioned(PlayerSnapshot, p));
   const playerShells = players.map((p) => {
     const shell = Object.create(PlayerImpl.prototype) as PlayerImpl;
     game.addRestoredPlayer(shell, p.info.id, p.smallID);
@@ -308,49 +390,49 @@ export function restoreGame(bytes: Uint8Array, deps: RestoreDeps): Game {
   });
 
   const shells = <S, T>(
-    records: unknown[],
+    rows: unknown[],
     type: SnapshotType<S>,
     proto: object,
   ): { data: S[]; objs: T[] } => {
-    const data = records.map((r) => readVersioned(type, r));
+    const data = rows.map((r) => readVersioned(type, r));
     return { data, objs: data.map(() => Object.create(proto) as T) };
   };
   const units = shells<unknown, UnitImpl>(
-    root.units,
+    records.units,
     UnitSnapshot,
     UnitImpl.prototype,
   );
   const attacks = shells<unknown, AttackImpl>(
-    root.attacks,
+    records.attacks,
     AttackSnapshot,
     AttackImpl.prototype,
   );
   const alliances = shells<unknown, AllianceImpl>(
-    root.alliances,
+    records.alliances,
     AllianceSnapshot,
     AllianceImpl.prototype,
   );
   const requests = shells<unknown, AllianceRequestImpl>(
-    root.allianceRequests,
+    records.allianceRequests,
     AllianceRequestSnapshot,
     AllianceRequestImpl.prototype,
   );
   const stations = shells<unknown, TrainStation>(
-    root.stations,
+    records.stations,
     TrainStationSnapshot,
     TrainStation.prototype,
   );
   const railroads = shells<unknown, Railroad>(
-    root.railroads,
+    records.railroads,
     RailroadSnapshot,
     Railroad.prototype,
   );
   const clusters = shells<unknown, Cluster>(
-    root.clusters,
+    records.clusters,
     ClusterSnapshot,
     Cluster.prototype,
   );
-  const execData = root.execs.map((rec) => {
+  const execData = records.execs.map((rec) => {
     const type = execTypes.get(rec.t);
     if (type === undefined) {
       throw new SnapshotError(`unknown execution type ${rec.t}`);
@@ -371,6 +453,7 @@ export function restoreGame(bytes: Uint8Array, deps: RestoreDeps): Game {
     railroads: railroads.objs,
     clusters: clusters.objs,
     playerIds: new Map(players.map((p) => [p.smallID, p.info.id])),
+    tileSets,
   });
 
   // Pass 2: fill every shell. Players first, so PlayerInfo identity and
@@ -397,14 +480,7 @@ export function restoreGame(bytes: Uint8Array, deps: RestoreDeps): Game {
     ).restoreSnapshot(data, r);
   });
   game.restoreState(state, r);
-
-  // Tile ownership lives in the players' tile lists, not the map snapshot.
-  const map = deps.gameMap;
-  for (const p of playerShells) {
-    const id = p.smallID();
-    for (const tile of p.tiles()) map.setOwnerID(tile, id);
-  }
-  return game;
+  return playerShells;
 }
 
 /** gzip, via CompressionStream (browser, worker and Node 18+). */

@@ -1,4 +1,8 @@
-import { IntentBudgetRemaining } from "./Agent";
+import {
+  IntentBudgetRemaining,
+  IntentBudgetState,
+  LimiterState,
+} from "./Agent";
 
 // Mirrors src/server/ClientMsgRateLimiter.ts. An agent tuned against these
 // numbers offline never has an intent silently dropped by a real server.
@@ -60,6 +64,16 @@ class IntervalLimiter {
     this.content -= 1;
     this.usedInWindow += 1;
   }
+
+  /** A copy of the internal state, as the last call left it. */
+  state(): LimiterState {
+    return {
+      content: this.content,
+      lastDripMs: this.lastDripMs,
+      windowStartMs: this.windowStartMs,
+      usedInWindow: this.usedInWindow,
+    };
+  }
 }
 
 /**
@@ -103,5 +117,21 @@ export class IntentBudget {
     this.perSecond.take();
     this.perMinute.take();
     return true;
+  }
+
+  /**
+   * Package WP1 (docs/14-m4-plan.md §2.2): a copy of both limiters' state
+   * and the clock's reading, for an exact BudgetMirror in rollouts; null
+   * when rate limiting is off. Read only: the limiters are not brought up
+   * to now (a mirror does that on its copy), so reading it never moves a
+   * refill or a window.
+   */
+  state(): IntentBudgetState | null {
+    if (!this.enabled) return null;
+    return {
+      nowMs: this.nowMs(),
+      perSecond: this.perSecond.state(),
+      perMinute: this.perMinute.state(),
+    };
   }
 }

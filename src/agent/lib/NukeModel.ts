@@ -194,6 +194,31 @@ export class NukeModel {
     this.ffa = gc.gameMode === GameMode.FFA;
   }
 
+  /**
+   * Package WP1 (docs/14-m4-plan.md §2.2): a copy bound to `game`, a fork of
+   * this model's game at the same tick, with `me` its player there and `nm`
+   * its NationModel. It carries what observe and exposures remember from
+   * tick to tick: the launch counts behind the perceived prices, the bombs
+   * seen, the silo owners' gold samples and the nations whose ladder named
+   * us. The per-tick caches (ranking, exposures) hold players of this game
+   * and are rebuilt at their first use in the copy: at the start of a live
+   * tick they hold an earlier tick's values, which neither model reads
+   * again.
+   */
+  cloneFor(game: Game, me: Player, nm: NationModel): NukeModel {
+    const c = new NukeModel(game, me, nm);
+    for (const [id, l] of this.launches) c.launches.set(id, { ...l });
+    for (const id of this.seen) c.seen.add(id);
+    for (const [id, log] of this.goldLog) {
+      c.goldLog.set(
+        id,
+        log.map((e) => ({ ...e })),
+      );
+    }
+    for (const [id, e] of this.named) c.named.set(id, { ...e });
+    return c;
+  }
+
   /** N's next decision tick at or after `from` (NationModel.nextDecision:
    *  exact from the gameID, NationParams pin). */
   nextDecision(n: PlayerID, from: number): number {

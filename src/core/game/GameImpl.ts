@@ -163,6 +163,9 @@ export class GameImpl implements Game {
     // Restoring a snapshot: skip team and player setup, the snapshot
     // supplies both (see restoreState).
     restoring: boolean = false,
+    // A structural clone (snapshot/GameClone.ts): the game the maps were
+    // copied from, whose water graph can be copied instead of rebuilt.
+    cloneOf?: GameImpl,
   ) {
     const constructorStart = performance.now();
 
@@ -175,6 +178,7 @@ export class GameImpl implements Game {
       this._map,
       this.miniGameMap,
       _config.disableNavMesh(),
+      cloneOf?._waterManager,
     );
     this._sharedWaterCache = new SharedWaterCache(this);
 
@@ -1064,6 +1068,11 @@ export class GameImpl implements Game {
 
   totalLandTiles(): number {
     return Math.max(0, this.numLandTiles() - this.numTilesWithFallout());
+  }
+
+  /** The map's team spawn areas, as the game was built with them. */
+  teamGameSpawnAreas(): TeamGameSpawnAreas | undefined {
+    return this._teamGameSpawnAreas;
   }
 
   teamSpawnArea(team: Team): SpawnArea | undefined {

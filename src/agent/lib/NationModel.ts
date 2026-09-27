@@ -727,6 +727,51 @@ export class NationModel {
     this.betrayals = me.betrayals();
   }
 
+  /**
+   * Package WP1 (docs/14-m4-plan.md §2.2): an exact copy bound to `game`, a
+   * fork of this model's game at the same tick (or the same game, as a
+   * private copy), with `me` its player there and `models` over it. It
+   * carries everything observe and the forecasts remember: the tracked
+   * nations and their parameters, the troopsAt memo, the relation tracker,
+   * decision bookkeeping, our attack, alliance, request, target and nuke
+   * sets, the warship watch, expiries, breaks and the log. A model built
+   * cold instead forecasts from a first observe, so a rollout's gates,
+   * troopsAt and alliance forecasts would differ from the live policy's.
+   * Players are looked up again in `game` by id; the copy shares nothing
+   * mutable with this one.
+   */
+  cloneFor(game: Game, me: Player, models: Models): NationModel {
+    const c = new NationModel(game, me, this.gameID, models);
+    c.relations = relationTracker(this.relations.toData());
+    for (const [k, v] of this.byId) c.byId.set(k, structuredClone(v));
+    for (const [k, v] of this.paramsCache) {
+      c.paramsCache.set(k, structuredClone(v));
+    }
+    for (const [k, v] of this.troopPath) {
+      c.troopPath.set(k, structuredClone(v));
+    }
+    c.nationList = this.nationList
+      .filter((p) => game.hasPlayer(p.id()))
+      .map((p) => game.player(p.id()));
+    c.nonBotAlive = this.nonBotAlive;
+    c.listAt = this.listAt;
+    c.lastObserve = this.lastObserve;
+    c.firstDecision = this.firstDecision;
+    c.ourAttackIDs = new Set(this.ourAttackIDs);
+    c.allies = new Set(this.allies);
+    c.requestsToUs = new Set(this.requestsToUs);
+    c.ourRequests = new Set(this.ourRequests);
+    c.ourTargets = new Set(this.ourTargets);
+    c.ourNukeIDs = new Set(this.ourNukeIDs);
+    c.nukeLaunched = this.nukeLaunched;
+    c.warshipWatch = structuredClone(this.warshipWatch);
+    c.allyExpiry = new Map(this.allyExpiry);
+    c.broken = [...this.broken];
+    c.betrayals = this.betrayals;
+    for (const line of this.log) c.log.push(line);
+    return c;
+  }
+
   // ── Observation ────────────────────────────────────────────────────────
 
   /** Every tick, O(nations deciding this tick + new attack IDs): records

@@ -227,32 +227,85 @@ export function navalMemory(s: ApexState): NavalMemory {
   return s.naval;
 }
 
-/** The voyage field of an OwnerGrid's decisions (one BFS per grid), from
- *  our ocean-shore border then: a memo of plain data. */
-const voyageMemo = new WeakMap<OwnerGrid, { mine: number; f: VoyageField }>();
+/**
+ * The naval memos of one policy (package WP1, docs/14-m4-plan.md §2.2),
+ * keyed by the OwnerGrid's stamp: the voyage field (from our ocean-shore
+ * border at the grid's first boat decision), RaceField.nationReach and
+ * landmassFood, each computed once per grid (one pass or BFS) and stale by
+ * design until the next grid. The policy keeps one in its runtime
+ * (View.navalMemos); a rollout copy starts from copy() of the live
+ * policy's, so it decides on the very fields the live policy does, and what
+ * it computes for its own later grids stays its own. Keyed by the grid
+ * object instead (before WP1), a copy's cloned grid missed them and
+ * recomputed them from the copy's later state: on Onion at tick 1,806 the
+ * copy launched two boats at targets the live policy judged guarded
+ * (/tmp/claude-0/growth/search.md §2.2).
+ */
+export class NavalMemos {
+  voyage: { stamp: number; mine: number; f: VoyageField } | null = null;
+  reach: {
+    stamp: number;
+    mine: number;
+    grid: RaceGrid;
+    box: number;
+    r: NationReach;
+  } | null = null;
+  food: { stamp: number; mine: number; f: LandmassFood } | null = null;
 
-function voyageOf(v: View, grid: RaceGrid, og: OwnerGrid): VoyageField {
+  /** Deep copies of the memos (the race grid is shared: it never changes). */
+  copy(): NavalMemos {
+    const c = new NavalMemos();
+    if (this.voyage !== null) c.voyage = structuredClone(this.voyage);
+    if (this.reach !== null) {
+      const { grid, ...rest } = this.reach;
+      c.reach = { ...structuredClone(rest), grid };
+    }
+    if (this.food !== null) c.food = structuredClone(this.food);
+    return c;
+  }
+}
+
+/** The memos of a View built without the policy's (tests): one set per
+ *  OwnerGrid object. */
+const viewlessMemos = new WeakMap<OwnerGrid, NavalMemos>();
+
+function memosOf(v: Pick<View, "navalMemos">, og: OwnerGrid): NavalMemos {
+  if (v.navalMemos !== undefined) return v.navalMemos;
+  let m = viewlessMemos.get(og);
+  if (m === undefined) {
+    m = new NavalMemos();
+    viewlessMemos.set(og, m);
+  }
+  return m;
+}
+
+/** The voyage field of an OwnerGrid's decisions (one BFS per grid), from
+ *  our ocean-shore border then. Exported for tests. */
+export function voyageOf(
+  v: Pick<View, "game" | "me" | "wm" | "navalMemos">,
+  grid: RaceGrid,
+  og: OwnerGrid,
+): VoyageField {
+  const memos = memosOf(v, og);
   const mine = v.me.smallID();
-  const memo = voyageMemo.get(og);
-  if (memo !== undefined && memo.mine === mine) return memo.f;
+  const memo = memos.voyage;
+  if (memo !== null && memo.stamp === og.stamp && memo.mine === mine) {
+    return memo.f;
+  }
   const f = voyageField(v.game, grid, v.wm.shoreSample);
-  voyageMemo.set(og, { mine, f });
+  memos.voyage = { stamp: og.stamp, mine, f };
   return f;
 }
 
-/** RaceField.nationReach of an OwnerGrid (one pass and one BFS per grid):
- *  a memo of plain data, like voyageOf. */
-const nationReachMemo = new WeakMap<
-  OwnerGrid,
-  { mine: number; grid: RaceGrid; box: number; r: NationReach }
->();
-
+/** RaceField.nationReach of an OwnerGrid (one pass and one BFS per grid). */
 function nationReachOf(v: View, grid: RaceGrid, og: OwnerGrid): NationReach {
+  const memos = memosOf(v, og);
   const mine = v.me.smallID();
   const box = v.o.boatMidNationBoat;
-  const memo = nationReachMemo.get(og);
+  const memo = memos.reach;
   if (
-    memo !== undefined &&
+    memo !== null &&
+    memo.stamp === og.stamp &&
     memo.mine === mine &&
     memo.grid === grid &&
     memo.box === box
@@ -260,7 +313,7 @@ function nationReachOf(v: View, grid: RaceGrid, og: OwnerGrid): NationReach {
     return memo.r;
   }
   const r = nationReach(v.game, grid, og, v.me, box);
-  nationReachMemo.set(og, { mine, grid, box, r });
+  memos.reach = { stamp: og.stamp, mine, grid, box, r };
   return r;
 }
 
@@ -317,21 +370,23 @@ export function foodProjection(
   };
 }
 
-/** landmassFood of an OwnerGrid for one player: a memo of plain data (the
- *  grid never changes once built). */
-const foodMemo = new WeakMap<OwnerGrid, { mine: number; f: LandmassFood }>();
-
+/** landmassFood of an OwnerGrid for one player (the grid never changes
+ *  once built). */
 function foodOf(
+  v: Pick<View, "navalMemos">,
   game: Game,
   grid: RaceGrid,
   og: OwnerGrid,
   me: Player,
 ): LandmassFood {
+  const memos = memosOf(v, og);
   const mine = me.smallID();
-  const memo = foodMemo.get(og);
-  if (memo !== undefined && memo.mine === mine) return memo.f;
+  const memo = memos.food;
+  if (memo !== null && memo.stamp === og.stamp && memo.mine === mine) {
+    return memo.f;
+  }
   const f = landmassFood(game, grid, og, me);
-  foodMemo.set(og, { mine, f });
+  memos.food = { stamp: og.stamp, mine, f };
   return f;
 }
 
@@ -393,7 +448,11 @@ export class NavalController implements Controller {
     // The far targets' food trend needs every OwnerGrid, boat decision or
     // not.
     if (o.boatsMidgame && o.boatMidFar && race !== null && owners !== null) {
-      recordFood(navalMemory(s), foodOf(game, race, owners, me), owners.stamp);
+      recordFood(
+        navalMemory(s),
+        foodOf(v, game, race, owners, me),
+        owners.stamp,
+      );
     }
     if (tick - s.timers.lastBoat < o.boatEvery) return;
     const max = game.config().boatMaxNumber();
@@ -403,7 +462,7 @@ export class NavalController implements Controller {
     // No send could go out (class cap, budget): no probes either.
     if (v.scheduler.classLeft("boat") < 1) return;
     if (v.scheduler.intentsLeft(Prio.Boat) < 1) return;
-    const food = foodOf(game, race, owners, me);
+    const food = foodOf(v, game, race, owners, me);
     const trigger = boatTrigger(v, s, food);
     if (trigger === null) return;
     s.timers.lastBoat = tick;

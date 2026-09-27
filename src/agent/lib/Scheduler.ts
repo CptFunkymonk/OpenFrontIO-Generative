@@ -166,6 +166,9 @@ export interface SchedulerStats {
   refused: Record<Refusal, number>;
   /** Class-cap refusals by class (logs only). */
   classCapped: Partial<Record<IntentClass, number>>;
+  /** Refusals by a vetoed key, counted under refused.key too (logs and
+   *  tests). */
+  vetoed: number;
   sent: number;
   rateLimited: number;
   invalid: number;
@@ -189,6 +192,7 @@ export class Scheduler {
       dupGuard: 0,
     },
     classCapped: {},
+    vetoed: 0,
     sent: 0,
     rateLimited: 0,
     invalid: 0,
@@ -202,6 +206,8 @@ export class Scheduler {
   private purse: Purse | null = null;
   private accepted: Proposal[] = [];
   private readonly keys = new Set<string>();
+  /** Keys refused for the rest of the tick (veto); cleared by begin. */
+  private readonly vetoedKeys = new Set<string>();
   private readonly acceptedByClass = new Map<IntentClass, number>();
   /** Ticks of sends in the last minute, by class (oldest first). */
   private readonly window = new Map<IntentClass, number[]>();
@@ -223,8 +229,33 @@ export class Scheduler {
     this.ticksPerMinute = Math.max(1, Math.round(60_000 / msPerTick));
   }
 
+  /**
+   * Package WP1 (docs/14-m4-plan.md §2.2): takes the memory another
+   * Scheduler carries from tick to tick, the per-class send windows and the
+   * tick of the last cancel (DUP_GUARD_TICKS), so a rollout copy of the
+   * policy starts where the live one is. A fresh Scheduler starts its class
+   * caps empty and would send what the live one is capped out of. Stats and
+   * everything begin resets are not copied.
+   */
+  copyFrom(other: Scheduler): void {
+    this.window.clear();
+    for (const [cls, ticks] of other.window) this.window.set(cls, [...ticks]);
+    this.lastCancel = other.lastCancel;
+  }
+
+  /**
+   * Package WP1: refuses offers with this key until the next begin, as if
+   * the key had been taken this tick (Refusal "key"; stats.vetoed counts
+   * them). The policy vetoes `ally:<id>` and `ext:<id>` of the search's foe
+   * marks after each begin: no alliance request, extension or
+   * counter-accept goes to a foe.
+   */
+  veto(key: string): void {
+    this.vetoedKeys.add(key);
+  }
+
   /** Start of tick: copies ctx.budget(). Drops whatever an earlier tick
-   *  accepted and did not flush. */
+   *  accepted and did not flush, and the last tick's vetoes. */
   begin(tick: number, remaining: IntentBudgetRemaining, purse: Purse): void {
     this.tick = tick;
     this.perSecond = remaining.perSecond;
@@ -232,6 +263,7 @@ export class Scheduler {
     this.purse = purse;
     this.accepted = [];
     this.keys.clear();
+    this.vetoedKeys.clear();
     this.acceptedByClass.clear();
     const oldest = tick - this.ticksPerMinute;
     for (const ticks of this.window.values()) {
@@ -389,6 +421,10 @@ export class Scheduler {
   private check(p: Proposal): Refusal | null {
     if (this.purse === null) return "notBegun";
     if (p.key !== undefined && this.keys.has(p.key)) return "key";
+    if (p.key !== undefined && this.vetoedKeys.has(p.key)) {
+      this.stats.vetoed++;
+      return "key";
+    }
     if (p.intent.type === "attack") {
       const since = this.tick - this.lastCancel;
       if (since >= DUP_GUARD_TICKS[0] && since <= DUP_GUARD_TICKS[1]) {

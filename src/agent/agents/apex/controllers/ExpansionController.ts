@@ -35,9 +35,10 @@ import type { ApexState } from "../state";
 // Without this, snacks on counter-attacking tribes were cancelled at launch
 // and launches started below their clamp (Europe, arena apex-k1).
 //
-// Pure given (View, ApexState): no ctx.random, no clock. The only memory
-// outside ApexState is `nearTribes`, a by-product of the last decision's
-// border scans that the policy adds to its NationModel refresh list.
+// Pure given (View, ApexState): no ctx.random, no clock, no memory outside
+// ApexState. `s.nearTribes` is a by-product of the last decision's border
+// scans that the policy adds to its NationModel refresh list (package WP1
+// moved it into the state, docs/14-m4-plan.md §2.2).
 
 /** A tribe of at most this many tiles falls to its first lost tile:
  *  handleDeadDefender conquers a player left under 100 tiles
@@ -483,19 +484,14 @@ interface Candidate {
 
 export class ExpansionController implements Controller {
   readonly name = "expansion";
-  /** Nations touching the tribes scanned at the last decision (for the
-   *  policy's NationModel refresh list: contest and buffer read their
-   *  NationState). */
-  private nearTribes: PlayerID[] = [];
 
-  nationsNearTribes(): readonly PlayerID[] {
-    return this.nearTribes;
-  }
-
+  /** Nations touching the tribes scanned at the last decision, into
+   *  s.nearTribes (for the policy's NationModel refresh list: contest and
+   *  buffer read their NationState). */
   decide(v: View, s: ApexState): void {
     const run = new AllocatorRun(v, s);
     run.all();
-    this.nearTribes = run.nearNations();
+    s.nearTribes = run.nearNations();
   }
 }
 
@@ -881,7 +877,7 @@ class AllocatorRun {
    *   with us, or its free-land lock is off) with a tribe budget ≥ 2·D;
    * - else 1.
    * Only nations with a full NationModel refresh are judged; the others
-   * are handed to the policy's refresh list (nationsNearTribes).
+   * are handed to the policy's refresh list (s.nearTribes).
    */
   private weight(c: Candidate): number {
     const { v, o } = this;

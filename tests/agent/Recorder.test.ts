@@ -13,6 +13,7 @@ import {
   STANDING_MINUTES,
   standingPoint,
 } from "../../src/agent/arena/Recorder";
+import { landShare } from "../../src/agent/lib/Perception";
 import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { NukeExecution } from "../../src/core/execution/NukeExecution";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
@@ -427,6 +428,49 @@ describe("IncomingLog", () => {
     expect(log.attacks).toEqual({ nation: 2, bot: 0, human: 1 });
     expect(log.attackTroops).toEqual({ nation: 150, bot: 0, human: 70 });
   });
+
+  test("lists each launch it counts, at the tick it came", () => {
+    const log = new IncomingLog();
+    const nation = (id: string, troops: number) => ({
+      id,
+      attacker: 3,
+      attackerType: PlayerType.Nation,
+      troops,
+      boat: false,
+    });
+    log.observe([nation("a", 100)], 40);
+    log.observe([nation("a", 90)], 41);
+    // A boat is listed when it sails (the recorder's unit updates), not
+    // when its attack appears at the landing.
+    log.launched(PlayerType.Bot, 25.4, { tick: 42, attacker: 5, boat: true });
+    log.observe([nation("b", 150), { ...nation("c", 25), boat: true }], 60);
+    expect(log.launches).toEqual([
+      {
+        tick: 40,
+        attacker: 3,
+        type: PlayerType.Nation,
+        troops: 100,
+        boat: false,
+      },
+      { tick: 42, attacker: 5, type: PlayerType.Bot, troops: 25, boat: true },
+      // b absorbed a's 90: only the 60 it added is a launch.
+      {
+        tick: 60,
+        attacker: 3,
+        type: PlayerType.Nation,
+        troops: 60,
+        boat: false,
+      },
+    ]);
+    expect(log.launchesDropped).toBe(0);
+    // Past the cap they are counted, not listed.
+    for (let i = log.launches.length; i < MAX_ATTACK_RECORDS + 3; i++) {
+      log.launched(PlayerType.Nation, 1, { tick: i, attacker: 3, boat: false });
+    }
+    expect(log.launches).toHaveLength(MAX_ATTACK_RECORDS);
+    expect(log.launchesDropped).toBe(3);
+    expect(log.attacks.nation).toBe(2 + MAX_ATTACK_RECORDS + 3 - 3);
+  });
 });
 
 describe("ArenaRecorder", () => {
@@ -504,6 +548,16 @@ describe("ArenaRecorder", () => {
     const received = recorder.records(1).received;
     expect(received.attacks).toEqual({ nation: 0, bot: 0, human: 1 });
     expect(received.attackTroops.human).toBe(5000);
+    // Listed when the boat set sail, the tick of our record's start.
+    expect(received.launches).toEqual([
+      {
+        tick: attacks[1].startTick,
+        by: { name: "seat a", type: PlayerType.Human },
+        troops: 5000,
+        boat: true,
+      },
+    ]);
+    expect(received.launchesDropped).toBe(0);
     expect(received.eliminatedBy).toEqual({
       name: "seat a",
       type: PlayerType.Human,
@@ -513,7 +567,7 @@ describe("ArenaRecorder", () => {
   });
 
   test("a nuke aimed at a seat's land counts once, for that seat", async () => {
-    const { game, a, recorder, step } = await islandGame();
+    const { game, a, b, recorder, step } = await islandGame();
     constructionExecution(game, a, 3, 7, UnitType.MissileSilo, 0);
     for (let i = 0; i < 5; i++) step();
     expect(a.units(UnitType.MissileSilo)).toHaveLength(1);
@@ -522,10 +576,14 @@ describe("ArenaRecorder", () => {
       new NukeExecution(UnitType.AtomBomb, a, game.ref(15, 7), null),
     );
     let launched: number | null = null;
+    let share = 0;
+    let gold = 0n;
     for (let i = 0; i < 60; i++) {
       step();
       if (launched === null && a.units(UnitType.AtomBomb).length > 0) {
         launched = game.ticks(); // as the arena counts: ticks executed
+        share = landShare(game, game.player(b.id()));
+        gold = a.gold();
       }
     }
     expect(launched).not.toBeNull();
@@ -537,7 +595,19 @@ describe("ArenaRecorder", () => {
       mirvWarhead: 0,
     });
     expect(received.firstNukeTick).toBe(launched);
+    // The bomb with our share and the sender's gold when it was launched.
+    expect(share).toBeGreaterThan(0);
+    expect(received.nukeLog).toEqual([
+      {
+        tick: launched,
+        type: "atom",
+        by: { name: "seat a", type: PlayerType.Human },
+        share: Math.round(share * 10000) / 10000,
+        gold: Number(gold),
+      },
+    ]);
     expect(recorder.records(0).received.nukes.atom).toBe(0);
+    expect(recorder.records(0).received.nukeLog).toEqual([]);
     expectOwnersInSync(game, recorder);
   });
 });
@@ -742,6 +812,25 @@ describe("arena records", () => {
       for (const k of ["nation", "bot", "human"] as const) {
         if (rec.attacks[k] === 0) expect(rec.attackTroops[k]).toBe(0);
       }
+      // Every counted launch is listed, in order, with the troops counted.
+      const listed = rec.launches!;
+      expect(listed.length + rec.launchesDropped!).toBe(
+        rec.attacks.nation + rec.attacks.bot + rec.attacks.human,
+      );
+      const byType = (t: PlayerType) =>
+        listed.filter((l) => l.by.type === t).reduce((x, l) => x + l.troops, 0);
+      expect(
+        Math.abs(byType(PlayerType.Bot) - rec.attackTroops.bot),
+      ).toBeLessThanOrEqual(listed.length);
+      expect(
+        Math.abs(byType(PlayerType.Nation) - rec.attackTroops.nation),
+      ).toBeLessThanOrEqual(listed.length);
+      for (let i = 1; i < listed.length; i++) {
+        expect(listed[i].tick).toBeGreaterThanOrEqual(listed[i - 1].tick);
+      }
+      expect(rec.nukeLog!.length).toBe(
+        rec.nukes.atom + rec.nukes.hydrogen + rec.nukes.mirv,
+      );
       expect(rec.attacks.human).toBe(0);
       const nukes = Object.values(rec.nukes).reduce((x, y) => x + y, 0);
       expect(rec.firstNukeTick === null).toBe(nukes === 0);

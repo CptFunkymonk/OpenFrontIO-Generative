@@ -152,6 +152,9 @@ export const DERIVED_FIELDS = new Set<string>([
   "nearbyMemo",
   // SharedWaterCache
   "playerWater",
+  // WaterManager: graph-build scratch, made on the first build (a structural
+  // clone that copies the graph has none until it rebuilds; GameClone.ts)
+  "_builderBFS",
   // Config
   "unitInfoCache",
   // executions: basic

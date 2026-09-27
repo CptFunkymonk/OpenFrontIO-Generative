@@ -660,6 +660,29 @@ export class GameMapImpl implements GameMap {
     };
   }
 
+  /**
+   * An independent copy of this map as it is now: terrain with its edits,
+   * the edit log, owners, fallout and defense bits, and the counters. It is
+   * the map a snapshot restore rebuilds (restoreSnapshot on a fresh load,
+   * then every player's tiles written as owners), built by copying instead.
+   */
+  clone(): GameMapImpl {
+    const c = new GameMapImpl(
+      this.width_,
+      this.height_,
+      this.terrain.slice(),
+      this.numLandTiles_,
+    );
+    c.state.set(this.state);
+    c._numTilesWithFallout = this._numTilesWithFallout;
+    c.waterVersion_ = this.waterVersion_;
+    c.pristineTerrain =
+      this.pristineTerrain === null ? null : new Map(this.pristineTerrain);
+    // The map file's hash, when already computed: the copy has the same file.
+    c.pristineHashCache = this.pristineHashCache;
+    return c;
+  }
+
   /** Applies a snapshot to a map freshly loaded from the same map file. */
   restoreSnapshot(s: GameMapState): void {
     if (s.width !== this.width_ || s.height !== this.height_) {

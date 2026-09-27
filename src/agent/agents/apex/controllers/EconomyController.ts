@@ -1121,10 +1121,6 @@ export function planSam(
  */
 export class EconomyController implements Controller {
   readonly name = "economy";
-  /** Package B3 (o.hubDoom): the last city check that found a threat able
-   *  to destroy our SAM hub (samKiller), and that threat. */
-  private doomAt = Number.NEGATIVE_INFINITY;
-  private doomBy: SamKiller | null = null;
 
   decide(v: View, s: ApexState): void {
     const { o } = v;
@@ -1139,7 +1135,7 @@ export class EconomyController implements Controller {
             threats: nukeThreats(v.game, v.me, v.nukes, o),
           }
         : undefined;
-    if (nukes !== undefined && o.hubDoom) this.doom(v, nukes);
+    if (nukes !== undefined && o.hubDoom) this.doom(v, s, nukes);
     if (nukes !== undefined && this.sam(v, s, nukes)) return;
     const plan = planCity(v.game, v.me, o, nukes);
     if (typeof plan === "string") {
@@ -1152,7 +1148,7 @@ export class EconomyController implements Controller {
         v.log?.(
           `${v.tick} city ${plan}: threats ${threatList(nukes)} ` +
             `sam=${planSam(v.game, v.me, o, nukes) as string}` +
-            (nukes.doomed === true ? ` doom=${killerText(this.doomBy)}` : "") +
+            (nukes.doomed === true ? ` doom=${s.economy.doomBy ?? "-"}` : "") +
             ` gold=${v.me.gold()}`,
         );
       }
@@ -1211,29 +1207,31 @@ export class EconomyController implements Controller {
    * The hub's upkeep (o.hubDoom): with a finished SAM of ours, a threat
    * that samKiller finds able to destroy it (gold read o.samHorizon ticks
    * ahead, at least 0) dooms the hub for o.nukeMemory ticks (plan.doomed).
-   * Logged when it starts and once a minute while it holds.
+   * Logged when it starts and once a minute while it holds. The doom lives
+   * in s.economy (package WP1), so a rollout copy carries it.
    */
-  private doom(v: View, nukes: NukePlan): void {
+  private doom(v: View, s: ApexState, nukes: NukePlan): void {
     const { o } = v;
+    const mem = s.economy;
     const levels = hubLevels(v.game, v.me);
     if (levels > 0) {
       const k = samKiller(v.game, nukes, o, levels, Math.max(0, o.samHorizon));
       if (k !== null) {
-        const fresh = v.tick - this.doomAt > o.nukeMemory;
+        const fresh = v.tick - mem.doomAt > o.nukeMemory;
         if (
           fresh ||
-          Math.floor(v.tick / 600) !== Math.floor(this.doomAt / 600)
+          Math.floor(v.tick / 600) !== Math.floor(mem.doomAt / 600)
         ) {
           v.log?.(
             `${v.tick} hub doomed${fresh ? "" : " still"}: ${killerText(k)} ` +
               `interceptors=${levels} threats ${threatList(nukes)}`,
           );
         }
-        this.doomAt = v.tick;
-        this.doomBy = k;
+        mem.doomAt = v.tick;
+        mem.doomBy = killerText(k);
       }
     }
-    nukes.doomed = v.tick - this.doomAt <= o.nukeMemory;
+    nukes.doomed = v.tick - mem.doomAt <= o.nukeMemory;
   }
 
   /** The SAM hub rule (planSam): offers the SAM and returns true if it was

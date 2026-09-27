@@ -139,6 +139,29 @@ export class AbstractGraph {
     this._waterComponents = wc;
   }
 
+  /**
+   * An independent copy of this built graph that reads `wc`, with an empty
+   * path cache: what AbstractGraphBuilder returns for the same water. Nodes,
+   * edges and clusters are copied, not shared. (The builder fills every
+   * array densely, by id and cluster key.)
+   */
+  cloneWith(wc: ConnectedComponents | null): AbstractGraph {
+    const g = new AbstractGraph(
+      this.clusterSize,
+      this.clustersX,
+      this.clustersY,
+    );
+    for (const n of this._nodes) g._nodes.push({ ...n });
+    for (const e of this._edges) g._edges.push({ ...e });
+    for (const ids of this._nodeEdgeIds) g._nodeEdgeIds.push(ids.slice());
+    for (const c of this._clusters) {
+      g._clusters.push({ ...c, nodeIds: c.nodeIds.slice() });
+    }
+    g._initPathCache();
+    if (wc !== null) g.setWaterComponents(wc);
+    return g;
+  }
+
   getComponentId(tile: TileRef): number {
     return this._waterComponents?.getComponentId(tile) ?? 0;
   }

@@ -73,6 +73,36 @@ export interface Received {
   firstNukeTick: number | null;
   /** Who took the most of our tiles in the 600 ticks before we were out. */
   eliminatedBy: { name: string; type: string } | null;
+  // Added later (arena metrics, WP6); older result files lack them.
+  /** Each launch `attacks` counts, in order: the first MAX_ATTACK_RECORDS. */
+  launches?: ReceivedLaunch[];
+  launchesDropped?: number;
+  /** Each atom bomb, hydrogen bomb and MIRV `nukes` counts (its warheads
+   *  are only counted), the first MAX_ATTACK_RECORDS. */
+  nukeLog?: ReceivedNuke[];
+}
+
+/** An attack launched at a seat, as `Received.attacks` counts it. */
+export interface ReceivedLaunch {
+  /** A land attack's first tick; a boat's when it set sail. */
+  tick: number;
+  /** type is a PlayerType. */
+  by: { name: string; type: string };
+  /** As counted in attackTroops. */
+  troops: number;
+  boat: boolean;
+}
+
+/** A missile aimed at a seat, as `Received.nukes` counts it. */
+export interface ReceivedNuke {
+  /** When it was first seen: the tick it was launched. */
+  tick: number;
+  type: "atom" | "hydrogen" | "mirv";
+  by: { name: string; type: string };
+  /** The seat's land share then (TimelinePoint.share). */
+  share: number;
+  /** The sender's gold then, after paying for it. */
+  gold: number;
 }
 
 export interface AttackRecord {
@@ -554,17 +584,31 @@ export interface IncomingSighting {
   boat: boolean;
 }
 
+/** A launch at us as IncomingLog lists it: the attacker by smallID. */
+export interface LaunchEntry {
+  tick: number;
+  attacker: number;
+  type: PlayerType;
+  troops: number;
+  boat: boolean;
+}
+
 /** Counts the attacks one seat receives. */
 export class IncomingLog {
   readonly attacks: ByAttacker = { nation: 0, bot: 0, human: 0 };
   readonly attackTroops: ByAttacker = { nation: 0, bot: 0, human: 0 };
+  /** The launches counted with a tick (see `launched`), the first
+   *  MAX_ATTACK_RECORDS; `launchesDropped` counts the rest. */
+  readonly launches: LaunchEntry[] = [];
+  launchesDropped = 0;
   /** After each observe: troops each attacker's attacks on us held the tick
    *  before, plus those of its attacks on us that appeared in this one. */
   readonly opposing = new Map<number, number>();
   private last = new Map<string, IncomingSighting>();
 
-  /** Returns the attackers whose new attack on us appeared this tick. */
-  observe(sightings: readonly IncomingSighting[]): Set<number> {
+  /** Returns the attackers whose new attack on us appeared this tick, the
+   *  tick `tick` (its land launches are listed at it). */
+  observe(sightings: readonly IncomingSighting[], tick = 0): Set<number> {
     const now = new Map(sightings.map((s) => [s.id, s]));
     this.opposing.clear();
     const hold = (s: IncomingSighting) =>
@@ -588,16 +632,31 @@ export class IncomingLog {
       if (s.boat) continue;
       const absorbed = vanished.get(s.attacker) ?? 0;
       vanished.delete(s.attacker);
-      this.launched(s.attackerType, Math.max(0, s.troops - absorbed));
+      this.launched(s.attackerType, Math.max(0, s.troops - absorbed), {
+        tick,
+        attacker: s.attacker,
+        boat: false,
+      });
     }
     this.last = now;
     return counters;
   }
 
-  launched(type: PlayerType, troops: number): void {
+  /** Counts a launch at us; `at`, when given, lists it too. */
+  launched(
+    type: PlayerType,
+    troops: number,
+    at?: { tick: number; attacker: number; boat: boolean },
+  ): void {
     const k = attackerKey(type);
     this.attacks[k]++;
     this.attackTroops[k] += troops;
+    if (at === undefined) return;
+    if (this.launches.length < MAX_ATTACK_RECORDS) {
+      this.launches.push({ ...at, type, troops: Math.round(troops) });
+    } else {
+      this.launchesDropped++;
+    }
   }
 }
 
@@ -636,6 +695,8 @@ class SeatRecorder {
     mirvWarhead: 0,
   };
   firstNukeTick: number | null = null;
+  /** The missiles counted in `nukes` but warheads, the sender by smallID. */
+  readonly nukeLog: (Omit<ReceivedNuke, "by"> & { by: number })[] = [];
   eliminatedBy: Received["eliminatedBy"] = null;
   /** Our transport ships at sea, with the owner of their destination when
    *  they set sail. */
@@ -679,6 +740,7 @@ class SeatRecorder {
         troops: a.troops(),
         boat: a.sourceTile() !== null,
       })),
+      tick,
     );
     this.boats = this.boats.filter((b) => b.unit.isActive());
     this.log.observe({
@@ -819,6 +881,7 @@ export class ArenaRecorder {
       bot: Math.round(b.bot),
       human: Math.round(b.human),
     });
+    const by = (id: number) => this.lookup.describe(id);
     return {
       standings: s.standings,
       received: {
@@ -827,6 +890,14 @@ export class ArenaRecorder {
         nukes: { ...s.nukes },
         firstNukeTick: s.firstNukeTick,
         eliminatedBy: s.eliminatedBy,
+        launches: s.incoming.launches.map((l) => ({
+          tick: l.tick,
+          by: by(l.attacker),
+          troops: l.troops,
+          boat: l.boat,
+        })),
+        launchesDropped: s.incoming.launchesDropped,
+        nukeLog: s.nukeLog.map((n) => ({ ...n, by: by(n.by) })),
       },
       attacks: s.log.records,
       attacksDropped: s.log.dropped,
@@ -855,12 +926,25 @@ export class ArenaRecorder {
       const hit = this.seatOf[targetOwner];
       if (hit === 0 || targetOwner === u.ownerID) continue;
       const s = this.seats[hit - 1];
+      const attacker = this.game.playerBySmallID(u.ownerID);
       if (nuke !== undefined) {
         s.nukes[nuke]++;
         s.firstNukeTick ??= tick;
-      } else {
-        const attacker = this.game.playerBySmallID(u.ownerID);
-        if (attacker.isPlayer()) s.incoming.launched(attacker.type(), u.troops);
+        if (nuke !== "mirvWarhead" && s.nukeLog.length < MAX_ATTACK_RECORDS) {
+          s.nukeLog.push({
+            tick,
+            type: nuke,
+            by: u.ownerID,
+            share: round4(landShare(this.game, s.player)),
+            gold: attacker.isPlayer() ? Number(attacker.gold()) : 0,
+          });
+        }
+      } else if (attacker.isPlayer()) {
+        s.incoming.launched(attacker.type(), u.troops, {
+          tick,
+          attacker: u.ownerID,
+          boat: true,
+        });
       }
     }
   }

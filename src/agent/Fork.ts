@@ -11,7 +11,13 @@ import { GameMapLoader } from "../core/game/GameMapLoader";
 import { ErrorUpdate, GameUpdateViewData } from "../core/game/GameUpdates";
 import { loadTerrainMap, MapMetadata } from "../core/game/TerrainMapLoader";
 import { GameRunner } from "../core/GameRunner";
-import { ClientID, GameStartInfo, StampedIntent } from "../core/Schemas";
+import {
+  ClientID,
+  GameConfig,
+  GameStartInfo,
+  StampedIntent,
+} from "../core/Schemas";
+import { GameCloneSource } from "../core/snapshot/GameClone";
 import { restoreGame } from "../core/snapshot/GameSnapshot";
 import type { AgentIntent } from "./Agent";
 
@@ -82,24 +88,50 @@ export class TerrainSource {
  * Other players' future intents are unknowable, so a fork only simulates
  * what is already in motion (attacks, boats, nukes, the AI's own decisions,
  * which are part of the simulation) plus the intents you give it.
+ *
+ * Two ways to make one, with identical results:
+ * - `new GameFork(source, snapshot, terrain, ...)` restores snapshot bytes of
+ *   `source` onto fresh maps from `terrain`;
+ * - `GameFork.clone(source, ...)` and `ForkSource` copy `source` directly
+ *   (a structural clone, src/core/snapshot/GameClone.ts), several times
+ *   faster on large maps, with no TerrainSource.
  */
 export class GameFork {
   private lastError: ErrorUpdate | null = null;
   private turnNumber: number;
   private readonly runner: GameRunner;
 
+  /** Restores `snapshot`, taken of `source` at its current tick. */
   constructor(
     source: Game,
     snapshot: Uint8Array,
     terrain: TerrainSource,
     gameStart: GameStartInfo,
+    clientID: ClientID,
+  );
+  /** Wraps `game`, already a copy of `source` (see ForkSource). */
+  constructor(
+    source: Game,
+    game: Game,
+    terrain: null,
+    gameStart: GameStartInfo,
+    clientID: ClientID,
+  );
+  constructor(
+    source: Game,
+    snapshot: Uint8Array | Game,
+    terrain: TerrainSource | null,
+    gameStart: GameStartInfo,
     private readonly clientID: ClientID,
   ) {
-    const game = restoreGame(snapshot, {
-      config: (gc) => new Config(gc, null, false, gameStart.listed),
-      ...terrain.freshMaps(),
-      teamGameSpawnAreas: terrain.teamGameSpawnAreas,
-    });
+    const game =
+      snapshot instanceof Uint8Array
+        ? restoreGame(snapshot, {
+            config: forkConfig(gameStart),
+            ...terrain!.freshMaps(),
+            teamGameSpawnAreas: terrain!.teamGameSpawnAreas,
+          })
+        : snapshot;
     this.runner = new GameRunner(
       game,
       new Executor(
@@ -113,6 +145,15 @@ export class GameFork {
       },
     );
     this.turnNumber = source.ticks();
+  }
+
+  /** One fork of `source` at its current tick, by structural clone. */
+  static clone(
+    source: Game,
+    gameStart: GameStartInfo,
+    clientID: ClientID,
+  ): GameFork {
+    return new ForkSource(source, gameStart, clientID).fork();
   }
 
   get game(): Game {
@@ -142,4 +183,56 @@ export class GameFork {
   advance(ticks: number): void {
     for (let i = 0; i < ticks; i++) this.step();
   }
+}
+
+/** A fork's Config, as a restore of the game's snapshot would make it. */
+function forkConfig(gameStart: GameStartInfo) {
+  return (gc: GameConfig) => new Config(gc, null, false, gameStart.listed);
+}
+
+/**
+ * Forks of one game at one tick: the game's state is taken once (its
+ * snapshot records), and each fork is a structural clone of it, exactly
+ * what restoring the game's snapshot gives. Forks share nothing with each
+ * other or with the game.
+ *
+ * Every fork must be made before the game ticks again (`fork()` throws
+ * otherwise); forks can be stepped in between. To fork the same state
+ * later, keep a fork unstepped and make a ForkSource of its game.
+ */
+export class ForkSource {
+  private readonly source: GameCloneSource;
+
+  constructor(
+    private readonly game: Game,
+    private readonly gameStart: GameStartInfo,
+    private readonly clientID: ClientID,
+  ) {
+    this.source = GameCloneSource.take(game);
+  }
+
+  /** The tick the forks start at. */
+  ticks(): number {
+    return this.source.ticks();
+  }
+
+  fork(): GameFork {
+    const game = this.source.clone({ config: forkConfig(this.gameStart) });
+    return new GameFork(this.game, game, null, this.gameStart, this.clientID);
+  }
+
+  forks(n: number): GameFork[] {
+    return Array.from({ length: n }, () => this.fork());
+  }
+}
+
+/** `n` independent forks of `game` at its current tick: one snapshot of
+ *  its state, restored `n` times (see ForkSource). */
+export function forkMany(
+  game: Game,
+  gameStart: GameStartInfo,
+  clientID: ClientID,
+  n: number,
+): GameFork[] {
+  return new ForkSource(game, gameStart, clientID).forks(n);
 }

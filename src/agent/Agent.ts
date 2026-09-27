@@ -73,6 +73,14 @@ export interface AgentContext {
   budget(): IntentBudgetRemaining;
 
   /**
+   * The rate limiter's windows, read only, or null when rate limiting is
+   * off: what a rollout needs to mirror the budget exactly
+   * (BudgetMirror.fromContext). Optional: a context without it gets a
+   * conservative mirror.
+   */
+  budgetState?(): IntentBudgetState | null;
+
+  /**
    * Copies the game at this tick into an independent simulation that can be
    * stepped forward with hypothetical intents, for lookahead. Expensive on
    * large maps (a full snapshot and restore), so use it deliberately.
@@ -112,6 +120,24 @@ export type SendResult =
 export interface IntentBudgetRemaining {
   perSecond: number;
   perMinute: number;
+}
+
+/** One interval limiter of IntentBudget (a token bucket plus a fixed
+ *  window), times in the budget's clock (ms). */
+export interface LimiterState {
+  /** Tokens in the bucket (fractional). */
+  content: number;
+  lastDripMs: number;
+  windowStartMs: number;
+  usedInWindow: number;
+}
+
+/** IntentBudget's state: its clock's reading and both limiters, as their
+ *  last use left them (not brought up to `nowMs`). */
+export interface IntentBudgetState {
+  nowMs: number;
+  perSecond: LimiterState;
+  perMinute: LimiterState;
 }
 
 export interface AgentOutcome {
